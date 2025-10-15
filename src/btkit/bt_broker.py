@@ -1,131 +1,124 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Union
 
 from .bt_instrument import BtInstrument
+from .bt_instrument_details import BtInstrumentType
 
 
-class BtOrderAction(Enum):
+class BtOrderSide(Enum):
     BUY = "BUY"
     SELL = "SELL"
-
-
-class BtOrderType(Enum):
-    MKT = "MKT"
-    LMT = "LMT"
-    STP = "STP"
     
 
-@dataclass
+@dataclass 
 class BtOrder:
-    order_type: BtOrderType
-    order_action: BtOrderAction
     quantity: float
     instrument: BtInstrument
-    order_price: float = None
     
-    
+
 @dataclass
-class BtComplexOrderLeg:
-    order_action: BtOrderAction
+class BtPositionItem:
     quantity: float
     instrument: BtInstrument
+    open_price: float = field(init=False)
+
+
+    @property
+    def market_price(self) -> float:
+        price_col = "close"
+        if self.instrument.instrument_type == BtInstrumentType.OPTION:
+            price_col = f"{self.instrument.right.value[0].lower()}_last"
+        return self.quantity * self.instrument.multiplier * self.instrument.data.get(price_col)
+    
+    
+    @property
+    def is_expired(self) -> bool:
+        return self.instrument.data.now >= self.instrument.expiration_date 
+    
+    
+    @property
+    def pnl(self):
+        return self.open_price - self.market_price
+    
+    
+    def __post_init__(self):
+        self.open_price = self.market_price
         
+    
+    def __str__(self):
+        return f"{self.quantity}x {str(self.instrument)}"
+    
     
 @dataclass 
-class BtComplexOrder:
-    order_type: BtOrderType
-    legs: list[BtComplexOrderLeg]
-    order_price: float = None
-    
-        
-@dataclass
 class BtPosition:
-    quantity: float
-    instrument: BtInstrument
+    items: list[BtPositionItem]
+    open_side: BtOrderSide
+    open_price: float = field(init=False)
+    
+    
+    @property
+    def market_price(self) -> float:
+        return sum(item.market_price for item in self.items)
+    
+    
+    @property
+    def is_expired(self):
+        return any(item.is_expired for item in self.items)
+    
+    
+    @property
+    def pnl(self):
+        sign = -1 if self.open_side == BtOrderSide.SELL else 1
+        return sum(sign * item.pnl for item in self.items)
+    
+    
+    def __post_init__(self):
+        sign = -1 if self.open_side == BtOrderSide.SELL else 1
+        self.open_price = sign * sum(item.open_price for item in self.items)
+    
+    
+    def __str__(self):
+        return f"[{', '.join(str(item) for item in self.items)}]"
 
 
 class BtBroker:
     
-    def __init__(self, starting_balance: float):
-        self.cash_balance = starting_balance
-        self.orders: list[Union[BtOrder, BtComplexOrder]] = []
+    def __init__(self, starting_cash: float):
+        self.cash_balance = starting_cash
         self.positions: list[BtPosition] = []
+        self._now: datetime = None
+       
         
-    
     def tick(self, now: datetime):
+        self._now = now
         
         # Check if any positions are expired, and close them if so
-        for p in self.positions:
-            if p.instrument.expiration_date and p.instrument.expiration_date >= now:
-                close_action = BtOrderAction.SELL if p.quantity > 0 else BtOrderAction.BUY
-                close_order = BtOrder(BtOrderType.MKT, close_action, p.quantity, p.instrument)
-                self.orders.append(close_order)
+        for position in self.positions:
+            if position.is_expired:
+                self._print_message(f"Found expired position: {position}")
+                self.close_position(position)
         
-        # Check if any orders can be filled
-        for o in self.orders:
-            self._try_fill_order(o)
-                
-    
-    def place_order(self, order: Union[BtOrder, BtComplexOrder]): 
-        self.orders.append(order)
         
+    def open_position(self, side: BtOrderSide, *orders: BtOrder):
+        position = BtPosition([BtPositionItem(o.quantity, o.instrument) for o in orders], side)
+        
+        if self.cash_balance + position.open_price > 0: 
+            self.cash_balance += position.open_price
+            self.positions.append(position)
+            self._print_message(f"Opened new position: {position}")
             
-    # TODO: Close price wont exist for options!
-    def _get_mkr_price(self, order: Union[BtOrder, BtComplexOrder]) -> float:
-        if isinstance(order, BtComplexOrder):
-            mkt_price = 0
-            for leg in order.legs:
-                sign = -1 if leg.order_action == BtOrderAction.BUY else 1
-                mkt_price += sign * leg.quantity * leg.instrument.data.get("close")
-            return mkt_price
-        else: 
-            sign = -1 if order.order_action == BtOrderAction.BUY else 1
-            return sign * order.quantity * order.instrument.data.get("close")
-            
-    
-    def _fill_order(self, order: Union[BtOrder, BtComplexOrder], price: float):
-        # Update the account cash balance
-        self.cash_balance += price
-        
-        # Update the accout positions
-        if isinstance(order, BtComplexOrder):
-            for leg in order.legs:
-                sign = -1 if leg.order_action == BtOrderAction.BUY else 1
-                self.positions.append(BtPosition(sign * leg.quantity, leg.instrument))
-                self.orders.remove(order)
         else:
-            sign = -1 if order.order_action == BtOrderAction.BUY else 1
-            self.positions.append(BtPosition(sign * order.quantity, order.instrument))
-            self.orders.remove(order)
+            # TODO: Warn that position could not be opened!
+            pass
+
         
+    def close_position(self, position: BtPosition):
+        self.cash_balance += position.market_price
+        self.positions.remove(position)
+        self._print_message(f"Closed position {position}")
+            
     
-    def _try_fill_order(self, order: Union[BtOrder, BtComplexOrder]):
-        mkt_price = self._get_mkr_price(order)
+    def _print_message(self, message):
+        print(f"{self._now} | {message}")
         
-        if order.order_type == BtOrderType.MKT:
-            # Fill the order at market price
-            self._fill_order(order, mkt_price)
-            
-        elif order.order_type == BtOrderType.LMT:
-            # If market price is negative then we are buying
-            # Fill order if we can buy at or under the limit
-            if mkt_price < 0 and mkt_price <= order.order_price:
-                self._fill_order(order)      
-                
-            # If market price is positive then we are selling
-            # Fill order if we can sell at or above the limit
-            elif mkt_price > 0 and mkt_price >= order.order_price:
-                self._fill_order(order)
-            
-        elif order.order_type == BtOrderType.STP:
-            # If the market price is negative then we are buying
-            # Fill the order if market price has surpassed the stop price
-            if mkt_price < 0 and mkt_price >= order.order_price:
-                self._fill_order(order)
-                
-            # If the market price is positive then we are selling
-            # Fill the order if the market price as dopped below the stop price
-            elif mkt_price > 0 and mkt_price <= order.order_price:
-                self._fill_order(order)

@@ -31,11 +31,22 @@ class BtInstrument:
     def right(self) -> BtOptionRight:
         return self.instrument_details.right
     
+    @property
+    def multiplier(self) -> int:
+        return self.instrument_details.multiplier
     
-    def __init__(self, data_db_path: str, instrument_type: BtInstrumentType, symbol: str, expiration_date: datetime = None, strike: float = None, right: BtOptionRight = None):
-        self.instrument_details = BtInstrumentDetails(data_db_path, instrument_type, symbol, expiration_date, strike, right)
+    
+    def __init__(self, data_db_path: str, instrument_type: BtInstrumentType, symbol: str, expiration_date: datetime = None, strike: float = None, right: BtOptionRight = None, multiplier: int = 1):
+        self.instrument_details = BtInstrumentDetails(data_db_path, instrument_type, symbol, expiration_date, strike, right, multiplier)
         self.data = BtDataStream(self.instrument_details)
         
     
     def init_options_chain(self, max_dte: int = 30, max_strike_dist: float = 100) -> None:
         self.options_chain = BtOptionsChain(self.instrument_details, max_dte, max_strike_dist)
+
+
+    def __str__(self):
+        string = f"{self.symbol}"
+        if self.instrument_type == BtInstrumentType.OPTION:
+            string += f" {self.expiration_date.strftime('%Y%m%d')} {self.strike} {self.right.value}"
+        return string

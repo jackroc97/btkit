@@ -22,4 +22,4 @@ class BtInstrumentDetails:
     expiration_date: datetime
     strike: float
     right: BtOptionRight
-    
+    multiplier: int = 1
