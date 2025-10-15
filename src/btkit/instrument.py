@@ -1,18 +1,18 @@
 from datetime import datetime
 
-from .bt_data_stream import BtDataStream
-from .bt_instrument_details import BtInstrumentDetails, BtOptionRight, BtInstrumentType
-from .bt_options_chain import BtOptionsChain
+from .data_stream import DataStream
+from .instrument_details import InstrumentDetails, OptionRight, InstrumentType
+from .option_chain import OptionChain
     
 
-class BtInstrument:
+class Instrument:
     
     @property
     def data_db_path(self) -> str:
         return self.instrument_details.data_db_path
     
     @property
-    def instrument_type(self) -> BtInstrumentType:
+    def instrument_type(self) -> InstrumentType:
         return self.instrument_details.instrument_type
     
     @property
@@ -28,7 +28,7 @@ class BtInstrument:
         return self.instrument_details.strike
     
     @property
-    def right(self) -> BtOptionRight:
+    def right(self) -> OptionRight:
         return self.instrument_details.right
     
     @property
@@ -36,17 +36,17 @@ class BtInstrument:
         return self.instrument_details.multiplier
     
     
-    def __init__(self, data_db_path: str, instrument_type: BtInstrumentType, symbol: str, expiration_date: datetime = None, strike: float = None, right: BtOptionRight = None, multiplier: int = 1):
-        self.instrument_details = BtInstrumentDetails(data_db_path, instrument_type, symbol, expiration_date, strike, right, multiplier)
-        self.data = BtDataStream(self.instrument_details)
+    def __init__(self, data_db_path: str, instrument_type: InstrumentType, symbol: str, expiration_date: datetime = None, strike: float = None, right: OptionRight = None, multiplier: int = 1):
+        self.instrument_details = InstrumentDetails(data_db_path, instrument_type, symbol, expiration_date, strike, right, multiplier)
+        self.data = DataStream(self.instrument_details)
         
     
     def init_options_chain(self, max_dte: int = 30, max_strike_dist: float = 100) -> None:
-        self.options_chain = BtOptionsChain(self.instrument_details, max_dte, max_strike_dist)
+        self.options_chain = OptionChain(self.instrument_details, max_dte, max_strike_dist)
 
 
     def __str__(self):
         string = f"{self.symbol}"
-        if self.instrument_type == BtInstrumentType.OPTION:
+        if self.instrument_type == InstrumentType.OPTION:
             string += f" {self.expiration_date.strftime('%Y%m%d')} {self.strike} {self.right.value}"
         return string

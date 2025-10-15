@@ -3,23 +3,23 @@ from datetime import datetime
 from enum import Enum
 
 
-class BtInstrumentType(Enum):
+class InstrumentType(Enum):
     STOCK = "STOCK"
     FUTURE = "FUTURE"
     OPTION = "OPTION"
     
     
-class BtOptionRight(Enum):
+class OptionRight(Enum):
     CALL = "CALL"
     PUT = "PUT"
     
 
 @dataclass
-class BtInstrumentDetails:
+class InstrumentDetails:
     data_db_path: str
-    instrument_type: BtInstrumentType
+    instrument_type: InstrumentType
     symbol: str
     expiration_date: datetime
     strike: float
-    right: BtOptionRight
+    right: OptionRight
     multiplier: int = 1

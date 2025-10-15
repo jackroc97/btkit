@@ -1,31 +1,31 @@
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 
-from .bt_broker import BtBroker
-from .bt_data_stream import BtDataStream
-from .bt_options_chain import BtOptionsChain
+from .broker import Broker
+from .data_stream import DataStream
+from .option_chain import OptionChain
 
 
 @dataclass
-class BtDateSettings:
+class DateSettings:
     day_start: time = time(0, 0, 0)
     day_end: time = time(23, 59, 59, 999999)
     weekday_only: bool = False
     skip_dates: set[date] = field(default_factory=set)
     
 
-class BtStrategy:
+class Strategy:
     name: str
     version: str
     log_db_path: str
         
-    def __init__(self, starting_balance: float, start_time: datetime, end_time: datetime, time_step: timedelta, date_settings: BtDateSettings = None):
+    def __init__(self, starting_balance: float, start_time: datetime, end_time: datetime, time_step: timedelta, date_settings: DateSettings = None):
         self.start_time = start_time
         self.end_time = end_time
         self.time_step = time_step
         self.now = start_time
-        self.date_settings = date_settings or BtDateSettings()        
-        self.broker = BtBroker(starting_balance)
+        self.date_settings = date_settings or DateSettings()        
+        self.broker = Broker(starting_balance)
         
     
     def run(self):
@@ -33,8 +33,8 @@ class BtStrategy:
         while self.now <= self.end_time:
             if self._should_tick():
                 self.tick()
-            BtDataStream.update_time(self.now)
-            BtOptionsChain.update_time(self.now)
+            DataStream.update_time(self.now)
+            OptionChain.update_time(self.now)
             self.broker.tick(self.now)
             self.now += self.time_step
         self.on_stop()

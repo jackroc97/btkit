@@ -3,13 +3,13 @@ import sqlite3
 
 from datetime import date, datetime, timedelta
 
-from .bt_instrument import BtInstrumentDetails
+from .instrument import InstrumentDetails
 
 
-class BtOptionsChain:
+class OptionChain:
     now: datetime
     
-    def __init__(self, instrument_details: BtInstrumentDetails, max_dte: int = 30, max_strike_dist: int = 100) -> None:
+    def __init__(self, instrument_details: InstrumentDetails, max_dte: int = 30, max_strike_dist: int = 100) -> None:
         self.instrument_details = instrument_details
         self.max_dte = max_dte
         self.max_strike_dist = max_strike_dist
@@ -35,8 +35,8 @@ class BtOptionsChain:
     
     
     def as_df(self) -> pd.DataFrame:
-        start_datetime = int(BtOptionsChain.now.timestamp())
-        end_datetime = int((BtOptionsChain.now + timedelta(days=self.max_dte)).timestamp())
+        start_datetime = int(OptionChain.now.timestamp())
+        end_datetime = int((OptionChain.now + timedelta(days=self.max_dte)).timestamp())
         
         try:
             conn = sqlite3.connect(self.instrument_details.data_db_path)

@@ -2,32 +2,32 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
-from .bt_instrument import BtInstrument
-from .bt_instrument_details import BtInstrumentType
+from .instrument import Instrument
+from .instrument_details import InstrumentType
 
 
-class BtOrderSide(Enum):
+class OrderAction(Enum):
     BUY = "BUY"
     SELL = "SELL"
     
 
 @dataclass 
-class BtOrder:
+class Order:
     quantity: float
-    instrument: BtInstrument
+    instrument: Instrument
     
 
 @dataclass
-class BtPositionItem:
+class PositionItem:
     quantity: float
-    instrument: BtInstrument
+    instrument: Instrument
     open_price: float = field(init=False)
 
 
     @property
     def market_price(self) -> float:
         price_col = "close"
-        if self.instrument.instrument_type == BtInstrumentType.OPTION:
+        if self.instrument.instrument_type == InstrumentType.OPTION:
             price_col = f"{self.instrument.right.value[0].lower()}_last"
         return self.quantity * self.instrument.multiplier * self.instrument.data.get(price_col)
     
@@ -51,9 +51,9 @@ class BtPositionItem:
     
     
 @dataclass 
-class BtPosition:
-    items: list[BtPositionItem]
-    open_side: BtOrderSide
+class Position:
+    items: list[PositionItem]
+    open_side: OrderAction
     open_price: float = field(init=False)
     
     
@@ -69,12 +69,12 @@ class BtPosition:
     
     @property
     def pnl(self):
-        sign = -1 if self.open_side == BtOrderSide.SELL else 1
+        sign = -1 if self.open_side == OrderAction.SELL else 1
         return sum(sign * item.pnl for item in self.items)
     
     
     def __post_init__(self):
-        sign = -1 if self.open_side == BtOrderSide.SELL else 1
+        sign = -1 if self.open_side == OrderAction.SELL else 1
         self.open_price = sign * sum(item.open_price for item in self.items)
     
     
@@ -82,11 +82,11 @@ class BtPosition:
         return f"[{', '.join(str(item) for item in self.items)}]"
 
 
-class BtBroker:
+class Broker:
     
     def __init__(self, starting_cash: float):
         self.cash_balance = starting_cash
-        self.positions: list[BtPosition] = []
+        self.positions: list[Position] = []
         self._now: datetime = None
        
         
@@ -100,8 +100,9 @@ class BtBroker:
                 self.close_position(position)
         
         
-    def open_position(self, side: BtOrderSide, *orders: BtOrder):
-        position = BtPosition([BtPositionItem(o.quantity, o.instrument) for o in orders], side)
+    # TODO: Can we make OrderSide value either -1 SELL or 1 BUY and use that directly in the math...?
+    def open_position(self, side: OrderAction, *orders: Order):
+        position = Position([PositionItem(o.quantity, o.instrument) for o in orders], side)
         
         if self.cash_balance + position.open_price > 0: 
             self.cash_balance += position.open_price
@@ -112,8 +113,8 @@ class BtBroker:
             # TODO: Warn that position could not be opened!
             pass
 
-        
-    def close_position(self, position: BtPosition):
+    
+    def close_position(self, position: Position):
         self.cash_balance += position.market_price
         self.positions.remove(position)
         self._print_message(f"Closed position {position}")

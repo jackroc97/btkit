@@ -4,13 +4,13 @@ import warnings
 
 from datetime import datetime
 
-from .bt_instrument_details import BtInstrumentDetails, BtInstrumentType
+from .instrument_details import InstrumentDetails, InstrumentType
 
 
-class BtDataStream:
+class DataStream:
     now: datetime
 
-    def __init__(self, instrument_details: BtInstrumentDetails) -> None:
+    def __init__(self, instrument_details: InstrumentDetails) -> None:
         self.instrument_details = instrument_details
          
         try:
@@ -25,7 +25,7 @@ class BtDataStream:
             
             # If the instrument is an option, pull data from the options table
             # Otherwise, pull data from the ohlcv table
-            if self.instrument_details.instrument_type == BtInstrumentType.OPTION:
+            if self.instrument_details.instrument_type == InstrumentType.OPTION:
                 if not self.options_table:
                     raise ValueError(f"Could not find options table for {self.instrument_details.symbol}")
                 exp_time = self.instrument_details.expiration_date.timestamp()
@@ -59,7 +59,7 @@ class BtDataStream:
         
         
     def exists(self, at_time: datetime = None, bars_ago: int = None) -> bool:
-        at_time = at_time or BtDataStream.now
+        at_time = at_time or DataStream.now
         if not bars_ago:
             return at_time.timestamp() in self._df.index
         else:
@@ -68,7 +68,7 @@ class BtDataStream:
         
         
     def get(self, name: str, at_time: datetime = None, bars_ago: int = None) -> any:
-        at_time = at_time or BtDataStream.now
+        at_time = at_time or DataStream.now
         if self.exists(at_time=at_time, bars_ago=bars_ago):            
             if not bars_ago:
                 return self._df.loc[at_time.timestamp(), name]
@@ -81,7 +81,7 @@ class BtDataStream:
         
 
     def _get_next(self, name: str, at_time: datetime = None, bars_ago: int = None) -> any:
-        at_time = at_time or BtDataStream.now
+        at_time = at_time or DataStream.now
         if not bars_ago:
             next_index = self._df.index[self._df.index > at_time.timestamp()]
             if not next_index.empty:
