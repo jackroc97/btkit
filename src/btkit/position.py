@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field, _DefaultFactory
+from dataclasses import dataclass, field
 from uuid import uuid4
 
 from .instrument import Instrument, InstrumentType
@@ -9,8 +9,9 @@ from .order import OrderAction
 class PositionItem:
     quantity: float
     instrument: Instrument
+    open_action: OrderAction
     open_price: float = field(init=False)
-    uuid: float = _DefaultFactory(uuid4)
+    uuid: float = field(default_factory=uuid4)
 
 
     @property
@@ -18,7 +19,8 @@ class PositionItem:
         price_col = "close"
         if self.instrument.instrument_type == InstrumentType.OPTION:
             price_col = f"{self.instrument.right.value[0].lower()}_last"
-        return self.quantity * self.instrument.multiplier * self.instrument.data.get(price_col)
+        sign = 1 if self.open_action == OrderAction.STO else -1
+        return sign * abs(self.quantity) * self.instrument.multiplier * self.instrument.data.get(price_col)
     
     
     @property
@@ -42,9 +44,8 @@ class PositionItem:
 @dataclass 
 class Position:
     items: list[PositionItem]
-    open_action: OrderAction
     open_price: float = field(init=False)
-    uuid: float = _DefaultFactory(uuid4)
+    uuid: float = field(default_factory=uuid4)
     
     
     @property
@@ -59,13 +60,11 @@ class Position:
     
     @property
     def pnl(self):
-        sign = -1 if self.open_action == OrderAction.SELL else 1
-        return sum(sign * item.pnl for item in self.items)
+        return sum(item.pnl for item in self.items)
     
     
     def __post_init__(self):
-        sign = -1 if self.open_action == OrderAction.SELL else 1
-        self.open_price = sign * sum(item.open_price for item in self.items)
+        self.open_price = sum(item.open_price for item in self.items)
     
     
     def __str__(self):

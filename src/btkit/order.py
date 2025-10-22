@@ -5,8 +5,10 @@ from .instrument import Instrument
 
 
 class OrderAction(Enum):
-    BUY = "BUY"
-    SELL = "SELL"
+    BTO = "BUY_TO_OPEN"
+    STO = "SELL_TO_OPEN"
+    BTC = "BUY_TO_CLOSE"
+    STC = "SELL_TO_CLOSE"
     
 
 @dataclass 

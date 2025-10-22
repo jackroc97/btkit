@@ -2,16 +2,9 @@ import os
 import sqlite3
 
 from datetime import datetime
-from enum import Enum
 
+from .order import OrderAction
 from .position import Position
-
-
-class TradeAction(Enum):
-    BTO = "BUY_TO_OPEN"
-    STO = "SELL_TO_OPEN"
-    BTC = "BUY_TO_CLOSE"
-    STC = "SELL_TO_CLOSE"
 
 
 class Logger:
@@ -55,12 +48,15 @@ class Logger:
         self.con.close()
 
 
-    def log_trade(self, trade_time: datetime, trade_action: TradeAction, position: Position):
+    def log_trade(self, trade_time: datetime, position: Position, is_closing: bool = False):
         cur = self.con.cursor() 
         for item in position.items:   
+            trade_action = item.open_action
+            if is_closing:
+                trade_action = OrderAction.STC if item.open_action == OrderAction.BTO else OrderAction.BTC
             cur.execute(f'''
                 INSERT or IGNORE INTO trade(session_id, position_uuid, position_item_uuid, time, action, quantity, mkt_price, symbol, expiration, strike, right, multiplier)
-                VALUES({self.session_id}, '{position.uuid}', '{item.uuid}', '{trade_time.strftime("%Y-%m-%d %H:%M:%S%z")}', '{trade_action}', {item.quantity}, {item.market_price}, '{item.instrument.symbol}', '{item.instrument.expiration_date}', {item.instrument.strike}, '{item.instrument.right.value}', {item.instrument.multiplier})
+                VALUES({self.session_id}, '{position.uuid}', '{item.uuid}', '{trade_time.strftime("%Y-%m-%d %H:%M:%S%z")}', '{trade_action.value}', {item.quantity}, {item.market_price}, '{item.instrument.symbol}', '{item.instrument.expiration_date}', {item.instrument.strike}, '{item.instrument.right.value}', {item.instrument.multiplier})
             ''')
         self.con.commit()
         return cur.lastrowid
@@ -111,6 +107,7 @@ class Logger:
                 strike              REAL,
                 right               TEXT,
                 multiplier          REAL,
+                FOREIGN KEY(session_id) REFERENCES session(id)
             )
             """
         cur.execute(create_trades_table)
