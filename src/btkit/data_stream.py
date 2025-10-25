@@ -1,57 +1,14 @@
 import pandas as pd
-import sqlite3
 import warnings
 
 from datetime import datetime
-
-from .instrument_details import InstrumentDetails, InstrumentType
 
 
 class DataStream:
     now: datetime
 
-    def __init__(self, instrument_details: InstrumentDetails) -> None:
-        self.instrument_details = instrument_details
-         
-        try:
-            # Connect to the database and pull metadata for the underlying instrument
-            conn = sqlite3.connect(self.instrument_details.data_db_path)
-            cursor = conn.cursor()
-            query = f"SELECT * FROM instrument WHERE symbol == '{self.instrument_details.symbol}' LIMIT 1"
-            cursor.execute(query)
-            instrument_info = cursor.fetchone()
-            self.ohlcv_table = instrument_info[2]
-            self.options_table = instrument_info[4]
-            
-            # If the instrument is an option, pull data from the options table
-            # Otherwise, pull data from the ohlcv table
-            if self.instrument_details.instrument_type == InstrumentType.OPTION:
-                if not self.options_table:
-                    raise ValueError(f"Could not find options table for {self.instrument_details.symbol}")
-                exp_time = self.instrument_details.expiration_date.timestamp()
-                query = f"""
-                    SELECT DISTINCT * FROM {self.options_table}
-                    WHERE 
-                        expire_unix == {int(exp_time)}
-                        AND strike == {int(self.instrument_details.strike)}
-                """
-                self._df = pd.read_sql_query(query, conn, index_col="quote_unixtime")
-            elif self.ohlcv_table:
-                query = f"SELECT * FROM {self.ohlcv_table}"
-                self._df = pd.read_sql_query(query, conn, index_col="date")
-            
-            # Check for empty or duplicated data
-            if self._df.empty:
-                raise ValueError(f"No data found for symbol {self.instrument_details.symbol}")
-            elif self._df.index.duplicated().any():
-                self._df = self._df[~self._df.index.duplicated(keep='first')]
-                warnings.warn(f"Data for symbol {self.instrument_details.symbol} contains duplicates. Duplicates have been removed.")
-        except sqlite3.Error as e:
-            raise ValueError(f"No data found for symbol {self.instrument_details.symbol}")
-        finally:
-            if conn:
-                conn.close()
-        
+    def __init__(self, df: pd.DataFrame) -> None:
+        self._df = df
         
     @classmethod
     def update_time(cls, now) -> None:
