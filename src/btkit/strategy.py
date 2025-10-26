@@ -4,7 +4,7 @@ from datetime import date, datetime, time, timedelta
 from .broker import Broker
 from .logger import Logger
 from .data_stream import DataStream
-from .option_chain import OptionChain
+from .instrument import DataStore
 
 
 @dataclass
@@ -35,8 +35,8 @@ class Strategy:
         while self.now <= self.end_time:
             if self._should_tick():
                 self.tick()
+            DataStore.update_time(self.now)
             DataStream.update_time(self.now)
-            OptionChain.update_time(self.now)
             self.broker.tick(self.now)
             self.now += self.time_step
         self.on_stop()
