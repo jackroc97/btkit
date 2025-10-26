@@ -37,22 +37,22 @@ class Instrument:
     
         
     @classmethod
-    def stock(cls, symbol: str):
-        return cls(InstrumentType.STK, symbol, data=DataStore.get_stock_or_future_data(symbol))
+    def stock(cls, symbol: str) -> 'Instrument':
+        return cls(InstrumentType.STK, symbol, data=DataStore.get_stock_or_future_data(symbol)) 
     
     
     @classmethod
-    def future(cls, symbol: str, base_symbol: str, expiration_date: datetime):
+    def future(cls, symbol: str, base_symbol: str, expiration_date: datetime) -> 'Instrument':
         return cls(InstrumentType.FUT, symbol, base_symbol, expiration_date, data=DataStore.get_stock_or_future_data(symbol))
     
     
     @classmethod
-    def continuous_future(cls, symbol: str):
+    def continuous_future(cls, symbol: str) -> 'Instrument':
         return cls(InstrumentType.CFT, symbol, symbol, data=DataStore.get_continuous_future_data(symbol))
 
 
     @classmethod
-    def option(cls, underlying: 'Instrument', expiration_date: datetime, strike: float, right: OptionRight, multiplier: int = 100):
+    def option(cls, underlying: 'Instrument', expiration_date: datetime, strike: float, right: OptionRight, multiplier: int = 100) -> 'Instrument':
         opt_type = InstrumentType.OPT if underlying.instrument_type != InstrumentType.FUT else InstrumentType.FOP
         symbol = DataStore.get_option_symbol(underlying, expiration_date, strike, right)
         opt = cls(opt_type, symbol, underlying.base_symbol, expiration_date=expiration_date, underlying=underlying, strike=strike, right=right, multiplier=multiplier)
@@ -70,15 +70,12 @@ class DataStore:
     now: datetime
     database_path: str = ""
     _connection: duckdb.DuckDBPyConnection = None
-    
-    @property
-    def database_path(self) -> str:
-        return self.database_path
-    
-    @database_path.setter
-    def database_path(self, path: str) -> None:
-        self.database_path = path
-        self._connection = duckdb.connect(database=self.database_path, read_only=True)
+            
+    @classmethod
+    def connect_database(cls, path: str) -> None:
+        cls.database_path = path
+        cls._connection = duckdb.connect(database=cls.database_path, read_only=True)
+            
             
     @classmethod
     def update_time(cls, now) -> None:
