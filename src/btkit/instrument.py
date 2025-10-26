@@ -214,7 +214,7 @@ class DataStore:
     def get_option_chain(cls, instrument: Instrument, time_tol: timedelta = timedelta(minutes=15), max_dte: int = 30, max_strike_dist: float = 100) -> pd.DataFrame:
 
         symbol = instrument.underlying.base_symbol if instrument.underlying else instrument.base_symbol
-        underlying_last = instrument.underlying.data.get("close")
+        underlying_last = instrument.data.get("close")
         tol_seconds = int(time_tol.total_seconds())
 
         # 1) SQL: find option defs that match underlying symbol prefix and strike/dte constraints,
