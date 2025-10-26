@@ -60,7 +60,7 @@ class Instrument:
         return opt
 
     
-    def get_option_chain(self, max_dte: int = 30, max_strike_dist: float = 100) -> OptionChain:
+    def get_option_chain(self, max_dte: int = 30, max_strike_dist: float = 100) -> pd.DataFrame:
         if self.instrument_type not in {InstrumentType.STK, InstrumentType.CFT, InstrumentType.FUT}:
             raise ValueError("Option chain can only be retrieved for stock or future instruments.")
         return DataStore.get_option_chain(self, max_dte, max_strike_dist)
