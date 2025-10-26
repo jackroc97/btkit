@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from enum import Enum
 
 from .black76 import Black76
@@ -28,7 +28,7 @@ class Instrument:
     instrument_type: InstrumentType
     symbol: str
     base_symbol: str = None
-    expiration_date: datetime = None
+    expiration_date: date = None
     underlying: 'Instrument' = None
     strike: float = None
     right: OptionRight = None
@@ -42,7 +42,7 @@ class Instrument:
     
     
     @classmethod
-    def future(cls, symbol: str, base_symbol: str, expiration_date: datetime) -> 'Instrument':
+    def future(cls, symbol: str, base_symbol: str, expiration_date: date) -> 'Instrument':
         return cls(InstrumentType.FUT, symbol, base_symbol, expiration_date, data=DataStore.get_stock_or_future_data(symbol))
     
     
@@ -52,7 +52,7 @@ class Instrument:
 
 
     @classmethod
-    def option(cls, underlying: 'Instrument', expiration_date: datetime, strike: float, right: OptionRight, multiplier: int = 100) -> 'Instrument':
+    def option(cls, underlying: 'Instrument', expiration_date: date, strike: float, right: OptionRight, multiplier: int = 100) -> 'Instrument':
         opt_type = InstrumentType.OPT if underlying.instrument_type != InstrumentType.FUT else InstrumentType.FOP
         symbol = DataStore.get_option_symbol(underlying, expiration_date, strike, right)
         opt = cls(opt_type, symbol, underlying.base_symbol, expiration_date=expiration_date, underlying=underlying, strike=strike, right=right, multiplier=multiplier)
@@ -159,7 +159,7 @@ class DataStore:
     
     
     @classmethod 
-    def get_option_symbol(cls, underlying: Instrument, expiration_date: datetime, strike: float, right: OptionRight) -> str:
+    def get_option_symbol(cls, underlying: Instrument, expiration_date: date, strike: float, right: OptionRight) -> str:
         query = f"""
             SELECT symbol
             FROM definition
