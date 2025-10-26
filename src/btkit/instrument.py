@@ -8,7 +8,6 @@ from enum import Enum
 
 from .black76 import Black76
 from .data_stream import DataStream
-from .option_chain import OptionChain
     
     
 class InstrumentType(Enum):
