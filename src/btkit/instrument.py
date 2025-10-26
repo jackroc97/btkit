@@ -211,7 +211,7 @@ class DataStore:
         
             
     @classmethod
-    def get_option_chain(cls, instrument: Instrument, time_tol: timedelta = timedelta(minutes=15), max_dte: int = 30, max_strike_dist: float = 100) -> pd.DataFrame:
+    def get_option_chain(cls, instrument: Instrument, max_dte: int = 30, max_strike_dist: float = 100, time_tol: timedelta = timedelta(minutes=15)) -> pd.DataFrame:
 
         symbol = instrument.underlying.base_symbol if instrument.underlying else instrument.base_symbol
         underlying_last = instrument.data.get("close")
