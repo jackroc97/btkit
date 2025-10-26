@@ -253,7 +253,7 @@ class DataStore:
         df = cls._connection.execute(sql).fetch_df()
 
         # close DB connection early
-        cls._connection.close()
+        #cls._connection.close()
 
         if df.empty:
             # return empty dataframe with expected columns
