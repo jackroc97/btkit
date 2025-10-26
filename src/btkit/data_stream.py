@@ -33,7 +33,7 @@ class DataStream:
                 # TODO: Implement
                 raise NotImplementedError("Method get with bars_ago parameter is not implemented.")
         else:
-            warnings.warn(f"Data for {name} at {at_time} does not exist in symbol {self.instrument_details.symbol}. Returning next available data.")
+            warnings.warn(f"Data for {name} at {at_time} does not exist in symbol. Returning next available data.")
             return self._get_next(name, at_time=at_time, bars_ago=bars_ago)
         
 

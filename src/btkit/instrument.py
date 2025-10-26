@@ -152,9 +152,10 @@ class DataStore:
         df['close'] = df['close'] * df['adj_factor']
         
         # Final cleanup
-        df = df[['ts', 'close']]
-        df.reset_index(drop=True, inplace=True)
-        return df
+        df = df[['ts', 'ts_unix', 'close']]
+        df = df.set_index("ts_unix").sort_index()
+        #df.reset_index(drop=True, inplace=True)
+        return DataStream(df)
     
     
     @classmethod 
@@ -264,7 +265,7 @@ class DataStore:
         df['expiration'] = pd.to_datetime(df['expiration'])
         df['option_ts'] = pd.to_datetime(df['ts_unix'], unit='s')
         # T in years (positive; clamp to small positive)
-        df['T'] = (df['expiration'] - cls.now.date()).dt.total_seconds() / (365.0 * 24 * 3600)
+        df['T'] = (df['expiration'] - pd.Timestamp(cls.now.date())).dt.total_seconds() / (365.0 * 24 * 3600)
         df['T'] = df['T'].clip(lower=1e-6)
 
         # Normalize option_right string
