@@ -6,7 +6,6 @@ from scipy.stats import norm
 
 class Black76:
     
-    
     @classmethod
     def option_price(cls, F, K, T, r, sigma, option_type):
         """Black-76 price for a futures option."""
