@@ -1,75 +1,115 @@
 import duckdb
 import numpy as np
 import pandas as pd
+import warnings
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from enum import Enum
 
 from .black76 import Black76
-from .data_stream import DataStream
-    
-    
-class InstrumentType(Enum):
-    STK = "STOCK"
-    FUT = "FUTURE"
-    CFT = "CONTINUOUS_FUTURE"
-    OPT = "OPTION"
-    FOP = "FUTURE_OPTION"
-    
-    
+
+
+# TODO: replace InstrumentStore.now with Strategy.now (or Backtest.now??)
+# TODO: determine if continuous futures make sense as implemented
+# I dont think they do... will be confusing the underlying prices for the actual future and the continuous future
+
 class OptionRight(Enum):
     CALL = "CALL"
     PUT = "PUT"
     
-  
+    
 @dataclass
 class Instrument:
-    instrument_type: InstrumentType
+    instrument_id: int
     symbol: str
-    base_symbol: str = None
-    expiration_date: date = None
-    underlying: 'Instrument' = None
-    strike: float = None
-    right: OptionRight = None
-    multiplier: int = 1
-    data: DataStream = None
+    _df: pd.DataFrame = field(init=False, default_factory=pd.DataFrame, repr=False)
     
+    def __post_init__(self):
+        self._df = InstrumentStore.ohlcv_for_instrument_id(self.instrument_id)
+    
+    
+    def exists(self, at_time: datetime = None, bars_ago: int = None) -> bool:
+        at_time = at_time or InstrumentStore.now
+        if not bars_ago:
+            return at_time.timestamp() in self._df.index
+        else:
+            # TODO: Implement
+            raise NotImplementedError("Method exists with bars_ago parameter is not implemented.")
         
-    @classmethod
-    def stock(cls, symbol: str) -> 'Instrument':
-        return cls(InstrumentType.STK, symbol, data=DataStore.get_stock_or_future_data(symbol)) 
+        
+    def get(self, name: str, at_time: datetime = None, bars_ago: int = None) -> any:
+        at_time = at_time or InstrumentStore.now
+        if self.exists(at_time=at_time, bars_ago=bars_ago):            
+            if not bars_ago:
+                return self._df.loc[at_time.timestamp(), name]
+            else:
+                # TODO: Implement
+                raise NotImplementedError("Method get with bars_ago parameter is not implemented.")
+        else:
+            warnings.warn(f"Data for {name} at {at_time} does not exist in symbol. Returning next available data.")
+            return self.get_next(name, at_time=at_time, bars_ago=bars_ago)
+        
+        
+    def get_next(self, name: str, at_time: datetime = None, bars_ago: int = None) -> any:
+        at_time = at_time or InstrumentStore.now
+        if not bars_ago:
+            next_index = self._df.index[self._df.index > at_time.timestamp()]
+            if not next_index.empty:
+                return self._df.loc[next_index[0], name]
+            else:
+                raise ValueError(f"No data found for {name} after {at_time} on symbol {self.symbol}")
+        else:
+            # TODO: Implement
+            raise NotImplementedError("Method get_next with bars_ago parameter is not implemented.")
+        
+
+@dataclass
+class Future(Instrument):
+    expiration: datetime
+    
+    def get_option_chain(self, max_strike_dist: float = 200, max_dte: int = 30, time_tol: timedelta = timedelta(minutes=15)): 
+        t0 = datetime.now()
+        df = InstrumentStore.option_chain_for_instrument_id(self.instrument_id, self.get("close"), max_strike_dist, max_dte, time_tol)
+        t1 = datetime.now()
+        df["sigma"] = df.apply(Black76.sigma, axis=1)
+        t2 = datetime.now()
+        df["delta"] = df.apply(Black76.delta, axis=1)
+        t3 = datetime.now()
+        print(f"Time to query database = {t1-t0}")
+        print(f"Time to compute sigma = {t2-t1}")
+        print(f"Time to compute delta = {t3-t2}")
+        print(f"Total time fetching options = {t3-t0}")
+        return df
     
     
-    @classmethod
-    def future(cls, symbol: str, base_symbol: str, expiration_date: date) -> 'Instrument':
-        return cls(InstrumentType.FUT, symbol, base_symbol, expiration_date, data=DataStore.get_stock_or_future_data(symbol))
+@dataclass
+class ContinuousFuture(Instrument):
+    instrument_ids: list[int]
+
+    def __post_init__(self):
+        self._df = InstrumentStore.continuous_ohlcv_for_instrument_ids(self.instrument_ids)
+        
     
+@dataclass
+class Option(Instrument):
+    expiration: datetime
+    strike_price: float
+    underlying_id: int
+    right: OptionRight
+
+
+class DbnInstrumentClass(Enum):
+    CALL = "C"
+    FUTURE = "F"
+    PUT = "P"
     
-    @classmethod
-    def continuous_future(cls, symbol: str) -> 'Instrument':
-        return cls(InstrumentType.CFT, symbol, symbol, data=DataStore.get_continuous_future_data(symbol))
 
-
-    @classmethod
-    def option(cls, underlying: 'Instrument', expiration_date: date, strike: float, right: OptionRight, multiplier: int = 100) -> 'Instrument':
-        opt_type = InstrumentType.OPT if underlying.instrument_type != InstrumentType.FUT else InstrumentType.FOP
-        symbol = DataStore.get_option_symbol(underlying, expiration_date, strike, right)
-        opt = cls(opt_type, symbol, underlying.base_symbol, expiration_date=expiration_date, underlying=underlying, strike=strike, right=right, multiplier=multiplier)
-        opt.data = DataStore.get_option_data(opt)
-        return opt
-
-    
-    def get_option_chain(self, max_dte: int = 30, max_strike_dist: float = 100) -> pd.DataFrame:
-        if self.instrument_type not in {InstrumentType.STK, InstrumentType.CFT, InstrumentType.FUT}:
-            raise ValueError("Option chain can only be retrieved for stock or future instruments.")
-        return DataStore.get_option_chain(self, max_dte, max_strike_dist)
-
-
-class DataStore:
+class InstrumentStore:
     now: datetime
     database_path: str = ""
     _connection: duckdb.DuckDBPyConnection = None
+            
             
     @classmethod
     def connect_database(cls, path: str) -> None:
@@ -82,245 +122,229 @@ class DataStore:
         cls.now = now
     
     
-    # TODO: Implement
     @classmethod
-    def get_stock_or_future_data(cls, symbol: str):
-        raise NotImplementedError("Method _get_stock_or_future_data is not implemented.")
+    def instrument_by_id(cls, instrument_id: int) -> 'Instrument':
+        columns = ["instrument_id", "symbol", "expiration", "strike_price", "underlying_id", "instrument_class"]
+        query = f"""
+            SELECT {','.join(columns)}
+            FROM definition
+            WHERE instrument_id = {instrument_id};
+        """
+        result = cls._connection.execute(query).fetchone()
+
+        if result is None:
+            raise ValueError(f"No instrument found for ID {instrument_id}")
         
-        
+        instrument_class = result[-1]
+        if instrument_class == DbnInstrumentClass.FUTURE.value:
+            return Future(*result[0:2])
+        elif instrument_class in {DbnInstrumentClass.CALL.value, DbnInstrumentClass.PUT.value}:
+            right = OptionRight.CALL if instrument_class == DbnInstrumentClass.CALL.value else OptionRight.PUT
+            return Option(*result[0:5], right)
+        else:
+            raise ValueError(f"Unsupported instrument class {instrument_class} for ID {instrument_id}")
+    
+    
     @classmethod
-    def get_continuous_future_data(cls, symbol: str):
-        try:
-            # Select nearest-expring quarterly contract from the database at each timestamp
-            # TODO: Only get data when data is >= current time
-            # TODO: Update the database schema to include an instrument_type column
-            # so we can filter out non-future instruments
-            df = cls._connection.execute(f"""
-                WITH es_prices AS (
-                    SELECT 
-                        o.ts_unix,
-                        o.close,
-                        d.id AS instrument_id,
-                        d.symbol,
-                        d.expiration
-                    FROM ohlcv o
-                    JOIN definition d ON o.instrument_id = d.id
-                    WHERE d.symbol LIKE '{symbol}%' AND LENGTH(d.symbol) = 4
-                ),
-                ranked AS (
-                    SELECT *,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY ts_unix
-                               ORDER BY CAST(expiration AS TIMESTAMP) ASC
-                           ) AS rn
-                    FROM es_prices
-                    WHERE CAST(expiration AS TIMESTAMP) > TO_TIMESTAMP(ts_unix)
-                )
-                SELECT ts_unix, close, instrument_id, symbol, expiration
-                FROM ranked
-                WHERE rn = 1
-                ORDER BY ts_unix
-            """).fetch_df()
-            
-        except duckdb.Error as e:
-            raise ValueError(f"No data found for symbol {symbol.symbol}")
+    def future(cls, symbol: str, expiration: date) -> 'Future':
+        columns = ["instrument_id", "symbol", "expiration"]
+        query = f"""
+            SELECT {','.join(columns)}
+            FROM definition
+            WHERE instrument_class = 'F' AND symbol LIKE '{symbol}%' AND expiration::date = '{expiration.strftime("%Y-%m-%d")}';
+        """
+        result = cls._connection.execute(query).fetchone()
+
+        if result is None:
+            raise ValueError(f"No future found for symbol {symbol} expiring on {expiration}")
         
-        # Convert timestamps and sort
-        df['ts'] = pd.to_datetime(df['ts_unix'], unit='s')
-        df['expiration'] = pd.to_datetime(df['expiration'])
-        df.sort_values('ts', inplace=True)
-        df.reset_index(drop=True, inplace=True)
-        
-        # Detect roll points (when instrument_id changes)
-        df['contract_change'] = df['instrument_id'] != df['instrument_id'].shift()
-        df['roll_ratio'] = 1.0  # default for non-roll points
-        
-        # TODO: Adjust open/high/low/volume as well
-        # Compute roll ratios at roll points
-        roll_indices = df.index[df['contract_change']].tolist()
-        # Only compute ratio for roll indices from second roll onward
-        for i in range(1, len(roll_indices)):
-            prev_idx = roll_indices[i - 1]
-            curr_idx = roll_indices[i]
-            old_close = df.loc[prev_idx, 'close']
-            new_close = df.loc[curr_idx, 'close']
-            ratio = old_close / new_close if new_close != 0 else 1.0
-            df.loc[curr_idx, 'roll_ratio'] = ratio
-        
-        # Apply cumulative back-adjustment (vectorized)
-        df['adj_factor'] = df['roll_ratio'][::-1].cumprod()[::-1]  # propagate backward
-        df['close'] = df['close'] * df['adj_factor']
-        
-        # Final cleanup
-        df = df[['ts', 'ts_unix', 'close']]
-        df = df.set_index("ts_unix").sort_index()
-        #df.reset_index(drop=True, inplace=True)
-        return DataStream(df)
+        return Future(*result)
     
     
     @classmethod 
-    def get_option_symbol(cls, underlying: Instrument, expiration_date: date, strike: float, right: OptionRight) -> str:
+    def continuous_future(cls, symbol: str) -> 'ContinuousFuture':
+        columns = ["instrument_id", "symbol", "expiration"]
         query = f"""
-            SELECT symbol
+            SELECT DISTINCT {','.join(columns)}
             FROM definition
-            WHERE base_symbol = {underlying.base_symbol}
-              AND expiration = {expiration_date}
-              AND strike = {strike}
-              AND right = '{right.value[0].upper()}';
+            WHERE "group" = '{symbol}' AND instrument_class = 'F'
+            ORDER BY expiration::date ASC;
         """
+        result = cls._connection.execute(query).fetchall()
         
-        return cls._connection.execute(query).fetchone()
+        if result is None:
+            raise ValueError(f"No futures found for group {symbol}")
         
-        
-    @classmethod
-    def get_option_data(cls, instrument: Instrument):
-        try:
-            # Find the instrument ID for the specified option
-            option_def = cls._connection.execute(f"""
-                SELECT id, symbol, expiration, strike, option_right
-                FROM definition
-                WHERE expiration = '{instrument.expiration_date}'
-                    AND strike = {instrument.strike}
-                    AND option_right = '{instrument.right.value[0].upper()}'
-                LIMIT 1
-            """).fetchdf()
-            
-            if option_def.empty:
-                raise ValueError(f"No option found for {instrument.symbol} {instrument.expiration_date} {instrument.strike} {instrument.right.value}")
-            else:
-                option_id = option_def.iloc[0]["id"]
-            
-            # Query the OHLCV data for the option
-            df = cls._connection.execute(f"""
-                SELECT ts_unix, close AS option_close
-                    FROM ohlcv
-                    WHERE instrument_id = '{option_id}' AND ts_unix >= {int(DataStore.now.timestamp())}
-                    ORDER BY ts_unix
-            """).fetchdf()
-            
-        except duckdb.Error as e:
-            raise ValueError(f"No option found for {instrument.symbol} {instrument.expiration_date} {instrument.strike} {instrument.right.value}")
-        
-        # Filter rows to return
-        df = df[['ts', 'close']]
-        
-        # Convert timestamps and sort
-        df['ts'] = pd.to_datetime(df['ts_unix'], unit='s')
-        df.sort_values('ts', inplace=True)
-        df.reset_index(drop=True, inplace=True)
-        return df
-        
-            
-    @classmethod
-    def get_option_chain(cls, instrument: Instrument, max_dte: int = 30, max_strike_dist: float = 100, time_tol: timedelta = timedelta(minutes=15)) -> pd.DataFrame:
+        return ContinuousFuture(instrument_id = -1, symbol=symbol, instrument_ids=[row[0] for row in result])
+    
+    
+    @classmethod 
+    def option_chain_for_instrument_id(cls, underlying_id: int, underlying_close: float, max_strike_dist: float, max_dte: int, time_tol: timedelta) -> pd.DataFrame:
+        tol_seconds = time_tol.total_seconds()
+        ts_unix = cls.now.timestamp()
+        SECONDS_PER_YEAR = (365.0 * 24 * 3600)
+        query = f"""
+            WITH
+            -- Gather option ticks near current_dt
+            option_data AS (
+                SELECT 
+                    o.instrument_id,
+                    d.symbol,
+                    d.expiration,
+                    d.strike_price,
+                    d.instrument_class,
+                    o.open, o.high, o.low, o.close, o.volume,
+                    o.ts_event AS opt_ts
+                FROM ohlcv o
+                JOIN definition d ON o.instrument_id = d.instrument_id
+                WHERE d.underlying_id = {underlying_id}
+                  AND ABS(epoch(o.ts_event) - {ts_unix}) <= {tol_seconds}
+            ),
 
-        symbol = instrument.underlying.base_symbol if instrument.underlying else instrument.base_symbol
-        underlying_last = instrument.data.get("close")
-        tol_seconds = int(time_tol.total_seconds())
+            -- Gather underlying ticks near the same window
+            underlying_data AS (
+                SELECT 
+                    ts_event AS und_ts,
+                    close AS und_close
+                FROM ohlcv
+                WHERE instrument_id = {underlying_id}
+                  AND ABS(epoch(ts_event) - {ts_unix}) <= {tol_seconds}
+            ),
 
-        # 1) SQL: find option defs that match underlying symbol prefix and strike/dte constraints,
-        #    and pull the nearest ohlcv row within time tolerance for each option (using row_number partition)
-        sql = f"""
-        WITH candidates AS (
-            SELECT
-                d.id,
-                d.symbol,
-                d.expiration,
-                d.strike,
-                d.option_right,
-                o.ts_unix,
-                o.close AS option_close,
-                ABS(o.ts_unix - {cls.now.timestamp()}) AS ts_diff
-            FROM definition d
-            JOIN ohlcv o ON o.instrument_id = d.id
-            WHERE d.base_symbol = '{symbol}'
-              AND d.strike IS NOT NULL
-              AND ABS(o.ts_unix - {cls.now.timestamp()}) <= {tol_seconds}
-              AND CAST(d.expiration AS DATE) - DATE('{cls.now.date()}') BETWEEN 0 AND {max_dte}
-              AND ABS(d.strike - {underlying_last}) <= {max_strike_dist}
-        ),
-        ranked AS (
-            SELECT *,
-                   ROW_NUMBER() OVER (PARTITION BY id ORDER BY ts_diff ASC) AS rn
-            FROM candidates
-        )
-        SELECT id, symbol, expiration, strike, option_right, ts_unix, option_close
-        FROM ranked
-        WHERE rn = 1
-        ORDER BY strike, option_right
-        """
+            -- For each option row, find the *closest* underlying tick
+            matched AS (
+                SELECT
+                    od.opt_ts AS option_ts,
+                    od.instrument_id,
+                    od.symbol,
+                    od.expiration,
+                    od.strike_price,
+                    od.instrument_class,
+                    ud.und_close AS underlying_close,
+                    od.open, od.high, od.low, od.close, od.volume,
+                    ABS(epoch(od.opt_ts) - epoch(ud.und_ts)) AS time_diff
+                FROM option_data od
+                JOIN underlying_data ud
+                ON ABS(epoch(od.opt_ts) - epoch(ud.und_ts)) <= {tol_seconds}
+            ),
 
-        df = cls._connection.execute(sql).fetch_df()
+            -- Pick the closest underlying record per option tick
+            ranked AS (
+                SELECT *,
+                    ROW_NUMBER() OVER (PARTITION BY instrument_id ORDER BY time_diff ASC) AS rn
+                FROM matched
+            ),
 
-        # close DB connection early
-        #cls._connection.close()
-
-        if df.empty:
-            # return empty dataframe with expected columns
-            cols = ["id", "symbol", "expiration", "strike", "option_right",
-                    "ts_unix", "option_ts", "option_close", "T", "implied_vol", "delta"]
-            return pd.DataFrame(columns=cols)
-
-        # 2) Post-process: convert types, compute T, filter sanity
-        df['expiration'] = pd.to_datetime(df['expiration'])
-        df['option_ts'] = pd.to_datetime(df['ts_unix'], unit='s')
-        # T in years (positive; clamp to small positive)
-        df['T'] = (df['expiration'] - pd.Timestamp(cls.now.date())).dt.total_seconds() / (365.0 * 24 * 3600)
-        df['T'] = df['T'].clip(lower=1e-6)
-
-        # Normalize option_right string
-        df['option_right'] = df['option_right'].astype(str).str.lower().map(
-            lambda s: 'call' if s.startswith('c') else ('put' if s.startswith('p') else s)
-        )
-
-        # 3) Compute implied vol and delta using warm starts.
-        # We'll iterate through rows sorted by option_right then strike (so warm starts make sense)
-        df.sort_values(['option_right', 'strike'], inplace=True)
-        df.reset_index(drop=True, inplace=True)
-
-        implied_vols = []
-        deltas = []
-        prev_sigma = 0.4  # initial warm-start seed
-        r = 0.01
-
-        for idx, row in df.iterrows():
-            opt_price = row['option_close']
-            F = float(underlying_last)
-            K = float(row['strike'])
-            T = float(row['T'])
-            opt_type = row['option_right']
-
-            sigma = Black76.implied_vol(
-                option_price=opt_price,
-                F=F,
-                K=K,
-                T=T,
-                r=r,
-                option_type=opt_type,
-                initial_guess=prev_sigma
+            -- Apply filters (DTE and strike distance)
+            filtered AS (
+                SELECT
+                    option_ts, instrument_id, symbol, expiration, strike_price, instrument_class,
+                    underlying_close, open, high, low, close, volume,
+                    (epoch(expiration) - epoch(option_ts)) / {SECONDS_PER_YEAR} AS T
+                FROM ranked
+                WHERE rn = 1
+                  AND CAST(expiration AS DATE) - DATE('{cls.now.date()}') BETWEEN 0 AND {max_dte}
+                  AND ABS(strike_price - underlying_close) <= {max_strike_dist}
             )
 
-            implied_vols.append(sigma)
+            SELECT * FROM filtered
+            ORDER BY strike_price, instrument_class
+        """
+        df = cls._connection.execute(query).fetch_df()
+        return df
+        
+    
+    @classmethod
+    def continuous_ohlcv_for_instrument_ids(cls, instrument_ids: list[int]) -> pd.DataFrame:
+        query = f"""
+            SELECT 
+                o.instrument_id,
+                o.ts_event,
+                o.open,
+                o.high,
+                o.low,
+                o.close,
+                o.volume,
+                d.expiration
+            FROM ohlcv o
+            JOIN definition d
+                ON o.instrument_id = d.instrument_id
+            WHERE o.instrument_id IN ({",".join(map(str, instrument_ids))})
+        """
+        df = cls._connection.execute(query).fetch_df()
+        if df.empty:
+            raise ValueError(f"No ohlcv data found for IDs {instrument_ids}")
+        
+        # Convert dates and sort
+        df["expiration"] = pd.to_datetime(df["expiration"])
+        df["ts_event"] = pd.to_datetime(df["ts_event"])
+        df = df.sort_values(["expiration", "ts_event"]).reset_index(drop=True)
 
-            if not np.isnan(sigma):
-                delta = Black76.delta(F=F, K=K, T=T, r=r, sigma=sigma, option_type=opt_type)
-                prev_sigma = sigma  # warm-start next row
-            else:
-                delta = np.nan
+        # Determine contract order by expiration ---
+        contracts = (
+            df[["instrument_id", "expiration"]]
+            .drop_duplicates()
+            .sort_values("expiration")
+            .reset_index(drop=True)
+        )
 
-            deltas.append(delta)
+        # Back-adjust each contract at rollover ---
+        continuous = pd.DataFrame()
+        adj_factor = 0.0  # running adjustment for continuity
+        prev_close = None
 
-        df['implied_vol'] = implied_vols
-        df['delta'] = deltas
+        for i, row in contracts.iterrows():
+            cid = row["instrument_id"]
+            #exp = row["expiration"]
 
-        # 4) Final column tidy
-        result = df[[
-            'id', 'symbol', 'expiration', 'strike', 'option_right',
-            'ts_unix', 'option_ts', 'option_close', 'T', 'implied_vol', 'delta'
-        ]].copy()
+            sub = df[df["instrument_id"] == cid].copy()
+            sub = sub.sort_values("ts_event")
 
-        # sort for readability: calls then puts, ascending strike
-        result.sort_values(['option_right', 'strike'], inplace=True)
-        result.reset_index(drop=True, inplace=True)
+            if i > 0:
+                # Determine rollover date (last trading day of previous contract)
+                prev_id = contracts.loc[i - 1, "instrument_id"]
+                prev_sub = df[df["instrument_id"] == prev_id]
+                last_prev = prev_sub["close"].iloc[-1]
+                first_curr = sub["close"].iloc[0]
 
-        return result
+                # Compute ratio-based adjustment for continuity
+                adj_factor += np.log(last_prev / first_curr)
+
+            # Apply cumulative adjustment
+            sub["adj_close"] = sub["close"] * np.exp(adj_factor)
+            sub["adj_open"] = sub["open"] * np.exp(adj_factor)
+            sub["adj_high"] = sub["high"] * np.exp(adj_factor)
+            sub["adj_low"] = sub["low"] * np.exp(adj_factor)
+
+            continuous = pd.concat([continuous, sub], ignore_index=True)
+
+        # --- 5. Format and return ---
+        continuous = continuous.sort_values("ts_event")
+        continuous = continuous.set_index("ts_event")
+        continuous = continuous[
+            ["instrument_id", "expiration", "open", "high", "low", "close", 
+             "adj_open", "adj_high", "adj_low", "adj_close", "volume"]
+        ]
+        return continuous
+    
+    
+    @classmethod
+    def ohlcv_for_instrument_id(cls, instrument_id: int) -> pd.DataFrame:
+        query = f"""
+            SELECT ts_event, open, high, low, close, volume
+            FROM ohlcv
+            WHERE instrument_id = {instrument_id}
+            ORDER BY ts_event ASC;
+        """
+        df = cls._connection.execute(query).fetch_df()
+        if df.empty:
+            raise ValueError(f"No ohlcv data found for ID {instrument_id}")
+        
+        df['ts_event'] = df['ts_event'].view("int64") // 10**6
+        df.set_index('ts_event', inplace=True)
+        return df
+    
+    
+# TODO: remove
+class DataStore:
+    ...
