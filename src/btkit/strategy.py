@@ -2,9 +2,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 
 from .broker import Broker
+from .instrument import InstrumentStore
 from .logger import Logger
-from .data_stream import DataStream
-from .instrument import DataStore
 
 
 @dataclass
@@ -18,6 +17,7 @@ class DateSettings:
 class Strategy:
     name: str
     version: str
+    now: datetime
         
     def __init__(self, starting_balance: float, start_time: datetime, end_time: datetime, time_step: timedelta, log_db_path: str, date_settings: DateSettings = None):
         self.start_time = start_time
@@ -35,9 +35,8 @@ class Strategy:
         while self.now <= self.end_time:
             if self._should_tick():
                 self.tick()
-            DataStore.update_time(self.now)
-            DataStream.update_time(self.now)
             self.broker.tick(self.now)
+            InstrumentStore.set_time(self.now)
             self.now += self.time_step
         self.on_stop()
         self.logger.end_session()

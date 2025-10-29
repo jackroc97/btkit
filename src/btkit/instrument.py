@@ -10,10 +10,6 @@ from enum import Enum
 from .black76 import Black76
 
 
-# TODO: replace InstrumentStore.now with Strategy.now (or Backtest.now??)
-# TODO: determine if continuous futures make sense as implemented
-# I dont think they do... will be confusing the underlying prices for the actual future and the continuous future
-
 class OptionRight(Enum):
     CALL = "CALL"
     PUT = "PUT"
@@ -30,7 +26,7 @@ class Instrument:
     
     
     def exists(self, at_time: datetime = None, bars_ago: int = None) -> bool:
-        at_time = at_time or InstrumentStore.now
+        at_time = at_time or InstrumentStore.get_time()
         if not bars_ago:
             return at_time.timestamp() in self._df.index
         else:
@@ -39,7 +35,7 @@ class Instrument:
         
         
     def get(self, name: str, at_time: datetime = None, bars_ago: int = None) -> any:
-        at_time = at_time or InstrumentStore.now
+        at_time = at_time or InstrumentStore.get_time()
         if self.exists(at_time=at_time, bars_ago=bars_ago):            
             if not bars_ago:
                 return self._df.loc[at_time.timestamp(), name]
@@ -52,7 +48,7 @@ class Instrument:
         
         
     def get_next(self, name: str, at_time: datetime = None, bars_ago: int = None) -> any:
-        at_time = at_time or InstrumentStore.now
+        at_time = at_time or InstrumentStore.get_time()
         if not bars_ago:
             next_index = self._df.index[self._df.index > at_time.timestamp()]
             if not next_index.empty:
@@ -106,22 +102,26 @@ class DbnInstrumentClass(Enum):
     
 
 class InstrumentStore:
-    now: datetime
     database_path: str = ""
     _connection: duckdb.DuckDBPyConnection = None
-            
-            
+    _now: datetime = None
+    
     @classmethod
     def connect_database(cls, path: str) -> None:
         cls.database_path = path
         cls._connection = duckdb.connect(database=cls.database_path, read_only=True)
-            
-            
+    
+    
     @classmethod
-    def update_time(cls, now) -> None:
-        cls.now = now
+    def set_time(cls, now: datetime) -> None:
+        cls._now = now
+        
+        
+    @classmethod 
+    def get_time(cls) -> datetime:
+        return cls._now
     
-    
+    # indexes: definition(instrument_id)
     @classmethod
     def instrument_by_id(cls, instrument_id: int) -> 'Instrument':
         columns = ["instrument_id", "symbol", "expiration", "strike_price", "underlying_id", "instrument_class"]
@@ -144,7 +144,7 @@ class InstrumentStore:
         else:
             raise ValueError(f"Unsupported instrument class {instrument_class} for ID {instrument_id}")
     
-    
+    # indexes: definition(instrument_class, symbol, expiration). # perhaps add group?
     @classmethod
     def future(cls, symbol: str, expiration: date) -> 'Future':
         columns = ["instrument_id", "symbol", "expiration"]
@@ -160,7 +160,7 @@ class InstrumentStore:
         
         return Future(*result)
     
-    
+    # index: defition(group, instrument_class)
     @classmethod 
     def continuous_future(cls, symbol: str) -> 'ContinuousFuture':
         columns = ["instrument_id", "symbol", "expiration"]
@@ -177,11 +177,11 @@ class InstrumentStore:
         
         return ContinuousFuture(instrument_id = -1, symbol=symbol, instrument_ids=[row[0] for row in result])
     
-    
+    #index defition(underlying_id,)
     @classmethod 
     def option_chain_for_instrument_id(cls, underlying_id: int, underlying_close: float, max_strike_dist: float, max_dte: int, time_tol: timedelta) -> pd.DataFrame:
         tol_seconds = time_tol.total_seconds()
-        ts_unix = cls.now.timestamp()
+        ts_unix = cls._now.timestamp()
         SECONDS_PER_YEAR = (365.0 * 24 * 3600)
         query = f"""
             WITH
@@ -198,6 +198,7 @@ class InstrumentStore:
                 FROM ohlcv o
                 JOIN definition d ON o.instrument_id = d.instrument_id
                 WHERE d.underlying_id = {underlying_id}
+                  --AND ABS((o.ts_event) - {ts_unix}) <= {tol_seconds}
                   AND ABS(epoch(o.ts_event) - {ts_unix}) <= {tol_seconds}
             ),
 
@@ -208,6 +209,7 @@ class InstrumentStore:
                     close AS und_close
                 FROM ohlcv
                 WHERE instrument_id = {underlying_id}
+                  --AND ABS((ts_event) - {ts_unix}) <= {tol_seconds}
                   AND ABS(epoch(ts_event) - {ts_unix}) <= {tol_seconds}
             ),
 
@@ -222,9 +224,11 @@ class InstrumentStore:
                     od.instrument_class,
                     ud.und_close AS underlying_close,
                     od.open, od.high, od.low, od.close, od.volume,
+                    --ABS((od.opt_ts) - (ud.und_ts)) AS time_diff
                     ABS(epoch(od.opt_ts) - epoch(ud.und_ts)) AS time_diff
                 FROM option_data od
                 JOIN underlying_data ud
+                --ON ABS((od.opt_ts) - (ud.und_ts)) <= {tol_seconds}
                 ON ABS(epoch(od.opt_ts) - epoch(ud.und_ts)) <= {tol_seconds}
             ),
 
@@ -240,10 +244,11 @@ class InstrumentStore:
                 SELECT
                     option_ts, instrument_id, symbol, expiration, strike_price, instrument_class,
                     underlying_close, open, high, low, close, volume,
+                    --(epoch(expiration) - (option_ts)) / {SECONDS_PER_YEAR} AS T
                     (epoch(expiration) - epoch(option_ts)) / {SECONDS_PER_YEAR} AS T
                 FROM ranked
                 WHERE rn = 1
-                  AND CAST(expiration AS DATE) - DATE('{cls.now.date()}') BETWEEN 0 AND {max_dte}
+                  AND CAST(expiration AS DATE) - DATE('{cls._now.date()}') BETWEEN 0 AND {max_dte}
                   AND ABS(strike_price - underlying_close) <= {max_strike_dist}
             )
 
@@ -343,8 +348,3 @@ class InstrumentStore:
         df['ts_event'] = df['ts_event'].view("int64") // 10**6
         df.set_index('ts_event', inplace=True)
         return df
-    
-    
-# TODO: remove
-class DataStore:
-    ...
