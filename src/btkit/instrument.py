@@ -43,7 +43,7 @@ class Instrument:
                 # TODO: Implement
                 raise NotImplementedError("Method get with bars_ago parameter is not implemented.")
         else:
-            warnings.warn(f"Data for {name} at {at_time} does not exist in symbol. Returning next available data.")
+            #warnings.warn(f"Data for {name} at {at_time} does not exist in symbol. Returning next available data.")
             return self.get_next(name, at_time=at_time, bars_ago=bars_ago)
         
         
@@ -54,29 +54,52 @@ class Instrument:
             if not next_index.empty:
                 return self._df.loc[next_index[0], name]
             else:
-                raise ValueError(f"No data found for {name} after {at_time} on symbol {self.symbol}")
+                return self._df.loc[self._df.index[-1], name]
+                #raise ValueError(f"No data found for {name} after {at_time} on symbol {self.symbol}")
         else:
             # TODO: Implement
             raise NotImplementedError("Method get_next with bars_ago parameter is not implemented.")
+        
+    
+    def __str__(self) -> str:
+        return self.symbol
         
 
 @dataclass
 class Future(Instrument):
     expiration: datetime
     
-    def get_option_chain(self, max_strike_dist: float = 200, max_dte: int = 30, time_tol: timedelta = timedelta(minutes=15)): 
-        t0 = datetime.now()
-        df = InstrumentStore.option_chain_for_instrument_id(self.instrument_id, self.get("close"), max_strike_dist, max_dte, time_tol)
-        t1 = datetime.now()
+    def get_option_chain(self, max_strike_dist: float = 200, max_dte: int = 15, time_tol: timedelta = timedelta(minutes=15)) -> pd.DataFrame: 
+        # Query option chain for the given parameters
+        df = InstrumentStore.option_chain_for_instrument_id(self.instrument_id, max_strike_dist, max_dte, time_tol)
+        
+        # Compute greeks
+        # NOTE: If performance becomes a serious issue as more data is added, 
+        # it may be worthwhile to pre-compute greeks
+        df["T"] = (df["ts_expiration"] - df["option_ts"]) / (365.0 * 24 * 3600)
         df["sigma"] = df.apply(Black76.sigma, axis=1)
-        t2 = datetime.now()
         df["delta"] = df.apply(Black76.delta, axis=1)
-        t3 = datetime.now()
-        print(f"Time to query database = {t1-t0}")
-        print(f"Time to compute sigma = {t2-t1}")
-        print(f"Time to compute delta = {t3-t2}")
-        print(f"Total time fetching options = {t3-t0}")
         return df
+    
+    
+@dataclass
+class SpotFuture(Instrument):
+    _exp_map: dict[datetime, int]
+    _current_future: Future = None
+    
+    def __post_init__(self):
+        pass
+    
+    def at(self, now: datetime) -> Future:
+        exps = [exp for exp in self._exp_map.keys() if exp > now]
+        if not exps:
+            raise ValueError(f"No future found for symbol {self.symbol} at time {now}")
+        
+        fut_id = self._exp_map[min(exps)]
+            
+        if not self._current_future or self._current_future.instrument_id != fut_id:
+            self._current_future = InstrumentStore.instrument_by_id(fut_id)
+        return self._current_future
     
     
 @dataclass
@@ -92,8 +115,9 @@ class Option(Instrument):
     expiration: datetime
     strike_price: float
     underlying_id: int
+    multiplier: int
     right: OptionRight
-
+        
 
 class DbnInstrumentClass(Enum):
     CALL = "C"
@@ -121,10 +145,10 @@ class InstrumentStore:
     def get_time(cls) -> datetime:
         return cls._now
     
-    # indexes: definition(instrument_id)
+
     @classmethod
     def instrument_by_id(cls, instrument_id: int) -> 'Instrument':
-        columns = ["instrument_id", "symbol", "expiration", "strike_price", "underlying_id", "instrument_class"]
+        columns = ["instrument_id", "symbol", "expiration", "strike_price", "underlying_id", "unit_of_measure_qty", "instrument_class"]
         query = f"""
             SELECT {','.join(columns)}
             FROM definition
@@ -137,14 +161,14 @@ class InstrumentStore:
         
         instrument_class = result[-1]
         if instrument_class == DbnInstrumentClass.FUTURE.value:
-            return Future(*result[0:2])
+            return Future(*result[0:3])
         elif instrument_class in {DbnInstrumentClass.CALL.value, DbnInstrumentClass.PUT.value}:
             right = OptionRight.CALL if instrument_class == DbnInstrumentClass.CALL.value else OptionRight.PUT
-            return Option(*result[0:5], right)
+            return Option(*result[0:6], right)
         else:
             raise ValueError(f"Unsupported instrument class {instrument_class} for ID {instrument_id}")
     
-    # indexes: definition(instrument_class, symbol, expiration). # perhaps add group?
+
     @classmethod
     def future(cls, symbol: str, expiration: date) -> 'Future':
         columns = ["instrument_id", "symbol", "expiration"]
@@ -160,7 +184,24 @@ class InstrumentStore:
         
         return Future(*result)
     
-    # index: defition(group, instrument_class)
+
+    @classmethod
+    def spot_future(cls, symbol: str) -> 'SpotFuture':
+        columns = ["instrument_id", "expiration"]
+        query = f"""
+            SELECT DISTINCT {','.join(columns)}
+            FROM definition
+            WHERE "group" = '{symbol}' AND instrument_class = 'F'
+            ORDER BY expiration::date ASC;
+        """
+        result = cls._connection.execute(query).fetchall()
+        
+        if result is None:
+            raise ValueError(f"No futures found for group {symbol}")
+        
+        return SpotFuture(-1, symbol, _exp_map={ row[1]: row[0] for row in result })
+
+
     @classmethod 
     def continuous_future(cls, symbol: str) -> 'ContinuousFuture':
         columns = ["instrument_id", "symbol", "expiration"]
@@ -177,12 +218,35 @@ class InstrumentStore:
         
         return ContinuousFuture(instrument_id = -1, symbol=symbol, instrument_ids=[row[0] for row in result])
     
-    #index defition(underlying_id,)
+    
+    @classmethod
+    def option(cls, underlying: 'Instrument', expiration: date, strike_price: float, right: OptionRight) -> Option:
+        columns = ["instrument_id", "symbol", "expiration", "strike_price", "underlying_id", "unit_of_measure_qty", "instrument_class"]
+        query = f"""
+            SELECT {','.join(columns)}
+            FROM definition
+            WHERE underlying_id = {underlying.instrument_id}
+              AND expiration::date = '{expiration.strftime("%Y-%m-%d")}'
+              AND strike_price = {strike_price}
+              AND instrument_class = '{right.value[0].capitalize()}';
+        """
+        result = cls._connection.execute(query).fetchone()
+
+        if result is None:
+            raise ValueError(f"No option found for underlying ID {underlying.instrument_id}")
+        
+        instrument_class = result[-1]
+        right = OptionRight.CALL if instrument_class == DbnInstrumentClass.CALL.value else OptionRight.PUT
+        return Option(*result[0:6], right)
+        
+
     @classmethod 
-    def option_chain_for_instrument_id(cls, underlying_id: int, underlying_close: float, max_strike_dist: float, max_dte: int, time_tol: timedelta) -> pd.DataFrame:
+    def option_chain_for_instrument_id(cls, underlying_id: int, max_strike_dist: float, max_dte: int, time_tol: timedelta) -> pd.DataFrame:
         tol_seconds = time_tol.total_seconds()
-        ts_unix = cls._now.timestamp()
-        SECONDS_PER_YEAR = (365.0 * 24 * 3600)
+        ts_unix = cls._now.timestamp()        
+        min_exp: datetime = cls._now.replace(hour=0, minute=0, second=0, microsecond=0)
+        max_exp: datetime = min_exp + timedelta(days=max_dte+1)
+
         query = f"""
             WITH
             -- Gather option ticks near current_dt
@@ -190,6 +254,7 @@ class InstrumentStore:
                 SELECT 
                     o.instrument_id,
                     d.symbol,
+                    d.ts_expiration,
                     d.expiration,
                     d.strike_price,
                     d.instrument_class,
@@ -198,8 +263,8 @@ class InstrumentStore:
                 FROM ohlcv o
                 JOIN definition d ON o.instrument_id = d.instrument_id
                 WHERE d.underlying_id = {underlying_id}
-                  --AND ABS((o.ts_event) - {ts_unix}) <= {tol_seconds}
-                  AND ABS(epoch(o.ts_event) - {ts_unix}) <= {tol_seconds}
+                  AND (d.ts_expiration BETWEEN {min_exp.timestamp()} AND {max_exp.timestamp()})
+                  AND (o.ts_event BETWEEN {ts_unix - tol_seconds} AND {ts_unix + tol_seconds})
             ),
 
             -- Gather underlying ticks near the same window
@@ -209,8 +274,7 @@ class InstrumentStore:
                     close AS und_close
                 FROM ohlcv
                 WHERE instrument_id = {underlying_id}
-                  --AND ABS((ts_event) - {ts_unix}) <= {tol_seconds}
-                  AND ABS(epoch(ts_event) - {ts_unix}) <= {tol_seconds}
+                  AND ts_event BETWEEN {ts_unix - tol_seconds} AND {ts_unix + tol_seconds}
             ),
 
             -- For each option row, find the *closest* underlying tick
@@ -219,17 +283,16 @@ class InstrumentStore:
                     od.opt_ts AS option_ts,
                     od.instrument_id,
                     od.symbol,
+                    od.ts_expiration,
                     od.expiration,
                     od.strike_price,
                     od.instrument_class,
                     ud.und_close AS underlying_close,
                     od.open, od.high, od.low, od.close, od.volume,
-                    --ABS((od.opt_ts) - (ud.und_ts)) AS time_diff
-                    ABS(epoch(od.opt_ts) - epoch(ud.und_ts)) AS time_diff
+                    ABS(od.opt_ts - ud.und_ts) AS time_diff
                 FROM option_data od
                 JOIN underlying_data ud
-                --ON ABS((od.opt_ts) - (ud.und_ts)) <= {tol_seconds}
-                ON ABS(epoch(od.opt_ts) - epoch(ud.und_ts)) <= {tol_seconds}
+                ON od.opt_ts BETWEEN (ud.und_ts - {tol_seconds}) AND (ud.und_ts + {tol_seconds})
             ),
 
             -- Pick the closest underlying record per option tick
@@ -242,16 +305,12 @@ class InstrumentStore:
             -- Apply filters (DTE and strike distance)
             filtered AS (
                 SELECT
-                    option_ts, instrument_id, symbol, expiration, strike_price, instrument_class,
-                    underlying_close, open, high, low, close, volume,
-                    --(epoch(expiration) - (option_ts)) / {SECONDS_PER_YEAR} AS T
-                    (epoch(expiration) - epoch(option_ts)) / {SECONDS_PER_YEAR} AS T
+                    option_ts, instrument_id, symbol, ts_expiration, expiration, strike_price, instrument_class,
+                    underlying_close, open, high, low, close, volume
                 FROM ranked
                 WHERE rn = 1
-                  AND CAST(expiration AS DATE) - DATE('{cls._now.date()}') BETWEEN 0 AND {max_dte}
-                  AND ABS(strike_price - underlying_close) <= {max_strike_dist}
+                  AND strike_price BETWEEN underlying_close - {max_strike_dist} AND underlying_close + {max_strike_dist}
             )
-
             SELECT * FROM filtered
             ORDER BY strike_price, instrument_class
         """
@@ -345,6 +404,5 @@ class InstrumentStore:
         if df.empty:
             raise ValueError(f"No ohlcv data found for ID {instrument_id}")
         
-        df['ts_event'] = df['ts_event'].view("int64") // 10**6
         df.set_index('ts_event', inplace=True)
         return df

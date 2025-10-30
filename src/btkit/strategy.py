@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from .broker import Broker
 from .instrument import InstrumentStore
@@ -12,6 +13,7 @@ class DateSettings:
     day_end: time = time(23, 59, 59, 999999)
     weekday_only: bool = False
     skip_dates: set[date] = field(default_factory=set)
+    time_zone: ZoneInfo = ZoneInfo("America/New_York")
     
 
 class Strategy:
@@ -20,11 +22,11 @@ class Strategy:
     now: datetime
         
     def __init__(self, starting_balance: float, start_time: datetime, end_time: datetime, time_step: timedelta, log_db_path: str, date_settings: DateSettings = None):
-        self.start_time = start_time
-        self.end_time = end_time
+        self.date_settings = date_settings or DateSettings()   
+        self.start_time = start_time.replace(tzinfo=date_settings.time_zone)
+        self.end_time = end_time.replace(tzinfo=date_settings.time_zone)
         self.time_step = time_step
-        self.now = start_time
-        self.date_settings = date_settings or DateSettings()      
+        self.now = self.start_time
         self.logger = Logger(log_db_path)  
         self.broker = Broker(starting_balance, self.logger)
         

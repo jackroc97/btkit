@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from uuid import uuid4
 
-from .instrument import Instrument
+from .instrument import Instrument, InstrumentStore, Future, Option
 from .order import OrderAction
 
 
@@ -16,16 +16,19 @@ class PositionItem:
 
     @property
     def market_price(self) -> float:
-        #price_col = "close"
-        #if self.instrument.instrument_type == InstrumentType.OPTION:
-        #    price_col = f"{self.instrument.right.value[0].lower()}_last"
+        multiplier = 1
+        if isinstance(self.instrument, Option):
+            multiplier = self.instrument.multiplier
         sign = 1 if self.open_action == OrderAction.STO else -1
-        return sign * abs(self.quantity) * self.instrument.multiplier * self.instrument.data.get("close")
+        close = self.instrument.get("close")
+        return sign * abs(self.quantity) * multiplier * close
     
     
     @property
     def is_expired(self) -> bool:
-        return self.instrument.data.now >= self.instrument.expiration_date.replace(hour=23, minute=59, second=59) 
+        if isinstance(self.instrument, (Future, Option)):
+            return InstrumentStore.get_time() >= self.instrument.expiration 
+        return False
     
     
     @property

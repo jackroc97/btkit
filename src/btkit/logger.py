@@ -3,6 +3,7 @@ import sqlite3
 
 from datetime import datetime
 
+from .instrument import Future, Option
 from .order import OrderAction
 from .position import Position
 
@@ -52,11 +53,15 @@ class Logger:
         cur = self.con.cursor() 
         for item in position.items:   
             trade_action = item.open_action
+            expiration = item.instrument.expiration if isinstance(item.instrument, (Future, Option)) else ""
+            strike_price = item.instrument.strike_price if isinstance(item.instrument, Option) else ""
+            right = item.instrument.right if isinstance(item.instrument, Option) else ""
+            multiplier = item.instrument.multiplier if isinstance(item.instrument, Option) else ""
             if is_closing:
                 trade_action = OrderAction.STC if item.open_action == OrderAction.BTO else OrderAction.BTC
             cur.execute(f'''
                 INSERT or IGNORE INTO trade(session_id, position_uuid, position_item_uuid, time, action, quantity, mkt_price, symbol, expiration, strike, right, multiplier)
-                VALUES({self.session_id}, '{position.uuid}', '{item.uuid}', '{trade_time.strftime("%Y-%m-%d %H:%M:%S%z")}', '{trade_action.value}', {item.quantity}, {item.market_price}, '{item.instrument.symbol}', '{item.instrument.expiration_date}', {item.instrument.strike}, '{item.instrument.right.value}', {item.instrument.multiplier})
+                VALUES({self.session_id}, '{position.uuid}', '{item.uuid}', '{trade_time.strftime("%Y-%m-%d %H:%M:%S%z")}', '{trade_action.value}', {item.quantity}, {item.market_price}, '{item.instrument.symbol}', '{expiration}', {strike_price}, '{right.value}', {multiplier})
             ''')
         self.con.commit()
         return cur.lastrowid
