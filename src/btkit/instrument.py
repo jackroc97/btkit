@@ -7,8 +7,6 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from enum import Enum
 
-from .black76 import Black76
-
 
 class OptionRight(Enum):
     CALL = "CALL"
@@ -69,16 +67,20 @@ class Instrument:
 class Future(Instrument):
     expiration: datetime
     
+    def search_options_by_delta(self, desired_delta: float, dte: int, 
+                                option_right: OptionRight, **kwargs):
+        return InstrumentStore.search_options_by_delta(self, desired_delta, dte, option_right, **kwargs)
+    
+    
     def get_option_chain(self, max_strike_dist: float = 200, max_dte: int = 15, time_tol: timedelta = timedelta(minutes=15)) -> pd.DataFrame: 
+        # TODO: Do not use this in its present state... query needs to be updated to use pre-computed greeks
         # Query option chain for the given parameters
         df = InstrumentStore.option_chain_for_instrument_id(self.instrument_id, max_strike_dist, max_dte, time_tol)
         
-        # Compute greeks
-        # NOTE: If performance becomes a serious issue as more data is added, 
-        # it may be worthwhile to pre-compute greeks
-        df["T"] = (df["ts_expiration"] - df["option_ts"]) / (365.0 * 24 * 3600)
-        df["sigma"] = df.apply(Black76.sigma, axis=1)
-        df["delta"] = df.apply(Black76.delta, axis=1)
+        # Compute greek
+        #df["T"] = (df["ts_expiration"] - df["option_ts"]) / (365.0 * 24 * 3600)
+        #df["sigma"] = df.apply(Black76.sigma, axis=1)
+        #df["delta"] = df.apply(Black76.delta, axis=1)
         return df
     
     
@@ -100,14 +102,6 @@ class SpotFuture(Instrument):
         if not self._current_future or self._current_future.instrument_id != fut_id:
             self._current_future = InstrumentStore.instrument_by_id(fut_id)
         return self._current_future
-    
-    
-@dataclass
-class ContinuousFuture(Instrument):
-    instrument_ids: list[int]
-
-    def __post_init__(self):
-        self._df = InstrumentStore.continuous_ohlcv_for_instrument_ids(self.instrument_ids)
         
     
 @dataclass
@@ -117,6 +111,11 @@ class Option(Instrument):
     underlying_id: int
     multiplier: int
     right: OptionRight
+    
+    def __str__(self) -> str:
+        symb = self.symbol.split(" ")[0:2]
+        exp = self.expiration.strftime('%y%m%d')
+        return f"{symb[0]} {exp}{symb[1]}"
         
 
 class DbnInstrumentClass(Enum):
@@ -147,13 +146,25 @@ class InstrumentStore:
     
 
     @classmethod
-    def instrument_by_id(cls, instrument_id: int) -> 'Instrument':
+    def instrument_by_id(cls, instrument_id: int, type_hint: type = None) -> 'Instrument':
         columns = ["instrument_id", "symbol", "expiration", "strike_price", "underlying_id", "unit_of_measure_qty", "instrument_class"]
-        query = f"""
-            SELECT {','.join(columns)}
-            FROM definition
-            WHERE instrument_id = {instrument_id};
-        """
+        
+        # This is necessary due to an annoying "feature" of databento's schema 
+        # in which an instrument_id can be re-used on the same asset class
+        if type_hint is Option:
+            query = f"""
+                SELECT {','.join(columns)}
+                FROM definition
+                WHERE instrument_id = {int(instrument_id)} 
+                    AND instrument_class in ('C', 'P')
+                    AND ts_expiration >= {cls._now.timestamp()};
+            """
+        else:
+            query = f"""
+                SELECT {','.join(columns)}
+                FROM definition
+                WHERE instrument_id = {instrument_id}
+            """
         result = cls._connection.execute(query).fetchone()
 
         if result is None:
@@ -201,23 +212,6 @@ class InstrumentStore:
         
         return SpotFuture(-1, symbol, _exp_map={ row[1]: row[0] for row in result })
 
-
-    @classmethod 
-    def continuous_future(cls, symbol: str) -> 'ContinuousFuture':
-        columns = ["instrument_id", "symbol", "expiration"]
-        query = f"""
-            SELECT DISTINCT {','.join(columns)}
-            FROM definition
-            WHERE "group" = '{symbol}' AND instrument_class = 'F'
-            ORDER BY expiration::date ASC;
-        """
-        result = cls._connection.execute(query).fetchall()
-        
-        if result is None:
-            raise ValueError(f"No futures found for group {symbol}")
-        
-        return ContinuousFuture(instrument_id = -1, symbol=symbol, instrument_ids=[row[0] for row in result])
-    
     
     @classmethod
     def option(cls, underlying: 'Instrument', expiration: date, strike_price: float, right: OptionRight) -> Option:
@@ -247,6 +241,7 @@ class InstrumentStore:
         min_exp: datetime = cls._now.replace(hour=0, minute=0, second=0, microsecond=0)
         max_exp: datetime = min_exp + timedelta(days=max_dte+1)
 
+        # TODO: This can now be replaced with a call to the option_greeks table
         query = f"""
             WITH
             -- Gather option ticks near current_dt
@@ -316,80 +311,6 @@ class InstrumentStore:
         """
         df = cls._connection.execute(query).fetch_df()
         return df
-        
-    
-    @classmethod
-    def continuous_ohlcv_for_instrument_ids(cls, instrument_ids: list[int]) -> pd.DataFrame:
-        query = f"""
-            SELECT 
-                o.instrument_id,
-                o.ts_event,
-                o.open,
-                o.high,
-                o.low,
-                o.close,
-                o.volume,
-                d.expiration
-            FROM ohlcv o
-            JOIN definition d
-                ON o.instrument_id = d.instrument_id
-            WHERE o.instrument_id IN ({",".join(map(str, instrument_ids))})
-        """
-        df = cls._connection.execute(query).fetch_df()
-        if df.empty:
-            raise ValueError(f"No ohlcv data found for IDs {instrument_ids}")
-        
-        # Convert dates and sort
-        df["expiration"] = pd.to_datetime(df["expiration"])
-        df["ts_event"] = pd.to_datetime(df["ts_event"])
-        df = df.sort_values(["expiration", "ts_event"]).reset_index(drop=True)
-
-        # Determine contract order by expiration ---
-        contracts = (
-            df[["instrument_id", "expiration"]]
-            .drop_duplicates()
-            .sort_values("expiration")
-            .reset_index(drop=True)
-        )
-
-        # Back-adjust each contract at rollover ---
-        continuous = pd.DataFrame()
-        adj_factor = 0.0  # running adjustment for continuity
-        prev_close = None
-
-        for i, row in contracts.iterrows():
-            cid = row["instrument_id"]
-            #exp = row["expiration"]
-
-            sub = df[df["instrument_id"] == cid].copy()
-            sub = sub.sort_values("ts_event")
-
-            if i > 0:
-                # Determine rollover date (last trading day of previous contract)
-                prev_id = contracts.loc[i - 1, "instrument_id"]
-                prev_sub = df[df["instrument_id"] == prev_id]
-                last_prev = prev_sub["close"].iloc[-1]
-                first_curr = sub["close"].iloc[0]
-
-                # Compute ratio-based adjustment for continuity
-                adj_factor += np.log(last_prev / first_curr)
-
-            # Apply cumulative adjustment
-            sub["adj_close"] = sub["close"] * np.exp(adj_factor)
-            sub["adj_open"] = sub["open"] * np.exp(adj_factor)
-            sub["adj_high"] = sub["high"] * np.exp(adj_factor)
-            sub["adj_low"] = sub["low"] * np.exp(adj_factor)
-
-            continuous = pd.concat([continuous, sub], ignore_index=True)
-
-        # --- 5. Format and return ---
-        continuous = continuous.sort_values("ts_event")
-        continuous = continuous.set_index("ts_event")
-        continuous = continuous[
-            ["instrument_id", "expiration", "open", "high", "low", "close", 
-             "adj_open", "adj_high", "adj_low", "adj_close", "volume"]
-        ]
-        return continuous
     
     
     @classmethod
@@ -406,3 +327,32 @@ class InstrumentStore:
         
         df.set_index('ts_event', inplace=True)
         return df
+
+
+    @classmethod
+    def search_options_by_delta(cls, underlying: Instrument, desired_delta: float, 
+                                dte: int, option_right: OptionRight, at_time: datetime = None, 
+                                time_tol: timedelta = timedelta(minutes=5), max_results: int = 10) -> pd.DataFrame: 
+        if at_time is None:
+            at_time = cls._now
+        ts_min = at_time.timestamp() - time_tol.total_seconds()
+        ts_max = at_time.timestamp() + time_tol.total_seconds()
+        
+        query = f"""
+            SELECT 
+                g.ts_event,
+                g.instrument_id,
+                g.underlying_id,
+                g.strike_price,
+                g.delta,
+                g.dte,
+                ABS(g.delta - {desired_delta}) AS delta_diff
+            FROM option_greeks g
+            WHERE g.underlying_id = {underlying.instrument_id}
+                AND g.ts_event BETWEEN {ts_min} AND {ts_max}
+                AND g.option_right = '{option_right.value.upper()[0]}'
+                AND dte = {dte}
+            ORDER BY delta_diff ASC
+            LIMIT {max_results}
+        """
+        return cls._connection.execute(query).fetch_df()

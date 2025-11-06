@@ -32,16 +32,19 @@ class Strategy:
         
     
     def run(self):
+        t0 = datetime.now()
         self.logger.start_session(self.name, self.version)
         self.on_start()
         while self.now <= self.end_time:
+            InstrumentStore.set_time(self.now)
+            self.broker.tick(self.now)
             if self._should_tick():
                 self.tick()
-            self.broker.tick(self.now)
-            InstrumentStore.set_time(self.now)
             self.now += self.time_step
         self.on_stop()
         self.logger.end_session()
+        t1 = datetime.now()
+        print(f"Backtest {self.logger.session_id} completed in {(t1-t0).total_seconds()} seconds!")
         
         
     def on_start(self):

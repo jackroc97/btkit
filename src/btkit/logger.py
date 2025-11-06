@@ -34,7 +34,7 @@ class Logger:
             VALUES('{strategy_name}', '{strategy_version}', '{start_time}')
         ''')
         self.con.commit()
-        self.session_id = cur.lastrowid   
+        self.session_id = cur.lastrowid
         
     
     def end_session(self):

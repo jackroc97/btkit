@@ -16,6 +16,8 @@ class PositionItem:
 
     @property
     def market_price(self) -> float:
+        # TODO: If the instrument is an option that is at expiration,
+        # compare against underlying to see if option is expiring worthless
         multiplier = 1
         if isinstance(self.instrument, Option):
             multiplier = self.instrument.multiplier
