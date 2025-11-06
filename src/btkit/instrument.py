@@ -20,7 +20,7 @@ class Instrument:
     _df: pd.DataFrame = field(init=False, default_factory=pd.DataFrame, repr=False)
     
     def __post_init__(self):
-        self._df = InstrumentStore.ohlcv_for_instrument_id(self.instrument_id)
+        self._df = InstrumentStore.ohlcv_for_instrument(self)
     
     
     def exists(self, at_time: datetime = None, bars_ago: int = None) -> bool:
@@ -241,7 +241,7 @@ class InstrumentStore:
         min_exp: datetime = cls._now.replace(hour=0, minute=0, second=0, microsecond=0)
         max_exp: datetime = min_exp + timedelta(days=max_dte+1)
 
-        # TODO: This can now be replaced with a call to the option_greeks table
+        # TODO: This is deprecated and should be replaced with a call to the option_greeks table
         query = f"""
             WITH
             -- Gather option ticks near current_dt
@@ -314,16 +314,24 @@ class InstrumentStore:
     
     
     @classmethod
-    def ohlcv_for_instrument_id(cls, instrument_id: int) -> pd.DataFrame:
+    def ohlcv_for_instrument(cls, instrument: Instrument) -> pd.DataFrame:
+        time_filter = ""
+        
+        # NOTE: This is required due to the fact that instrument ids can be reused
+        if isinstance(instrument, Option):
+            ts_min = cls.get_time().timestamp()
+            ts_max = instrument.expiration.timestamp()
+            time_filter = f"AND ts_event BETWEEN {ts_min} AND {ts_max}"
+        
         query = f"""
             SELECT ts_event, open, high, low, close, volume
             FROM ohlcv
-            WHERE instrument_id = {instrument_id}
+            WHERE instrument_id = {instrument.instrument_id} {time_filter}
             ORDER BY ts_event ASC;
         """
         df = cls._connection.execute(query).fetch_df()
         if df.empty:
-            raise ValueError(f"No ohlcv data found for ID {instrument_id}")
+            raise ValueError(f"No ohlcv data found for ID {instrument.instrument_id}")
         
         df.set_index('ts_event', inplace=True)
         return df
