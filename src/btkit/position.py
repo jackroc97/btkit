@@ -21,9 +21,10 @@ class PositionItem:
         multiplier = 1
         if isinstance(self.instrument, Option):
             multiplier = self.instrument.multiplier
-        sign = 1 if self.open_action == OrderAction.STO else -1
+        #sign = 1 if self.open_action == OrderAction.STO else -1
+        #sign = -1 if (self.open_action)
         close = self.instrument.get("close")
-        return sign * abs(self.quantity) * multiplier * close
+        return  abs(self.quantity) * multiplier * close
     
     
     @property
@@ -67,6 +68,22 @@ class Position:
     def pnl(self):
         return sum(item.pnl for item in self.items)
     
+    
+    @property
+    def open_cash_effect(self):
+        cash_eff = 0
+        for item in self.items:
+            cash_eff += self.market_price * -1 if item.open_action == OrderAction.BTO else 1
+        return cash_eff
+        
+    
+    @property
+    def close_cash_effect(self):
+        cash_eff = 0
+        for item in self.items:
+            cash_eff += self.market_price * -1 if item.open_action == OrderAction.BTC else 1
+        return cash_eff
+        
     
     def __post_init__(self):
         self.open_price = sum(item.open_price for item in self.items)
