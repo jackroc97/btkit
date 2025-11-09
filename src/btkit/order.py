@@ -13,6 +13,7 @@ class OrderAction(Enum):
 
 @dataclass 
 class Order:
+    action: OrderAction
     quantity: float
     instrument: Instrument
     

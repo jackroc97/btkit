@@ -26,10 +26,10 @@ class Broker:
         
     # TODO: Can we make OrderSide value either -1 SELL or 1 BUY and use that directly in the math...?
     def open_position(self, *orders: Order) -> None:
-        position = Position([PositionItem(o.quantity, o.instrument, OrderAction.BTO if o.quantity > 0 else OrderAction.STO) for o in orders])
-        cash_eff = position.open_cash_effect
-        if self.cash_balance + cash_eff > 0: 
-            self.cash_balance += cash_eff
+        position = Position([PositionItem(o.quantity, o.instrument, o.action) for o in orders])
+        
+        if self.cash_balance + position.open_price > 0: 
+            self.cash_balance += position.open_price
             self.positions.append(position)
             self.logger.log_trade(self._now, position)
             print(f"{self._now} | Opened new position: {position}")
@@ -40,8 +40,7 @@ class Broker:
 
     
     def close_position(self, position: Position) -> None:
-        cash_eff = position.close_cash_effect
-        self.cash_balance += cash_eff
+        self.cash_balance -= position.market_price
         self.positions.remove(position)
         self.logger.log_trade(self._now, position, is_closing=True)
         print(f"{self._now} | Closed position {position}")
