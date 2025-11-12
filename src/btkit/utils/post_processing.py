@@ -68,6 +68,9 @@ class PostprocTool:
             median_trade_pnl = df["pnl"].median()
             average_trade_pnl = df["pnl"].mean()
             
+            average_pnl_win = df[df["pnl"] > 0]["pnl"].mean()
+            average_pnl_loss = df[df["pnl"] < 0]["pnl"].mean()
+            
             # Profit factor
             gross_profit = df.loc[df["pnl"] > 0, "pnl"].sum()
             gross_loss = -df.loc[df["pnl"] < 0, "pnl"].sum()  # make positive
@@ -115,9 +118,11 @@ class PostprocTool:
                 "id": [row["id"]],
                 "net_profit": [net_profit],
                 "total_closed_trades": [total_closed_trades],
-                "percent_profitable_trades": [percent_profitable_trades],
+                "percent_profitable": [percent_profitable_trades],
                 "median_trade_pnl": [median_trade_pnl],
                 "average_trade_pnl": [average_trade_pnl],
+                "average_win": [average_pnl_win],
+                "average_loss": [average_pnl_loss],
                 "profit_factor": [profit_factor],
                 "max_drawdown": [max_drawdown],
                 "cagr": [cagr],
@@ -131,26 +136,30 @@ class PostprocTool:
         self.session_df = pd.merge(self.session_df, results_df, on="id")
     
     
-    def summary(self, session_id: int):
+    def summarize(self, session_id: int):
         session = self.session_df[self.session_df["id"] == session_id].iloc[0]
         print("======================================================")
         print(f"Summary for Session {session['id']}")
         print("======================================================")
         print(f"Net Profit: ${session['net_profit']:.2f}")
         print(f"Total Closed Trades: {session['total_closed_trades']}")
-        print(f"Percent Profitable Trades: {session['percent_profitable_trades']:.2f}%")
+        print(f"Percent Profitable Trades: {session['percent_profitable']:.2f}%")
         print(f"Profit Factor: {session['profit_factor']:.2f}")
         print(f"Median Trade PnL: ${session['median_trade_pnl']:.2f}")
         print(f"Average Trade PnL: ${session['average_trade_pnl']:.2f}")
+        print(f"Average Win: ${session['average_win']:.2f}")
+        print(f"Average Loss: ${session['average_loss']:.2f}")
         print(f"Maximum Drawdown: ${session['max_drawdown']:.2f}")
+        print(f"CAGR: {(session['cagr'] * 100):.2f}%")
+        print(f"MAR: {session['mar']:.2f}")
         print(f"Sharpe Ratio: {session['sharpe_ratio']:.2f}")
         print(f"Sortino Ratio: {session['sortino_ratio']:.2f}")
         print(f"Calmar Ratio: {session['calmar_ratio']:.2f}")
         print("======================================================")
-    
-
+        
+        
     # TODO: ability to add comparisons to other series
-    def equity_curve(self, session_id: int, show: bool = True, fig: go.Figure = None, **kwargs):
+    def equity_curve(self, session_id: int, show: bool = True, fig: go.Figure = None, **kwargs) -> go.Figure:
         df = self.trade_summaries[session_id]
         
         line_plot = go.Line(x=df["time"], y=df["equity"])
@@ -168,7 +177,7 @@ class PostprocTool:
         if show:
             fig.show()
         
-        return line_plot
+        return fig
     
     
     def pnl_histogram(self, session_id: int, show: bool = True, fig: go.Figure = None, **kwargs):
@@ -189,7 +198,7 @@ class PostprocTool:
         if show:
             fig.show()
         
-        return histogram
+        return fig
     
     
     def trade_scatterplot(self, session_id: int, show: bool = True, fig: go.Figure = None, **kwargs):
@@ -210,7 +219,7 @@ class PostprocTool:
         if show:
             fig.show()
         
-        return scatter_plot
+        return fig
         
 
     def heatmap(self, metric: str, selectors: dict[str, any], x_variable: str, y_variable: str, show: bool = True, fig: go.Figure = None, **kwargs):
@@ -252,5 +261,5 @@ class PostprocTool:
         if show:
             fig.show()
             
-        return heatmap
+        return fig
             
