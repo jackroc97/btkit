@@ -21,6 +21,10 @@ class Instrument:
     
     def __post_init__(self):
         self._df = InstrumentStore.ohlcv_for_instrument(self)
+        
+    
+    def has_data(self) -> bool:
+        return not self._df.empty
     
     
     def exists(self, at_time: datetime = None, bars_ago: int = None) -> bool:
@@ -75,13 +79,9 @@ class Future(Instrument):
     def get_option_chain(self, max_strike_dist: float = 200, max_dte: int = 15, time_tol: timedelta = timedelta(minutes=15)) -> pd.DataFrame: 
         # TODO: Do not use this in its present state... query needs to be updated to use pre-computed greeks
         # Query option chain for the given parameters
-        df = InstrumentStore.option_chain_for_instrument_id(self.instrument_id, max_strike_dist, max_dte, time_tol)
-        
-        # Compute greek
-        #df["T"] = (df["ts_expiration"] - df["option_ts"]) / (365.0 * 24 * 3600)
-        #df["sigma"] = df.apply(Black76.sigma, axis=1)
-        #df["delta"] = df.apply(Black76.delta, axis=1)
-        return df
+        #df = InstrumentStore.option_chain_for_instrument_id(self.instrument_id, max_strike_dist, max_dte, time_tol)
+        #return df
+        raise NotImplementedError("Not currently implemented, needs to be re-written to use pre-computed greeks")
     
     
 @dataclass
@@ -136,6 +136,11 @@ class InstrumentStore:
     
     
     @classmethod
+    def disconnect_database(cls) -> None:
+        cls._connection.close()
+        
+    
+    @classmethod
     def set_time(cls, now: datetime) -> None:
         cls._now = now
         
@@ -156,8 +161,9 @@ class InstrumentStore:
                 SELECT {','.join(columns)}
                 FROM definition
                 WHERE instrument_id = {int(instrument_id)} 
-                    AND instrument_class in ('C', 'P')
-                    AND ts_expiration >= {cls._now.timestamp()};
+                    AND instrument_class in ('C', 'P')              -- Only filter to only options
+                    AND ts_event <= {cls._now.timestamp()}          -- No options defined in the future 
+                    AND ts_expiration >= {cls._now.timestamp()};    -- No options expiring in the past
             """
         else:
             query = f"""
@@ -172,10 +178,10 @@ class InstrumentStore:
         
         instrument_class = result[-1]
         if instrument_class == DbnInstrumentClass.FUTURE.value:
-            return Future(*result[0:3])
+            return cls.instrument_or_none(Future(*result[0:3]))
         elif instrument_class in {DbnInstrumentClass.CALL.value, DbnInstrumentClass.PUT.value}:
             right = OptionRight.CALL if instrument_class == DbnInstrumentClass.CALL.value else OptionRight.PUT
-            return Option(*result[0:6], right)
+            return cls.instrument_or_none(Option(*result[0:6], right))
         else:
             raise ValueError(f"Unsupported instrument class {instrument_class} for ID {instrument_id}")
     
@@ -191,9 +197,10 @@ class InstrumentStore:
         result = cls._connection.execute(query).fetchone()
 
         if result is None:
-            raise ValueError(f"No future found for symbol {symbol} expiring on {expiration}")
+            warnings.warn(f"{cls.get_time()} | No future found for symbol {symbol} expiring on {expiration}; returning None.")
+            return None
         
-        return Future(*result)
+        return cls.instrument_or_none(Future(*result))
     
 
     @classmethod
@@ -227,11 +234,12 @@ class InstrumentStore:
         result = cls._connection.execute(query).fetchone()
 
         if result is None:
-            raise ValueError(f"No option found for underlying ID {underlying.instrument_id}")
+            warnings.warn(f"{cls.get_time()} | No option found for underlying symbol {underlying.symbol} with parameters exp={expiration}, stk={strike_price}, right={right.value[0]}; returning None.")
+            return None
         
         instrument_class = result[-1]
         right = OptionRight.CALL if instrument_class == DbnInstrumentClass.CALL.value else OptionRight.PUT
-        return Option(*result[0:6], right)
+        return cls.instrument_or_none(Option(*result[0:6], right))
         
 
     @classmethod 
@@ -331,7 +339,9 @@ class InstrumentStore:
         """
         df = cls._connection.execute(query).fetch_df()
         if df.empty:
-            raise ValueError(f"No ohlcv data found for ID {instrument.instrument_id}")
+            # TODO: Print a warning here instead
+            ...
+            #raise ValueError(f"No ohlcv data found for ID {instrument.instrument_id} at time {cls.get_time()}")
         
         df.set_index('ts_event', inplace=True)
         return df
@@ -364,3 +374,12 @@ class InstrumentStore:
             LIMIT {max_results}
         """
         return cls._connection.execute(query).fetch_df()
+
+
+    @classmethod
+    def instrument_or_none(cls, instrument: Instrument) -> Instrument:
+        if instrument.has_data():
+            return instrument
+        else: 
+            warnings.warn(f"{cls.get_time()} | {instrument} has no data; returning None.")
+            return None

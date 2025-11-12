@@ -1,3 +1,5 @@
+import warnings
+
 from datetime import datetime
 
 from .logger import Logger
@@ -20,11 +22,9 @@ class Broker:
         # Check if any positions are expired, and close them if so
         for position in self.positions:
             if position.is_expired:
-                print(f"{self._now} | Found expired position: {position}")
                 self.close_position(position)
         
         
-    # TODO: Can we make OrderSide value either -1 SELL or 1 BUY and use that directly in the math...?
     def open_position(self, *orders: Order) -> None:
         position = Position([PositionItem(o.quantity, o.instrument, o.action) for o in orders])
         
@@ -32,10 +32,9 @@ class Broker:
             self.cash_balance += position.open_price
             self.positions.append(position)
             self.logger.log_trade(self._now, position)
-            print(f"{self._now} | Opened new position: {position}")
             
         else:
-            # TODO: Warn that position could not be opened!
+            warnings.warn(f"Could not open position at time {self._now} (balance = ${self.cash_balance})")
             pass
 
     
@@ -43,5 +42,4 @@ class Broker:
         self.cash_balance -= position.market_price
         self.positions.remove(position)
         self.logger.log_trade(self._now, position, is_closing=True)
-        print(f"{self._now} | Closed position {position}")
         

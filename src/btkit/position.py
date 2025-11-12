@@ -67,6 +67,10 @@ class Position:
     def pnl(self):
         return sum(item.pnl for item in self.items)
         
+    @property
+    def pnl_pct(self):
+        return self.pnl / self.open_price
+    
     
     def __post_init__(self):
         self.open_price = sum(item.open_price for item in self.items)

@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 
@@ -17,7 +18,7 @@ class Logger:
             self.create_database(self.db_file_path)
         
 
-    def start_session(self, strategy_name: str, strategy_version: str):
+    def start_session(self, strategy_name: str, strategy_version: str, starting_balance: float, strat_params: dict = {}):
         self.con = sqlite3.connect(self.db_file_path)
         cur = self.con.cursor()
         
@@ -29,9 +30,10 @@ class Logger:
             
         start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S%z")
 
+        param_str = json.dumps(strat_params)
         cur.execute(f'''
-            INSERT INTO session(strategy_name, strategy_version, start_time)
-            VALUES('{strategy_name}', '{strategy_version}', '{start_time}')
+            INSERT INTO session(strategy_name, strategy_version, starting_balance, start_time, strategy_params)
+            VALUES('{strategy_name}', '{strategy_version}', {starting_balance}, '{start_time}', '{param_str}')
         ''')
         self.con.commit()
         self.session_id = cur.lastrowid
@@ -90,9 +92,11 @@ class Logger:
                 id                  INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
                 strategy_name       TEXT NOT NULL,
                 strategy_version    TEXT NOT NULL,
+                starting_balance    REAL NOT NULL,
                 start_time          TEXT NOT NULL,
                 end_time            TEXT,
-                FOREIGN KEY(strategy_name, strategy_version) REFERENCES strategy(name, version)
+                strategy_params     TEXT,
+                FOREIGN KEY(strategy_name, strategy_version) REFERENCES strategy(name, version) 
             )
             """
         cur.execute(create_session_table)
