@@ -222,7 +222,7 @@ class PostprocTool:
         return fig
         
 
-    def heatmap(self, metric: str, selectors: dict[str, any], x_variable: str, y_variable: str, show: bool = True, fig: go.Figure = None, **kwargs):
+    def heatmap(self, metric: str, selectors: dict[str, any], x_variable: str, y_variable: str, subplot: bool = False, **kwargs):
         # Filter the data
         filtered_df = self.session_df.copy()
         for col, val in selectors.items():
@@ -239,6 +239,7 @@ class PostprocTool:
             z=z,
             x=pivot.columns,
             y=pivot.index,
+            showscale=False,
             colorscale=kwargs.get("colorscale", [[0.0, "red"], [0.5, "white"], [1.0, "blue"]]),
             zmin=zmin,
             zmax=zmax,
@@ -248,18 +249,16 @@ class PostprocTool:
         )
 
         # Add to figure and show
-        if fig is None:
+        if not subplot:
             fig = go.Figure()
             fig.update_layout(
                 title = kwargs.get("title", { 'text': metric.replace("_", " ").title() }),
                 xaxis_title = kwargs.get("xaxis_title", {'text' : x_variable.replace("_", " ").title() }),
                 yaxis_title = kwargs.get("yaxis_title", {'text' : y_variable.replace("_", " ").title() }),
             )
-            
-        fig.add_trace(heatmap)
-        
-        if show:
+            fig.add_trace(heatmap)
             fig.show()
-            
-        return fig
+            return None
+
+        return heatmap
             
