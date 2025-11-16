@@ -205,25 +205,25 @@ class PostprocTool:
         return fig
     
     
-    def trade_scatterplot(self, session_id: int, show: bool = True, fig: go.Figure = None, **kwargs):
+    def trade_scatterplot(self, session_id: int, show: bool = True, subplot: bool = False, **kwargs):
         df = self.trade_summaries[session_id]
         
-        scatter_plot = go.Scatter(x=df["time"], y=df["pnl"], mode="markers")
+        scatter_plot = go.Scatter(x=df["time"], y=df["pnl"], mode="markers", name=kwargs.get("name", "Trade PnL"))
         
-        if fig is None:
+        
+        # Add to figure and show
+        if not subplot:
             fig = go.Figure()
             fig.update_layout(
                 title = kwargs.get("title", { 'text': f"Session {session_id} Trade PnL" }),
                 xaxis_title = kwargs.get("xaxis_title", {'text' : "Time" }),
                 yaxis_title = kwargs.get("yaxis_title", {'text' : "Profit and Loss (USD)" }),
             )
-            
-        fig.add_trace(scatter_plot)
-        
-        if show:
+            fig.add_trace(scatter_plot)
             fig.show()
-        
-        return fig
+            return None
+
+        return scatter_plot
         
 
     def heatmap(self, metric: str, selectors: dict[str, any], x_variable: str, y_variable: str, subplot: bool = False, **kwargs):
@@ -250,6 +250,7 @@ class PostprocTool:
             text=text,
             texttemplate="%{text}",
             textfont={"size": 10, "color": "black"},
+            name=kwargs.get("name", metric.replace("_", " ").title())
         )
 
         # Add to figure and show
