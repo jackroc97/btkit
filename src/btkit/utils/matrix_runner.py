@@ -16,7 +16,7 @@ def run_single_backtest(args):
     strategy_type, params, starting_balance, start_time, end_time, time_step, output_db_path, date_settings = args
     
     strat = strategy_type(**params)
-    tqdm.write("Starting job...")
+    tqdm.write(f"Starting job {output_db_path}...")
     strat.run_backtest(
         starting_balance,
         start_time,
@@ -26,7 +26,7 @@ def run_single_backtest(args):
         date_settings,
         suppress=True,
     )
-    tqdm.write("Finished job")
+    tqdm.write(f"Finished job {output_db_path}")
     return True 
         
         
