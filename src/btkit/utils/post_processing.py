@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import sqlite3
+import warnings
 
 from plotly.subplots import make_subplots
 from zoneinfo import ZoneInfo
@@ -30,107 +31,110 @@ class PostprocTool:
 
         # Calculate results for all sessions
         results_df = pd.DataFrame()
-        for _, row in self.session_df.iterrows():
-            query = f"""
-                SELECT * FROM trade WHERE session_id = {row['id']}
-            """
-            df = pd.read_sql_query(query, self.conn)
-            
-            # Calculate per-trade PnL
-            df["cash_effect"] = df["action"].str.contains("SELL_TO_OPEN|BUY_TO_OPEN").astype(int).replace({0: -1}) * df["mkt_price"]
-            df = (
-                df.groupby("position_uuid", as_index=False)
-                  .agg({
-                        "time": "max",           # use latest trade time for plotting
-                        "cash_effect": "sum",
-                        "symbol": "first",
-                        "expiration": "first",
-                        "right": "first"
-                  })
-                  .rename(columns={"cash_effect": "pnl"})
-            )
-            
-            # Compute time
-            df["time"] = pd.to_datetime(df["time"], utc=True, errors="coerce")
-            df["time"] = df["time"].dt.tz_convert(ZoneInfo("America/New_York"))
-            df = df.dropna(subset=["time"]).sort_values("time")
-            df["date"] = df["time"].dt.date
-    
-            # Calculate equity over time
-            df["equity"] = row['starting_balance'] + df["pnl"].cumsum()
-            
-            self.trade_summaries[row['id']] = df
-            
-            # Basic stats
-            net_profit = df["pnl"].sum()
-            total_closed_trades = len(df)
-            percent_profitable_trades = (df["pnl"] > 0).mean() * 100
-            median_trade_pnl = df["pnl"].median()
-            average_trade_pnl = df["pnl"].mean()
-            
-            average_pnl_win = df[df["pnl"] > 0]["pnl"].mean()
-            average_pnl_loss = df[df["pnl"] < 0]["pnl"].mean()
-            
-            # Profit factor
-            gross_profit = df.loc[df["pnl"] > 0, "pnl"].sum()
-            gross_loss = -df.loc[df["pnl"] < 0, "pnl"].sum()  # make positive
-            profit_factor = gross_profit / gross_loss if gross_loss != 0 else np.inf
+        for i, row in self.session_df.iterrows():
+            try:
+                query = f"""
+                    SELECT * FROM trade WHERE session_id = {row['id']}
+                """
+                df = pd.read_sql_query(query, self.conn)
 
-            # Drawdown calculation
-            equity = df["equity"]
-            running_max = equity.cummax()
-            drawdowns = running_max - equity
-            max_drawdown = drawdowns.max()
-            
-            # CAGR
-            start_equity = row['starting_balance']
-            end_equity = equity.iloc[-1]
-            total_days = (df["time"].iloc[-1] - df["time"].iloc[0]).days
-            years = total_days / 365.25
-            cagr = (end_equity / start_equity) ** (1 / years) - 1 if years > 0 else np.nan
-            
-            # MAR
-            mar = cagr / abs(max_drawdown) if max_drawdown != 0 else np.nan
-            
-            # Sharpe ratio
-            # Using per-trade returns relative to equity before trade
-            # r_i = PnL / equity_before_trade
-            equity_shifted = equity.shift(1).fillna(equity.iloc[0])
-            returns = df["pnl"] / equity_shifted
-            excess_returns = returns - 0.01 / 252  # convert annual RF to daily approx (assuming trades ~1/day)
-            sharpe_ratio = excess_returns.mean() / excess_returns.std() * np.sqrt(252)  # annualized
+                # Calculate per-trade PnL
+                df["cash_effect"] = df["action"].str.contains("SELL_TO_OPEN|BUY_TO_OPEN").astype(int).replace({0: -1}) * df["mkt_price"]
+                df = (
+                    df.groupby("position_uuid", as_index=False)
+                      .agg({
+                            "time": "max",           # use latest trade time for plotting
+                            "cash_effect": "sum",
+                            "symbol": "first",
+                            "expiration": "first",
+                            "right": "first"
+                      })
+                      .rename(columns={"cash_effect": "pnl"})
+                )
 
-            # Sortino ratio
-            neg_returns = excess_returns[excess_returns < 0]
-            downside_std = neg_returns.std()
-            sortino_ratio = excess_returns.mean() / downside_std * np.sqrt(252)
+                # Compute time
+                df["time"] = pd.to_datetime(df["time"], utc=True, errors="coerce")
+                df["time"] = df["time"].dt.tz_convert(ZoneInfo("America/New_York"))
+                df = df.dropna(subset=["time"]).sort_values("time")
+                df["date"] = df["time"].dt.date
 
-            # Calmar ratio
-            # Annualized return / max drawdown
-            # Approximate annualized return using cumulative net profit / starting balance
-            starting_balance = df["equity"].iloc[0]
-            cumulative_return = (equity.iloc[-1] - starting_balance) / starting_balance
-            annualized_return = (1 + cumulative_return) ** (1 / years) - 1
-            calmar_ratio = annualized_return / (max_drawdown / starting_balance)
-            
-            # Combine into a dataframe
-            results_df = pd.concat([results_df, pd.DataFrame({
-                "id": [row["id"]],
-                "net_profit": [net_profit],
-                "total_closed_trades": [total_closed_trades],
-                "percent_profitable": [percent_profitable_trades],
-                "median_trade_pnl": [median_trade_pnl],
-                "average_trade_pnl": [average_trade_pnl],
-                "average_win": [average_pnl_win],
-                "average_loss": [average_pnl_loss],
-                "profit_factor": [profit_factor],
-                "max_drawdown": [max_drawdown],
-                "cagr": [cagr],
-                "mar": [mar],
-                "sharpe_ratio": [sharpe_ratio],
-                "sortino_ratio": [sortino_ratio],
-                "calmar_ratio": [calmar_ratio]
-            })])
+                # Calculate equity over time
+                df["equity"] = row['starting_balance'] + df["pnl"].cumsum()
+
+                self.trade_summaries[row['id']] = df
+
+                # Basic stats
+                net_profit = df["pnl"].sum()
+                total_closed_trades = len(df)
+                percent_profitable_trades = (df["pnl"] > 0).mean() * 100
+                median_trade_pnl = df["pnl"].median()
+                average_trade_pnl = df["pnl"].mean()
+
+                average_pnl_win = df[df["pnl"] > 0]["pnl"].mean()
+                average_pnl_loss = df[df["pnl"] < 0]["pnl"].mean()
+
+                # Profit factor
+                gross_profit = df.loc[df["pnl"] > 0, "pnl"].sum()
+                gross_loss = -df.loc[df["pnl"] < 0, "pnl"].sum()  # make positive
+                profit_factor = gross_profit / gross_loss if gross_loss != 0 else np.inf
+
+                # Drawdown calculation
+                equity = df["equity"]
+                running_max = equity.cummax()
+                drawdowns = running_max - equity
+                max_drawdown = drawdowns.max()
+
+                # CAGR
+                start_equity = row['starting_balance']
+                end_equity = equity.iloc[-1]
+                total_days = (df["time"].iloc[-1] - df["time"].iloc[0]).days
+                years = total_days / 365.25
+                cagr = (end_equity / start_equity) ** (1 / years) - 1 if years > 0 else np.nan
+
+                # MAR
+                mar = cagr / abs(max_drawdown) if max_drawdown != 0 else np.nan
+
+                # Sharpe ratio
+                # Using per-trade returns relative to equity before trade
+                # r_i = PnL / equity_before_trade
+                equity_shifted = equity.shift(1).fillna(equity.iloc[0])
+                returns = df["pnl"] / equity_shifted
+                excess_returns = returns - 0.01 / 252  # convert annual RF to daily approx (assuming trades ~1/day)
+                sharpe_ratio = excess_returns.mean() / excess_returns.std() * np.sqrt(252)  # annualized
+
+                # Sortino ratio
+                neg_returns = excess_returns[excess_returns < 0]
+                downside_std = neg_returns.std()
+                sortino_ratio = excess_returns.mean() / downside_std * np.sqrt(252)
+
+                # Calmar ratio
+                # Annualized return / max drawdown
+                # Approximate annualized return using cumulative net profit / starting balance
+                starting_balance = df["equity"].iloc[0]
+                cumulative_return = (equity.iloc[-1] - starting_balance) / starting_balance
+                annualized_return = (1 + cumulative_return) ** (1 / years) - 1
+                calmar_ratio = annualized_return / (max_drawdown / starting_balance)
+
+                # Combine into a dataframe
+                results_df = pd.concat([results_df, pd.DataFrame({
+                    "id": [row["id"]],
+                    "net_profit": [net_profit],
+                    "total_closed_trades": [total_closed_trades],
+                    "percent_profitable": [percent_profitable_trades],
+                    "median_trade_pnl": [median_trade_pnl],
+                    "average_trade_pnl": [average_trade_pnl],
+                    "average_win": [average_pnl_win],
+                    "average_loss": [average_pnl_loss],
+                    "profit_factor": [profit_factor],
+                    "max_drawdown": [max_drawdown],
+                    "cagr": [cagr],
+                    "mar": [mar],
+                    "sharpe_ratio": [sharpe_ratio],
+                    "sortino_ratio": [sortino_ratio],
+                    "calmar_ratio": [calmar_ratio]
+                })])
+            except:
+                warnings.warn(f"Could not calculate results for row {i}")
             
         # Merge stats into session dataframe
         self.session_df = pd.merge(self.session_df, results_df, on="id")

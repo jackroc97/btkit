@@ -9,10 +9,11 @@ from .position import Position, PositionItem
 
 class Broker:
     
-    def __init__(self, starting_cash: float, logger: Logger):
+    def __init__(self, starting_cash: float, logger: Logger, commission_per_contract: float = 0):
         self.cash_balance = starting_cash
         self.positions: list[Position] = []
         self.logger = logger
+        self.commission_per_contract = commission_per_contract
         self._now: datetime = None
        
         
@@ -28,8 +29,12 @@ class Broker:
     def open_position(self, *orders: Order) -> None:
         position = Position([PositionItem(o.quantity, o.instrument, o.action) for o in orders])
         
-        if self.cash_balance + position.open_price > 0: 
-            self.cash_balance += position.open_price
+        commission_paid = sum([o.quantity for o in orders]) * self.commission_per_contract
+        
+        # The position open_price will be negative for a debit and positive for a credit
+        # Commission is defined as positive and will always be applied to portfolio balance as a debit
+        if self.cash_balance + position.open_price - commission_paid > 0: 
+            self.cash_balance += (position.open_price - commission_paid)
             self.positions.append(position)
             self.logger.log_trade(self._now, position)
             
