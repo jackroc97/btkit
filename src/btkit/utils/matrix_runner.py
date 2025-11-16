@@ -12,7 +12,9 @@ from typing import Type
 from ..strategy import Strategy, DateSettings
 
 
-def run_single_backtest(strategy_type: Type[Strategy], params: dict, starting_balance: float, start_time: datetime, end_time: datetime, time_step: timedelta, output_db_path: str, date_settings: DateSettings):    
+def run_single_backtest(args):
+    strategy_type, params, starting_balance, start_time, end_time, time_step, output_db_path, date_settings = args
+    
     strat = strategy_type(**params)
     strat.run_backtest(
         starting_balance,
