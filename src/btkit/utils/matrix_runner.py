@@ -56,10 +56,9 @@ class MatrixRunner:
         for _, row in tqdm(self.matrix_df.iterrows(), total=len(self.matrix_df)):
             strat = self.strategy_type(**row.to_dict())
             strat.run_backtest(starting_balance, start_time, end_time, time_step, output_db_path, date_settings, suppress=True)
-            
-            
-    def run_parallel(self, starting_balance: float, start_time: datetime, end_time: datetime, time_step: timedelta, output_db_path: str, date_settings: DateSettings = None, max_workers: int = None):
-        def run_single_backtest(strategy_type: Type[Strategy], params: dict, starting_balance: float, start_time: datetime, end_time: datetime, time_step: timedelta, output_db_path: str, date_settings: DateSettings):    
+       
+    
+    def _run_single_backtest(self, strategy_type: Type[Strategy], params: dict, starting_balance: float, start_time: datetime, end_time: datetime, time_step: timedelta, output_db_path: str, date_settings: DateSettings):    
             strat = strategy_type(**params)
             strat.run_backtest(
                 starting_balance,
@@ -70,7 +69,9 @@ class MatrixRunner:
                 date_settings,
                 suppress=True,
             )
-            return True
+            return True     
+            
+    def run_parallel(self, starting_balance: float, start_time: datetime, end_time: datetime, time_step: timedelta, output_db_path: str, date_settings: DateSettings = None, max_workers: int = None):
         
         if max_workers is None:
             max_workers = multiprocessing.cpu_count()
@@ -90,7 +91,7 @@ class MatrixRunner:
             ))
 
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            list(tqdm(executor.map(run_single_backtest, tasks), total=len(tasks)))
+            list(tqdm(executor.map(self._run_single_backtest, tasks), total=len(tasks)))
             
             
     def _resume_from(self, design_id: int, starting_balance: float, start_time: datetime, end_time: datetime, time_step: timedelta, output_db_path: str, date_settings: DateSettings = None):
