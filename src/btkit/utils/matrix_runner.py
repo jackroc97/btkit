@@ -16,6 +16,7 @@ def run_single_backtest(args):
     strategy_type, params, starting_balance, start_time, end_time, time_step, output_db_path, date_settings = args
     
     strat = strategy_type(**params)
+    tqdm.write("Starting job...")
     strat.run_backtest(
         starting_balance,
         start_time,
@@ -25,6 +26,7 @@ def run_single_backtest(args):
         date_settings,
         suppress=True,
     )
+    tqdm.write("Finished job")
     return True 
         
         
@@ -79,7 +81,7 @@ class MatrixRunner:
             max_workers = multiprocessing.cpu_count()
 
         tasks = []
-        for _, row in self.matrix_df.iterrows():
+        for i, row in self.matrix_df.iterrows():
             params = row.to_dict()
             tasks.append((
                 self.strategy_type,
@@ -88,7 +90,7 @@ class MatrixRunner:
                 start_time,
                 end_time,
                 time_step,
-                output_db_path,
+                f"{output_db_path}/log_{i}.db",
                 date_settings,
             ))
 
