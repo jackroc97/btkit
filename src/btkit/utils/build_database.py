@@ -1,6 +1,7 @@
 import databento as db
 import duckdb
 import glob
+import sys
 
 
 def table_exists(conn: duckdb.DuckDBPyConnection, table_name: str):
@@ -52,3 +53,5 @@ def build_database(database_path: str, raw_data_folder: str):
     print("Done!")
 
 
+if __name__ == "__main__":
+    build_database(*sys.argv[1:])
