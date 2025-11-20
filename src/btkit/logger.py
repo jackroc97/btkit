@@ -1,125 +1,52 @@
 import json
-import os
-import sqlite3
+import polars as pl
 
 from datetime import datetime
+from pathlib import Path
 
-from .instrument import Future, Option
+from .instrument import Option
 from .order import OrderAction
 from .position import Position
 
 
 class Logger:
-    
-    def __init__(self, db_file_path: str):
-        self.db_file_path = db_file_path
-        
-        if not os.path.exists(db_file_path):
-            self.create_database(self.db_file_path)
-        
+    def __init__(self, strategy_name, strategy_version, strategy_params, starting_balance, output_dir: str = "./logs", worker_id: int = 1):
+        self.worker_id = worker_id
+        self.output_dir = Path(f"{output_dir}/{strategy_name}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}")
+        self.output_dir.mkdir(parents=True, exist_ok=False)
 
-    def start_session(self, strategy_name: str, strategy_version: str, starting_balance: float, strat_params: dict = {}):
-        self.con = sqlite3.connect(self.db_file_path)
-        cur = self.con.cursor()
-        
-        cur.execute(f'''
-            INSERT or IGNORE INTO strategy(name, version)
-            VALUES ('{strategy_name}', '{strategy_version}')
-        ''')
-        self.con.commit()
-            
-        start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S%z")
-
-        param_str = json.dumps(strat_params)
-        cur.execute(f'''
-            INSERT INTO session(strategy_name, strategy_version, starting_balance, start_time, strategy_params)
-            VALUES('{strategy_name}', '{strategy_version}', {starting_balance}, '{start_time}', '{param_str}')
-        ''')
-        self.con.commit()
-        self.session_id = cur.lastrowid
-        
-    
-    def end_session(self):
-        cur = self.con.cursor()
-        end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S%z")
-        cur.execute(f'''
-            UPDATE session
-            SET end_time = '{end_time}'
-            WHERE id = {self.session_id}
-        ''')
-        self.con.commit()
-        self.con.close()
+        self.metadata = {
+            "strategy_name": strategy_name,
+            "strategy_version": strategy_version, 
+            "strategy_params": strategy_params,
+            "starting_cash": starting_balance,
+            "start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        self.trade_rows = []
 
 
-    def log_trade(self, trade_time: datetime, position: Position, is_closing: bool = False):
-        cur = self.con.cursor() 
-        for item in position.items:   
-            trade_action = item.open_action
-            expiration = item.instrument.expiration if isinstance(item.instrument, (Future, Option)) else ""
-            strike_price = item.instrument.strike_price if isinstance(item.instrument, Option) else ""
-            right = item.instrument.right if isinstance(item.instrument, Option) else ""
-            multiplier = item.instrument.multiplier if isinstance(item.instrument, Option) else ""
-            if is_closing:
-                trade_action = OrderAction.STC if item.open_action == OrderAction.BTO else OrderAction.BTC
-            cur.execute(f'''
-                INSERT or IGNORE INTO trade(session_id, position_uuid, position_item_uuid, time, action, quantity, mkt_price, symbol, expiration, strike, right, multiplier)
-                VALUES({self.session_id}, '{position.uuid}', '{item.uuid}', '{trade_time.strftime("%Y-%m-%d %H:%M:%S%z")}', '{trade_action.value}', {item.quantity}, {item.market_price}, '{item.instrument.symbol}', '{expiration}', {strike_price}, '{right.value}', {multiplier})
-            ''')
-        self.con.commit()
-        return cur.lastrowid
-        
+    def log_trade(self, time: datetime, postion: Position, is_closing: bool = False):
+        self.trade_rows.extend([{
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "position_uuid": str(postion.uuid),
+                "position_item_uuid": str(item.uuid),
+                "action": str(item.open_action.value) if not is_closing else (str(OrderAction.BTC.value) if item.open_action == OrderAction.STO else str(OrderAction.STC.value)),
+                "quantity": item.quantity,
+                "mkt_price": item.market_price,
+                "symbol": item.instrument.symbol,
+                "expiration": item.instrument.expiration.strftime("%Y-%m-%d %H:%M:%S") if isinstance(item.instrument, Option) else None,
+                "strike": item.instrument.strike_price if isinstance(item.instrument, Option) else None,
+                "right_price": str(item.instrument.right.value) if isinstance(item.instrument, Option) else None,
+                "multiplier": item.instrument.multiplier if isinstance(item.instrument, Option) else 1
+            } for item in postion.items])
 
-    @classmethod
-    def create_database(cls, db_file_path: str) -> None:
-        if os.path.exists(db_file_path):
-            print("Error: database already exists.")
-            return
-        
-        con = sqlite3.connect(db_file_path)
-        cur = con.cursor()
-        
-        create_strategy_table = f"""
-            CREATE TABLE strategy(
-                name    TEXT NOT NULL,
-                version TEXT NOT NULL,
-                PRIMARY KEY (name, version)
+
+    def write_log(self):
+        self.metadata["end_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(f"{self.output_dir}/worker_{self.worker_id}_metadata.json", "w") as metafile:
+            metafile.write(json.dumps(self.metadata))
+
+        if self.trade_rows:
+            pl.DataFrame(self.trade_rows).write_parquet(
+                self.output_dir / f"worker_{self.worker_id}_trade.parquet"
             )
-            """
-        cur.execute(create_strategy_table)
-
-        create_session_table = f"""
-            CREATE TABLE session(
-                id                  INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-                strategy_name       TEXT NOT NULL,
-                strategy_version    TEXT NOT NULL,
-                starting_balance    REAL NOT NULL,
-                start_time          TEXT NOT NULL,
-                end_time            TEXT,
-                strategy_params     TEXT,
-                FOREIGN KEY(strategy_name, strategy_version) REFERENCES strategy(name, version) 
-            )
-            """
-        cur.execute(create_session_table)
-        
-        create_trades_table = f"""
-            CREATE TABLE trade(
-                id                  INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-                session_id          INTEGER NOT NULL,
-                position_uuid       TEXT NOT NULL,
-                position_item_uuid  TEXT NOT NULL,
-                time                TEXT NOT NULL,
-                action              TEXT NOT NULL,
-                quantity            REAL NOT NULL,
-                mkt_price           REAL NOT NULL,
-                symbol              TEXT NOT NULL,
-                expiration          TEXT,
-                strike              REAL,
-                right               TEXT,
-                multiplier          REAL,
-                FOREIGN KEY(session_id) REFERENCES session(id)
-            )
-            """
-        cur.execute(create_trades_table)
-        
-        con.commit()
-        con.close()

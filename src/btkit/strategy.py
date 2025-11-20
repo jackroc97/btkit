@@ -26,32 +26,34 @@ class Strategy:
         self._params = kwargs
     
                 
-    def run_backtest(self, starting_balance: float, start_time: datetime, end_time: datetime, time_step: timedelta, output_db_path: str, date_settings: DateSettings = None, commission_per_contract: float = 0, suppress: bool = False):
+    def run_backtest(self, starting_balance: float, start_time: datetime, end_time: datetime, time_step: timedelta, output_dir: str, date_settings: DateSettings = None, commission_per_contract: float = 0, suppress: bool = False):
         # Configure backtest parameters
         self.date_settings = date_settings or DateSettings()   
         self.start_time = start_time.replace(tzinfo=date_settings.time_zone)
         self.end_time = end_time.replace(tzinfo=date_settings.time_zone)
         self.time_step = time_step
         self.now = self.start_time
-        self.logger = Logger(output_db_path)  
+        self.logger = Logger(self.name, self.version, self._params, starting_balance, output_dir)  
         self.broker = Broker(starting_balance, self.logger, commission_per_contract)
         
         # Begin running the backtest
-        t0 = datetime.now()
-        self.logger.start_session(self.name, self.version, starting_balance, self._params)
-        self.on_start()
+        try:
+            t0 = datetime.now()
+            self.on_start()
         
-        time_series = self._generate_time_series()
-        for t in tqdm(time_series, total=len(time_series), disable=suppress):
-            self.now = t
-            InstrumentStore.set_time(self.now)
-            self.broker.tick(self.now)
-            self.tick()
+            time_series = self._generate_time_series()
+            for t in tqdm(time_series, total=len(time_series), disable=suppress):
+                self.now = t
+                InstrumentStore.set_time(self.now)
+                self.broker.tick(self.now)
+                self.tick()
             
-        self.logger.end_session()
-        t1 = datetime.now()
+            t1 = datetime.now()
+        finally:
+            self.on_stop()
+            self.logger.write_log()
         
-        tqdm.write(f"Backtest completed in {(t1-t0).total_seconds():.2f} seconds (session_id={self.logger.session_id})")
+        tqdm.write(f"Backtest completed in {(t1-t0).total_seconds():.2f} seconds")
         
         
     def on_start(self):
