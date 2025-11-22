@@ -12,10 +12,9 @@ from .position import Position
 class Logger:
     def __init__(self, strategy_name: str, strategy_version: str, strategy_params: dict, starting_balance: float, output_dir: str, worker_id: int = 1):
         self.worker_id = worker_id
-        #self.output_dir = Path(f"{output_dir}/{strategy_name}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}")
         self.output_dir = Path(f"{output_dir}")
         self.output_dir.mkdir(parents=True, exist_ok=False)
-
+    
         self.metadata = {
             "strategy_name": strategy_name,
             "strategy_version": strategy_version, 
