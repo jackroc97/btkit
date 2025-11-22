@@ -12,7 +12,7 @@ from .position import Position
 class Logger:
     def __init__(self, strategy_name, strategy_version, strategy_params, starting_balance, output_dir: str = "./logs", worker_id: int = 1):
         self.worker_id = worker_id
-        self.output_dir = Path(f"{output_dir}/{strategy_name}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}")
+        #self.output_dir = Path(f"{output_dir}/{strategy_name}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}")
         self.output_dir.mkdir(parents=True, exist_ok=False)
 
         self.metadata = {

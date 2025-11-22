@@ -13,20 +13,20 @@ from ..strategy import Strategy, DateSettings
 
 
 def run_single_backtest(args):
-    strategy_type, params, starting_balance, start_time, end_time, time_step, output_db_path, date_settings = args
+    strategy_type, params, starting_balance, start_time, end_time, time_step, output_dir, date_settings = args
     
-    strat = strategy_type(**params)
-    tqdm.write(f"Starting job {output_db_path}...")
+    strat: Strategy = strategy_type(**params)
+    tqdm.write(f"Starting job {output_dir}...")
     strat.run_backtest(
         starting_balance,
         start_time,
         end_time,
         time_step,
-        output_db_path,
+        output_dir,
         date_settings,
         suppress=True,
     )
-    tqdm.write(f"Finished job {output_db_path}")
+    tqdm.write(f"Finished job {output_dir}")
     return True 
         
         
@@ -70,13 +70,13 @@ class MatrixRunner:
         return matrix_df
         
         
-    def run_series(self, starting_balance: float, start_time: datetime, end_time: datetime, time_step: timedelta, output_db_path: str, date_settings: DateSettings = None):
+    def run_series(self, starting_balance: float, start_time: datetime, end_time: datetime, time_step: timedelta, output_dir: str, date_settings: DateSettings = None):
         for _, row in tqdm(self.matrix_df.iterrows(), total=len(self.matrix_df)):
             strat = self.strategy_type(**row.to_dict())
-            strat.run_backtest(starting_balance, start_time, end_time, time_step, output_db_path, date_settings, suppress=True)
+            strat.run_backtest(starting_balance, start_time, end_time, time_step, output_dir, date_settings, suppress=True)
          
             
-    def run_parallel(self, starting_balance: float, start_time: datetime, end_time: datetime, time_step: timedelta, output_db_path: str, date_settings: DateSettings = None, max_workers: int = None):
+    def run_parallel(self, starting_balance: float, start_time: datetime, end_time: datetime, time_step: timedelta, output_dir: str, date_settings: DateSettings = None, max_workers: int = None):
         if max_workers is None:
             max_workers = multiprocessing.cpu_count()
 
@@ -90,7 +90,7 @@ class MatrixRunner:
                 start_time,
                 end_time,
                 time_step,
-                f"{output_db_path}/log_{i}.db",
+                f"{output_dir}/log_{i}.db",
                 date_settings,
             ))
 
@@ -98,14 +98,14 @@ class MatrixRunner:
             list(tqdm(executor.map(run_single_backtest, tasks), total=len(tasks)))
             
             
-    def _resume_from(self, design_id: int, starting_balance: float, start_time: datetime, end_time: datetime, time_step: timedelta, output_db_path: str, date_settings: DateSettings = None):
+    def _resume_from(self, design_id: int, starting_balance: float, start_time: datetime, end_time: datetime, time_step: timedelta, output_dir: str, date_settings: DateSettings = None):
         self.matrix_df = self.matrix_df[self.matrix_df["design_id"] >= design_id]
         
-        conn = sqlite3.connect(output_db_path)
+        conn = sqlite3.connect(output_dir)
         cur = conn.cursor()
         cur.execute(f"DELETE FROM trade WHERE session_id = {design_id};")
         cur.execute(f"DELETE FROM session WHERE id = {design_id};")
         conn.commit()
         conn.close()
         
-        self.run(starting_balance, start_time, end_time, time_step, output_db_path, date_settings)
+        self.run(starting_balance, start_time, end_time, time_step, output_dir, date_settings)
