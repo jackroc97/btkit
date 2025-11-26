@@ -41,12 +41,17 @@ def build_database(database_path: str, raw_data_folder: str):
             pl.col("expiration").dt.timestamp("us").alias("ts_expiration"),
         )
         
-        print("Inserting into database...")
-        if table_exists(conn, "definition"):
-            conn.execute(f"INSERT INTO definition SELECT * FROM definition_df")
-        else:
-            duckdb.sql("CREATE TABLE definition AS SELECT * from definition_df", connection=conn)
-
+        chunk_size = 100_000
+        for start in range(0, definition_df.height, chunk_size):
+            print(f"Processing rows {start} to {min(start + chunk_size, definition_df.height)}...")
+            end = min(start + chunk_size, definition_df.height)
+            definition_chunk = definition_df[start:end]
+            if table_exists(conn, "definition"):
+                conn.execute(f"INSERT INTO definition SELECT * FROM definition_chunk")
+            else:
+                duckdb.sql("CREATE TABLE definition AS SELECT * from definition_chunk", connection=conn)
+        
+    
     # Load ohlcv data
     print(f"Loading OHLCV data from {len(ohlcv_paths)} files...")
     for i, ohlcv_path in enumerate(ohlcv_paths):
@@ -62,11 +67,17 @@ def build_database(database_path: str, raw_data_folder: str):
 
         #ohlcv_df["ts_event"] = ohlcv_df.index.astype(int) // 10**9
         #ohlcv_df = ohlcv_df[["ts_event", *cols]]
+        
+        chunk_size = 100_000
+        for start in range(0, ohlcv_df.height, chunk_size):
+            print(f"Processing rows {start} to {min(start + chunk_size, ohlcv_df.height)}...")
+            end = min(start + chunk_size, ohlcv_df.height)
+            ohlcv_chunk = ohlcv_df[start:end]
 
-        if table_exists(conn, "ohlcv"):
-            conn.execute(f"INSERT INTO ohlcv SELECT * FROM ohlcv_df")
-        else:
-            duckdb.sql("CREATE TABLE ohlcv AS SELECT * from ohlcv_df", connection=conn)
+            if table_exists(conn, "ohlcv"):
+                conn.execute(f"INSERT INTO ohlcv SELECT * FROM ohlcv_chunk")
+            else:
+                duckdb.sql("CREATE TABLE ohlcv AS SELECT * from ohlcv_chunk", connection=conn)
     
     print("Done!")
 
