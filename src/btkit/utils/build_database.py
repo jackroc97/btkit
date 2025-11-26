@@ -3,6 +3,8 @@ import duckdb
 import glob
 import sys
 
+import polars as pl
+
 
 def table_exists(conn: duckdb.DuckDBPyConnection, table_name: str):
     return conn.execute(
@@ -27,11 +29,19 @@ def build_database(database_path: str, raw_data_folder: str):
     
     # Load definition data
     print(f"Loading definitions from {len(definition_paths)} files...")
-    for def_path in definition_paths:
-        definition_df = db.DBNStore.from_file(def_path).to_df()
-        definition_df["ts_event"] = definition_df["ts_event"].astype(int) // 10**9
-        definition_df["ts_expiration"] = definition_df["expiration"].astype(int) // 10**9
+    for i, def_path in enumerate(definition_paths):
+        print("Processing file:", def_path)
+        parq_file = f"{raw_data_folder}/tmp_defn_{i}.parquet"
+        definition_df = db.DBNStore.from_file(def_path).to_parquet()
         
+        print("Converting to polars DataFrame and processing timestamps...")
+        definition_df = pl.read_parquet(parq_file)
+        definition_df.with_columns(
+            pl.col("ts_event").dt.timestamp("us").alias("ts_event"),
+            pl.col("ts_expiration").dt.timestamp("us").alias("ts_expiration"),
+        )
+        
+        print("Inserting into database...")
         if table_exists(conn, "definition"):
             conn.execute(f"INSERT INTO definition SELECT * FROM definition_df")
         else:
@@ -39,11 +49,19 @@ def build_database(database_path: str, raw_data_folder: str):
 
     # Load ohlcv data
     print(f"Loading OHLCV data from {len(ohlcv_paths)} files...")
-    for ohlcv_path in ohlcv_paths:
-        ohlcv_df = db.DBNStore.from_file(ohlcv_path).to_df()
-        cols = ohlcv_df.columns
-        ohlcv_df["ts_event"] = ohlcv_df.index.astype(int) // 10**9
-        ohlcv_df = ohlcv_df[["ts_event", *cols]]
+    for i, ohlcv_path in enumerate(ohlcv_paths):
+        print("Processing file:", ohlcv_path)
+        parq_file = f"{raw_data_folder}/tmp_ohlcv_{i}.parquet"
+        ohlcv_df = db.DBNStore.from_file(ohlcv_path).to_parquet()
+
+        print("Converting to polars DataFrame and processing timestamps...")
+        ohlcv_df = pl.read_parquet(parq_file)
+        ohlcv_df = ohlcv_df.with_columns(
+            pl.col("ts_event").dt.timestamp("us").alias("ts_event"),
+        )
+
+        #ohlcv_df["ts_event"] = ohlcv_df.index.astype(int) // 10**9
+        #ohlcv_df = ohlcv_df[["ts_event", *cols]]
 
         if table_exists(conn, "ohlcv"):
             conn.execute(f"INSERT INTO ohlcv SELECT * FROM ohlcv_df")
