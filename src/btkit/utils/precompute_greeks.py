@@ -183,7 +183,7 @@ def precompute_greeks(database_path: str):
                 opt.ts_event,
                 opt.close AS option_close,
                 und.close AS underlying_close,
-                (opt.ts_expiration - opt.ts_event) / {SECONDS_PER_YEAR} AS T,
+                (epoch(opt.ts_expiration - opt.ts_event)) / {SECONDS_PER_YEAR} AS T,
                 FLOOR(T * 365) AS dte,
                 ABS(underlying_close - option_close) AS strike_distance
             FROM option_ohlcv opt
