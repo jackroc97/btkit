@@ -168,7 +168,7 @@ def precompute_greeks(database_path: str):
                 FROM option_definition d
                 JOIN ohlcv o
                     ON (d.instrument_id = o.instrument_id)
-                    AND (o.ts_event BETWEEN epoch(d.activation) AND d.ts_expiration)
+                    AND (epoch(o.ts_event) BETWEEN epoch(d.activation) AND epoch(d.ts_expiration))
                 ORDER BY raw_symbol
             )
 
