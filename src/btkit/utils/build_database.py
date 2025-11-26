@@ -32,7 +32,7 @@ def build_database(database_path: str, raw_data_folder: str):
     for i, def_path in enumerate(definition_paths):
         print("Processing file:", def_path)
         parq_file = f"{raw_data_folder}/tmp_defn_{i}.parquet"
-        definition_df = db.DBNStore.from_file(def_path).to_parquet()
+        definition_df = db.DBNStore.from_file(def_path).to_parquet(parq_file)
         
         print("Converting to polars DataFrame and processing timestamps...")
         definition_df = pl.read_parquet(parq_file)
@@ -52,7 +52,7 @@ def build_database(database_path: str, raw_data_folder: str):
     for i, ohlcv_path in enumerate(ohlcv_paths):
         print("Processing file:", ohlcv_path)
         parq_file = f"{raw_data_folder}/tmp_ohlcv_{i}.parquet"
-        ohlcv_df = db.DBNStore.from_file(ohlcv_path).to_parquet()
+        ohlcv_df = db.DBNStore.from_file(ohlcv_path).to_parquet(parq_file)
 
         print("Converting to polars DataFrame and processing timestamps...")
         ohlcv_df = pl.read_parquet(parq_file)
