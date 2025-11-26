@@ -38,7 +38,7 @@ def build_database(database_path: str, raw_data_folder: str):
         definition_df = pl.read_parquet(parq_file)
         definition_df.with_columns(
             pl.col("ts_event").dt.timestamp("us").alias("ts_event"),
-            pl.col("ts_expiration").dt.timestamp("us").alias("ts_expiration"),
+            pl.col("expiration").dt.timestamp("us").alias("ts_expiration"),
         )
         
         print("Inserting into database...")
