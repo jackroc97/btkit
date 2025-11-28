@@ -168,7 +168,7 @@ def precompute_greeks(database_path: str):
                 FROM option_definition d
                 JOIN ohlcv o
                     ON (d.instrument_id = o.instrument_id)
-                    AND (epoch(o.ts_event) BETWEEN epoch(d.activation) AND epoch(d.ts_expiration))
+                    AND (o.ts_event BETWEEN epoch(d.activation) AND d.ts_expiration)
                 ORDER BY raw_symbol
             )
 
@@ -183,7 +183,7 @@ def precompute_greeks(database_path: str):
                 opt.ts_event,
                 opt.close AS option_close,
                 und.close AS underlying_close,
-                (epoch(opt.ts_expiration - opt.ts_event)) / {SECONDS_PER_YEAR} AS T,
+                (opt.ts_expiration - opt.ts_event) / {SECONDS_PER_YEAR} AS T,
                 FLOOR(T * 365) AS dte,
                 ABS(underlying_close - option_close) AS strike_distance
             FROM option_ohlcv opt

@@ -34,12 +34,12 @@ def build_database(database_path: str, raw_data_folder: str):
         parq_file = f"{raw_data_folder}/tmp_defn_{i}.parquet"
         definition_df = db.DBNStore.from_file(def_path).to_parquet(parq_file)
         
-        print("Converting to polars DataFrame and processing timestamps...")
-        definition_df = pl.read_parquet(parq_file)
-        definition_df.with_columns(
-            pl.col("ts_event").dt.timestamp("us").alias("ts_event"),
-            pl.col("expiration").dt.timestamp("us").alias("ts_expiration"),
-        )
+        # print("Converting to polars DataFrame and processing timestamps...")
+        # definition_df = pl.read_parquet(parq_file)
+        # definition_df.with_columns(
+        #     pl.col("ts_event").dt.timestamp("us").alias("ts_event"),
+        #     pl.col("expiration").dt.timestamp("us").alias("ts_expiration"),
+        # )
         
         chunk_size = 100_000
         for start in range(0, definition_df.height, chunk_size):
@@ -59,11 +59,11 @@ def build_database(database_path: str, raw_data_folder: str):
         parq_file = f"{raw_data_folder}/tmp_ohlcv_{i}.parquet"
         ohlcv_df = db.DBNStore.from_file(ohlcv_path).to_parquet(parq_file)
 
-        print("Converting to polars DataFrame and processing timestamps...")
-        ohlcv_df = pl.read_parquet(parq_file)
-        ohlcv_df = ohlcv_df.with_columns(
-            pl.col("ts_event").dt.timestamp("us").alias("ts_event"),
-        )
+        # print("Converting to polars DataFrame and processing timestamps...")
+        # ohlcv_df = pl.read_parquet(parq_file)
+        # ohlcv_df = ohlcv_df.with_columns(
+        #     pl.col("ts_event").dt.timestamp("us").alias("ts_event"),
+        # )
 
         #ohlcv_df["ts_event"] = ohlcv_df.index.astype(int) // 10**9
         #ohlcv_df = ohlcv_df[["ts_event", *cols]]
@@ -80,6 +80,31 @@ def build_database(database_path: str, raw_data_folder: str):
                 duckdb.sql("CREATE TABLE ohlcv AS SELECT * from ohlcv_chunk", connection=conn)
     
     print("Done!")
+
+
+def convert_timestamps(database_path: str):
+    conn = duckdb.connect(database_path)
+    
+    # Convert ts_event and ts_expiration in definition table to unix timestamps
+    conn.execute(f"""
+        ALTER TABLE definition
+        ALTER COLUMN ts_event
+        TYPE BIGINT
+        USING COALESCE(
+            try_strptime(ts_event::TEXT, '%Y-%m-%d %H:%M:%S.%f%z'),
+            try_strptime(ts_event::TEXT, '%Y-%m-%d %H:%M:%S%z')
+        );
+    """)
+    
+    conn.execute(f"ALTER TABLE definition ADD COLUMN ts_expiration BIGINT;")
+    conn.execute(f"""
+        UPDATE definition
+        SET ts_expiration = COALESCE(
+            try_strptime(expiration::TEXT, '%Y-%m-%d %H:%M:%S.%f%z'),
+            try_strptime(expiration::TEXT, '%Y-%m-%d %H:%M:%S%z')
+        );
+    """)
+
 
 
 if __name__ == "__main__":
