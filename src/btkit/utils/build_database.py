@@ -12,6 +12,19 @@ def table_exists(conn: duckdb.DuckDBPyConnection, table_name: str):
     ).fetchone()[0] > 0
 
 
+def build_database2(database_path: str, raw_data_folder: str):
+    ...
+    
+    """
+    From symbology.json:
+    - instrument_id = s
+    - activation_date = d0
+    - expiration_date = d1
+    - strike, instrument_class infer from symbol
+    
+    """
+
+
 def build_database(database_path: str, raw_data_folder: str):
     definition_paths = glob.glob(f"{raw_data_folder}/**/*.definition.dbn.zst", recursive=True)
     ohlcv_paths = glob.glob(f"{raw_data_folder}/**/*.ohlcv*.dbn.zst", recursive=True)

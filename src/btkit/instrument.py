@@ -8,6 +8,10 @@ from datetime import date, datetime, timedelta
 from enum import Enum
 
 
+def timestamp_ms(dt: datetime) -> int:
+    return int(dt.timestamp() * 1000)
+
+
 class OptionRight(Enum):
     CALL = "CALL"
     PUT = "PUT"
@@ -30,7 +34,7 @@ class Instrument:
     def exists(self, at_time: datetime = None, bars_ago: int = None) -> bool:
         at_time = at_time or InstrumentStore.get_time()
         if not bars_ago:
-            return at_time.timestamp() in self._df.index
+            return timestamp_ms(at_time) in self._df.index
         else:
             # TODO: Implement
             raise NotImplementedError("Method exists with bars_ago parameter is not implemented.")
@@ -40,7 +44,7 @@ class Instrument:
         at_time = at_time or InstrumentStore.get_time()
         if self.exists(at_time=at_time, bars_ago=bars_ago):            
             if not bars_ago:
-                return self._df.loc[at_time.timestamp(), name]
+                return self._df.loc[timestamp_ms(at_time), name]
             else:
                 # TODO: Implement
                 raise NotImplementedError("Method get with bars_ago parameter is not implemented.")
@@ -52,7 +56,7 @@ class Instrument:
     def get_next(self, name: str, at_time: datetime = None, bars_ago: int = None) -> any:
         at_time = at_time or InstrumentStore.get_time()
         if not bars_ago:
-            next_index = self._df.index[self._df.index > at_time.timestamp()]
+            next_index = self._df.index[self._df.index > timestamp_ms(at_time)]
             if not next_index.empty:
                 return self._df.loc[next_index[0], name]
             else:
@@ -162,8 +166,8 @@ class InstrumentStore:
                 FROM definition
                 WHERE instrument_id = {int(instrument_id)} 
                     AND instrument_class in ('C', 'P')              -- Only filter to only options
-                    AND ts_event <= {cls._now.timestamp()}          -- No options defined in the future 
-                    AND ts_expiration >= {cls._now.timestamp()};    -- No options expiring in the past
+                    AND ts_event_ms <= {timestamp_ms(cls._now)}       -- No options defined in the future 
+                    AND expiration_ms >= {timestamp_ms(cls._now)};    -- No options expiring in the past
             """
         else:
             query = f"""
@@ -244,8 +248,8 @@ class InstrumentStore:
 
     @classmethod 
     def option_chain_for_instrument_id(cls, underlying_id: int, max_strike_dist: float, max_dte: int, time_tol: timedelta) -> pd.DataFrame:
-        tol_seconds = time_tol.total_seconds()
-        ts_unix = cls._now.timestamp()        
+        tol_ms = time_tol.total_seconds() * 1000
+        ts_unix_ms = timestamp_ms(cls._now)        
         min_exp: datetime = cls._now.replace(hour=0, minute=0, second=0, microsecond=0)
         max_exp: datetime = min_exp + timedelta(days=max_dte+1)
 
@@ -257,27 +261,27 @@ class InstrumentStore:
                 SELECT 
                     o.instrument_id,
                     d.symbol,
-                    d.ts_expiration,
+                    d.expiration_ms,
                     d.expiration,
                     d.strike_price,
                     d.instrument_class,
                     o.open, o.high, o.low, o.close, o.volume,
-                    o.ts_event AS opt_ts
+                    o.ts_event_ms AS opt_ts
                 FROM ohlcv o
                 JOIN definition d ON o.instrument_id = d.instrument_id
                 WHERE d.underlying_id = {underlying_id}
-                  AND (d.ts_expiration BETWEEN {min_exp.timestamp()} AND {max_exp.timestamp()})
-                  AND (o.ts_event BETWEEN {ts_unix - tol_seconds} AND {ts_unix + tol_seconds})
+                  AND (d.expiration_ms BETWEEN {timestamp_ms(min_exp)} AND {timestamp_ms(max_exp)})
+                  AND (o.ts_event_ms BETWEEN {ts_unix_ms - tol_ms} AND {ts_unix_ms + tol_ms})
             ),
 
             -- Gather underlying ticks near the same window
             underlying_data AS (
                 SELECT 
-                    ts_event AS und_ts,
+                    ts_event_ms AS und_ts,
                     close AS und_close
                 FROM ohlcv
                 WHERE instrument_id = {underlying_id}
-                  AND ts_event BETWEEN {ts_unix - tol_seconds} AND {ts_unix + tol_seconds}
+                  AND ts_event_ms BETWEEN {ts_unix_ms - tol_ms} AND {ts_unix_ms + tol_ms}
             ),
 
             -- For each option row, find the *closest* underlying tick
@@ -286,7 +290,7 @@ class InstrumentStore:
                     od.opt_ts AS option_ts,
                     od.instrument_id,
                     od.symbol,
-                    od.ts_expiration,
+                    od.expiration_ms,
                     od.expiration,
                     od.strike_price,
                     od.instrument_class,
@@ -295,7 +299,7 @@ class InstrumentStore:
                     ABS(od.opt_ts - ud.und_ts) AS time_diff
                 FROM option_data od
                 JOIN underlying_data ud
-                ON od.opt_ts BETWEEN (ud.und_ts - {tol_seconds}) AND (ud.und_ts + {tol_seconds})
+                ON od.opt_ts BETWEEN (ud.und_ts - {tol_ms}) AND (ud.und_ts + {tol_ms})
             ),
 
             -- Pick the closest underlying record per option tick
@@ -308,7 +312,7 @@ class InstrumentStore:
             -- Apply filters (DTE and strike distance)
             filtered AS (
                 SELECT
-                    option_ts, instrument_id, symbol, ts_expiration, expiration, strike_price, instrument_class,
+                    option_ts, instrument_id, symbol, expiration_ms, expiration, strike_price, instrument_class,
                     underlying_close, open, high, low, close, volume
                 FROM ranked
                 WHERE rn = 1
@@ -327,15 +331,15 @@ class InstrumentStore:
         
         # NOTE: This is required due to the fact that instrument ids can be reused
         if isinstance(instrument, Option):
-            ts_min = cls.get_time().timestamp()
-            ts_max = instrument.expiration.timestamp()
-            time_filter = f"AND ts_event BETWEEN {ts_min} AND {ts_max}"
+            ts_min = timestamp_ms(cls.get_time())
+            ts_max = timestamp_ms(instrument.expiration)
+            time_filter = f"AND ts_event_ms BETWEEN {ts_min} AND {ts_max}"
         
         query = f"""
-            SELECT ts_event, open, high, low, close, volume
+            SELECT ts_event_ms, open, high, low, close, volume
             FROM ohlcv
             WHERE instrument_id = {instrument.instrument_id} {time_filter}
-            ORDER BY ts_event ASC;
+            ORDER BY ts_event_ms ASC;
         """
         df = cls._connection.execute(query).fetch_df()
         if df.empty:
@@ -343,7 +347,7 @@ class InstrumentStore:
             ...
             #raise ValueError(f"No ohlcv data found for ID {instrument.instrument_id} at time {cls.get_time()}")
         
-        df.set_index('ts_event', inplace=True)
+        df.set_index('ts_event_ms', inplace=True)
         return df
 
 
@@ -353,12 +357,12 @@ class InstrumentStore:
                                 time_tol: timedelta = timedelta(minutes=5), max_results: int = 10) -> pd.DataFrame: 
         if at_time is None:
             at_time = cls._now
-        ts_min = at_time.timestamp() - time_tol.total_seconds()
-        ts_max = at_time.timestamp() + time_tol.total_seconds()
+        ts_min = timestamp_ms(at_time) - time_tol.total_seconds() * 1000
+        ts_max = timestamp_ms(at_time) + time_tol.total_seconds() * 1000
         
         query = f"""
             SELECT 
-                g.ts_event,
+                g.ts_event_ms,
                 g.instrument_id,
                 g.underlying_id,
                 g.strike_price,
@@ -367,7 +371,7 @@ class InstrumentStore:
                 ABS(g.delta - {desired_delta}) AS delta_diff
             FROM option_greeks g
             WHERE g.underlying_id = {underlying.instrument_id}
-                AND g.ts_event BETWEEN {ts_min} AND {ts_max}
+                AND g.ts_event_ms BETWEEN {ts_min} AND {ts_max}
                 AND g.option_right = '{option_right.value.upper()[0]}'
                 AND dte = {dte}
             ORDER BY delta_diff ASC

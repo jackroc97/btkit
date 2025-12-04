@@ -132,7 +132,8 @@ def black76_delta_numba(F_arr, K_arr, T_arr, sigma_arr, right_arr, r=0.01):
     return out
     
 def precompute_greeks(database_path: str):
-    SECONDS_PER_YEAR = 365.0 * 24 * 3600
+    # Roughly account for leap years (add .25 days)
+    MILLISECONDS_PER_YEAR = 365.25 * 24 * 3600 * 1000
 
     conn = duckdb.connect(database_path)
 
@@ -146,8 +147,8 @@ def precompute_greeks(database_path: str):
                     raw_symbol,
                     instrument_id,
                     underlying_id,
-                    activation,
-                    ts_expiration,
+                    activation_ms,
+                    expiration_ms,
                     strike_price,
                     instrument_class
                 FROM definition
@@ -159,16 +160,16 @@ def precompute_greeks(database_path: str):
                     d.raw_symbol,
                     d.instrument_id,
                     d.underlying_id,
-                    d.activation,
-                    d.ts_expiration,
+                    d.activation_ms,
+                    d.expiration_ms,
                     d.strike_price,
                     d.instrument_class,
-                    o.ts_event,
+                    o.ts_event_ms,
                     o.close,
                 FROM option_definition d
                 JOIN ohlcv o
                     ON (d.instrument_id = o.instrument_id)
-                    AND (o.ts_event BETWEEN epoch(d.activation) AND d.ts_expiration)
+                    AND (o.ts_event_ms BETWEEN d.activation_ms AND d.expiration_ms)
                 ORDER BY raw_symbol
             )
 
@@ -177,26 +178,26 @@ def precompute_greeks(database_path: str):
                 opt.raw_symbol,
                 opt.instrument_id,
                 opt.underlying_id,
-                opt.ts_expiration,
+                opt.expiration_ms,
                 opt.strike_price,
                 opt.instrument_class AS option_right,
-                opt.ts_event,
+                opt.ts_event_ms,
                 opt.close AS option_close,
                 und.close AS underlying_close,
-                (opt.ts_expiration - opt.ts_event) / {SECONDS_PER_YEAR} AS T,
+                (opt.expiration_ms - opt.ts_event_ms) / {MILLISECONDS_PER_YEAR} AS T,
                 FLOOR(T * 365) AS dte,
                 ABS(underlying_close - option_close) AS strike_distance
             FROM option_ohlcv opt
             JOIN ohlcv und
                 ON (opt.underlying_id = und.instrument_id)
-                AND (opt.ts_event = und.ts_event)
+                AND (opt.ts_event_ms = und.ts_event_ms)
         )
     """
     conn.execute(query)
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS option_greeks (
-            ts_event BIGINT, 
+            ts_event_ms BIGINT, 
             instrument_id INTEGER, 
             underlying_id INTEGER,
             strike_price DOUBLE, 
@@ -242,7 +243,7 @@ def precompute_greeks(database_path: str):
         output_df = df.copy()
         output_df["sigma"] = sigma
         output_df["delta"] = delta
-        output_df = output_df[["ts_event", "instrument_id", "underlying_id", "strike_price", "T", "dte", "strike_distance", "underlying_close", "option_close", "option_right", "sigma", "delta"]]
+        output_df = output_df[["ts_event_ms", "instrument_id", "underlying_id", "strike_price", "T", "dte", "strike_distance", "underlying_close", "option_close", "option_right", "sigma", "delta"]]
         conn.register("output_df", output_df)
         conn.execute(f"INSERT INTO option_greeks SELECT * FROM output_df")
         conn.unregister("output_df")
