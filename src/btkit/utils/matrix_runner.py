@@ -13,7 +13,7 @@ from ..strategy import Strategy, DateSettings
 
 
 def run_single_backtest(args):
-    strategy_type, params, starting_balance, start_time, end_time, time_step, output_dir, date_settings = args
+    strategy_type, params, starting_balance, start_time, end_time, time_step, output_dir, worker_id, date_settings = args
     
     strat: Strategy = strategy_type(**params)
     tqdm.write(f"Starting job {output_dir}...")
@@ -23,6 +23,7 @@ def run_single_backtest(args):
         end_time,
         time_step,
         output_dir,
+        worker_id,
         date_settings,
         suppress=True,
     )
@@ -90,7 +91,8 @@ class MatrixRunner:
                 start_time,
                 end_time,
                 time_step,
-                f"{output_dir}/log_{i}.db",
+                output_dir,
+                i + 1,
                 date_settings,
             ))
 

@@ -26,14 +26,14 @@ class Strategy:
         self._params = kwargs
     
                 
-    def run_backtest(self, starting_balance: float, start_time: datetime, end_time: datetime, time_step: timedelta, output_dir: str, date_settings: DateSettings = None, commission_per_contract: float = 0, suppress: bool = False):
+    def run_backtest(self, starting_balance: float, start_time: datetime, end_time: datetime, time_step: timedelta, output_dir: str, worker_id: int = 1, date_settings: DateSettings = None, commission_per_contract: float = 0, suppress: bool = False):
         # Configure backtest parameters
         self.date_settings = date_settings or DateSettings()   
         self.start_time = start_time.replace(tzinfo=date_settings.time_zone)
         self.end_time = end_time.replace(tzinfo=date_settings.time_zone)
         self.time_step = time_step
         self.now = self.start_time
-        self.logger = Logger(self.name, self.version, self._params, starting_balance, output_dir)  
+        self.logger = Logger(self.name, self.version, self._params, starting_balance, output_dir, worker_id=worker_id)  
         self.broker = Broker(starting_balance, self.logger, commission_per_contract)
         
         # Begin running the backtest
