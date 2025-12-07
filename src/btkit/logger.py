@@ -16,6 +16,7 @@ class Logger:
         self.output_dir.mkdir(parents=True, exist_ok=False)
     
         self.metadata = {
+            "id": worker_id,
             "strategy_name": strategy_name,
             "strategy_version": strategy_version, 
             "strategy_params": strategy_params,
@@ -27,6 +28,7 @@ class Logger:
 
     def log_trade(self, time: datetime, postion: Position, is_closing: bool = False):
         self.trade_rows.extend([{
+                "backtest_id": self.worker_id,
                 "time": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "position_uuid": str(postion.uuid),
                 "position_item_uuid": str(item.uuid),
@@ -36,7 +38,7 @@ class Logger:
                 "symbol": item.instrument.symbol,
                 "expiration": item.instrument.expiration.strftime("%Y-%m-%d %H:%M:%S") if isinstance(item.instrument, Option) else None,
                 "strike": item.instrument.strike_price if isinstance(item.instrument, Option) else None,
-                "right_price": str(item.instrument.right.value) if isinstance(item.instrument, Option) else None,
+                "right": str(item.instrument.right.value) if isinstance(item.instrument, Option) else None,
                 "multiplier": item.instrument.multiplier if isinstance(item.instrument, Option) else 1
             } for item in postion.items])
 

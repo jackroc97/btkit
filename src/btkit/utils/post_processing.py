@@ -1,3 +1,4 @@
+import duckdb
 import json
 import numpy as np
 import pandas as pd
@@ -14,30 +15,27 @@ RISK_FREE_RATE = 0.01
 TRADING_DAYS_PER_YEAR = 252
 
 class PostprocTool:
-    def __init__(self, result_db_path: str, session_id: int = None):
+    def __init__(self, result_db_path: str, backtest_id: int = None):
         # Select all sessions from the database, or filtered by session_id if provided
-        self.conn = sqlite3.connect(result_db_path)
-        session_filter = f"WHERE session_id = {session_id}" if session_id else ""
-        session_df = pd.read_sql_query(f"""
-            SELECT * FROM session {session_filter}
-        """, self.conn)
+        self.conn = duckdb.connect(result_db_path)
+        backtest_filter = f"WHERE id = {backtest_id}" if backtest_id else ""
+        backtest_df = self.conn.execute(f"SELECT * FROM backtest {backtest_filter}").fetchdf()
         
         # Unpack strategy parameters from json and merge into the session dataframe
-        session_df["strategy_params"] = session_df["strategy_params"].apply(json.loads)
-        json_expanded = pd.json_normalize(session_df["strategy_params"])
-        self.session_df = pd.concat([session_df.drop(columns=["strategy_params"]), json_expanded], axis=1)
+        json_expanded = pd.json_normalize(backtest_df["strategy_params"])
+        self.backtest_df = pd.concat([backtest_df.drop(columns=["strategy_params"]), json_expanded], axis=1)
 
         self.trade_summaries: dict[int, pd.DataFrame] = dict()
 
         # Calculate results for all sessions
         results_df = pd.DataFrame()
-        for i, row in self.session_df.iterrows():
+        for i, row in self.backtest_df.iterrows():
             try:
                 query = f"""
-                    SELECT * FROM trade WHERE session_id = {row['id']}
+                    SELECT * FROM trade WHERE backtest_id = {row['id']}
                 """
-                df = pd.read_sql_query(query, self.conn)
-
+                df = self.conn.execute(query).fetchdf()
+                
                 # Calculate per-trade PnL
                 df["cash_effect"] = df["action"].str.contains("SELL_TO_OPEN|BUY_TO_OPEN").astype(int).replace({0: -1}) * df["mkt_price"]
                 df = (
@@ -59,7 +57,7 @@ class PostprocTool:
                 df["date"] = df["time"].dt.date
 
                 # Calculate equity over time
-                df["equity"] = row['starting_balance'] + df["pnl"].cumsum()
+                df["equity"] = row['starting_cash'] + df["pnl"].cumsum()
 
                 self.trade_summaries[row['id']] = df
 
@@ -85,7 +83,7 @@ class PostprocTool:
                 max_drawdown = drawdowns.max()
 
                 # CAGR
-                start_equity = row['starting_balance']
+                start_equity = row['starting_cash']
                 end_equity = equity.iloc[-1]
                 total_days = (df["time"].iloc[-1] - df["time"].iloc[0]).days
                 years = total_days / 365.25
@@ -95,7 +93,7 @@ class PostprocTool:
                 mar = cagr / abs(max_drawdown) if max_drawdown != 0 else np.nan
 
                 # Sharpe ratio
-                # Using per-trade returns relative to equity before trade
+                # Using per-trade returns relative to equity before trade 
                 # r_i = PnL / equity_before_trade
                 equity_shifted = equity.shift(1).fillna(equity.iloc[0])
                 returns = df["pnl"] / equity_shifted
@@ -133,45 +131,44 @@ class PostprocTool:
                     "sortino_ratio": [sortino_ratio],
                     "calmar_ratio": [calmar_ratio]
                 })])
-            except:
-                warnings.warn(f"Could not calculate results for row {i}")
+            except Exception as e:
+                warnings.warn(f"Could not calculate results for row {i}: {e}")
             
-        # Merge stats into session dataframe
-        self.session_df = pd.merge(self.session_df, results_df, on="id")
+        self.backtest_df = pd.merge(self.backtest_df, results_df, on="id")
     
     
-    def summarize(self, session_id: int):
-        session = self.session_df[self.session_df["id"] == session_id].iloc[0]
+    def summarize(self, backtest_id: int):
+        backtest = self.backtest_df[self.backtest_df["id"] == backtest_id].iloc[0]
         print("======================================================")
-        print(f"Summary for Session {session['id']}")
+        print(f"Summary for Session {backtest['id']}")
         print("======================================================")
-        print(f"Net Profit: ${session['net_profit']:.2f}")
-        print(f"Total Closed Trades: {session['total_closed_trades']}")
-        print(f"Percent Profitable Trades: {session['percent_profitable']:.2f}%")
-        print(f"Profit Factor: {session['profit_factor']:.2f}")
-        print(f"Median Trade PnL: ${session['median_trade_pnl']:.2f}")
-        print(f"Average Trade PnL: ${session['average_trade_pnl']:.2f}")
-        print(f"Average Win: ${session['average_win']:.2f}")
-        print(f"Average Loss: ${session['average_loss']:.2f}")
-        print(f"Maximum Drawdown: ${session['max_drawdown']:.2f}")
-        print(f"CAGR: {(session['cagr'] * 100):.2f}%")
-        print(f"MAR: {session['mar']:.2f}")
-        print(f"Sharpe Ratio: {session['sharpe_ratio']:.2f}")
-        print(f"Sortino Ratio: {session['sortino_ratio']:.2f}")
-        print(f"Calmar Ratio: {session['calmar_ratio']:.2f}")
+        print(f"Net Profit: ${backtest['net_profit']:.2f}")
+        print(f"Total Closed Trades: {backtest['total_closed_trades']}")
+        print(f"Percent Profitable Trades: {backtest['percent_profitable']:.2f}%")
+        print(f"Profit Factor: {backtest['profit_factor']:.2f}")
+        print(f"Median Trade PnL: ${backtest['median_trade_pnl']:.2f}")
+        print(f"Average Trade PnL: ${backtest['average_trade_pnl']:.2f}")
+        print(f"Average Win: ${backtest['average_win']:.2f}")
+        print(f"Average Loss: ${backtest['average_loss']:.2f}")
+        print(f"Maximum Drawdown: ${backtest['max_drawdown']:.2f}")
+        print(f"CAGR: {(backtest['cagr'] * 100):.2f}%")
+        print(f"MAR: {backtest['mar']:.2f}")
+        print(f"Sharpe Ratio: {backtest['sharpe_ratio']:.2f}")
+        print(f"Sortino Ratio: {backtest['sortino_ratio']:.2f}")
+        print(f"Calmar Ratio: {backtest['calmar_ratio']:.2f}")
         print("======================================================")
         
         
     # TODO: ability to add comparisons to other series
-    def equity_curve(self, session_id: int, show: bool = True, fig: go.Figure = None, **kwargs) -> go.Figure:
-        df = self.trade_summaries[session_id]
+    def equity_curve(self, backtest_id: int, show: bool = True, fig: go.Figure = None, **kwargs) -> go.Figure:
+        df = self.trade_summaries[backtest_id]
         
         line_plot = go.Line(x=df["time"], y=df["equity"])
         
         if fig is None:
             fig = go.Figure()
             fig.update_layout(
-                title = kwargs.get("title", { 'text': f"Session {session_id} Equity Curve" }),
+                title = kwargs.get("title", { 'text': f"Session {backtest_id} Equity Curve" }),
                 xaxis_title = kwargs.get("xaxis_title", {'text' : "Time" }),
                 yaxis_title = kwargs.get("yaxis_title", {'text' : "Equity (USD)" }),
             )
@@ -184,15 +181,15 @@ class PostprocTool:
         return fig
     
     
-    def pnl_histogram(self, session_id: int, show: bool = True, fig: go.Figure = None, **kwargs):
-        df = self.trade_summaries[session_id]
+    def pnl_histogram(self, backtest_id: int, show: bool = True, fig: go.Figure = None, **kwargs):
+        df = self.trade_summaries[backtest_id]
         
         histogram = go.Histogram(x=df["pnl"])
         
         if fig is None:
             fig = go.Figure()
             fig.update_layout(
-                title = kwargs.get("title", { 'text': f"Session {session_id} PnL Distribution" }),
+                title = kwargs.get("title", { 'text': f"Session {backtest_id} PnL Distribution" }),
                 xaxis_title = kwargs.get("xaxis_title", {'text' : "Profit and Loss (USD)" }),
                 yaxis_title = kwargs.get("yaxis_title", {'text' : "Occurrences" }),
             )
@@ -205,8 +202,8 @@ class PostprocTool:
         return fig
     
     
-    def trade_scatterplot(self, session_id: int, show: bool = True, subplot: bool = False, **kwargs):
-        df = self.trade_summaries[session_id]
+    def trade_scatterplot(self, backtest_id: int, show: bool = True, subplot: bool = False, **kwargs):
+        df = self.trade_summaries[backtest_id]
         
         scatter_plot = go.Scatter(x=df["time"], y=df["pnl"], mode="markers", name=kwargs.get("name", "Trade PnL"))
         
@@ -215,7 +212,7 @@ class PostprocTool:
         if not subplot:
             fig = go.Figure()
             fig.update_layout(
-                title = kwargs.get("title", { 'text': f"Session {session_id} Trade PnL" }),
+                title = kwargs.get("title", { 'text': f"Session {backtest_id} Trade PnL" }),
                 xaxis_title = kwargs.get("xaxis_title", {'text' : "Time" }),
                 yaxis_title = kwargs.get("yaxis_title", {'text' : "Profit and Loss (USD)" }),
             )
@@ -228,7 +225,7 @@ class PostprocTool:
 
     def heatmap(self, metric: str, selectors: dict[str, any], x_variable: str, y_variable: str, subplot: bool = False, **kwargs):
         # Filter the data
-        filtered_df = self.session_df.copy()
+        filtered_df = self.backtest_df.copy()
         for col, val in selectors.items():
             filtered_df = filtered_df[filtered_df[col] == val]
         

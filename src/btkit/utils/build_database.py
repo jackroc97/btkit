@@ -1,9 +1,10 @@
 import databento as db
 import duckdb
 import glob
+import polars as pl
 import sys
 
-import polars as pl
+from datetime import datetime
 
 
 def table_exists(conn: duckdb.DuckDBPyConnection, table_name: str):
@@ -12,113 +13,87 @@ def table_exists(conn: duckdb.DuckDBPyConnection, table_name: str):
     ).fetchone()[0] > 0
 
 
-def build_database2(database_path: str, raw_data_folder: str):
-    ...
-    
-    """
-    From symbology.json:
-    - instrument_id = s
-    - activation_date = d0
-    - expiration_date = d1
-    - strike, instrument_class infer from symbol
-    
-    """
+def build_database(raw_data_path: str, output_db_path: str):
+    definition_files = sorted(glob.glob(f"{raw_data_path}/**/*.definition.*.dbn.zst"))
+    ohlcv_files = sorted(glob.glob(f"{raw_data_path}/**/*.ohlcv-*.*.dbn.zst"))
 
-
-def build_database(database_path: str, raw_data_folder: str):
-    definition_paths = glob.glob(f"{raw_data_folder}/**/*.definition.dbn.zst", recursive=True)
-    ohlcv_paths = glob.glob(f"{raw_data_folder}/**/*.ohlcv*.dbn.zst", recursive=True)
-
-    print(f"Creating database from the following dbn files: {[*definition_paths, *ohlcv_paths]}")
+    filenames = '\n'.join([*definition_files, *ohlcv_files])
+    print(f"Building database from the following files:\n{filenames}")
+    print(f"Output database path: {output_db_path}")
     proceed = input("Would you like to proceed? (y/n): ").strip().lower()
     if proceed != "y":
         print("Aborting.")
         return
-    
-    print(f"Creating database {database_path}")
-    
-    # Connect to the database
-    conn = duckdb.connect(database_path)
-    
-    # Load definition data
-    print(f"Loading definitions from {len(definition_paths)} files...")
-    for i, def_path in enumerate(definition_paths):
-        print("Processing file:", def_path)
-        parq_file = f"{raw_data_folder}/tmp_defn_{i}.parquet"
-        definition_df = db.DBNStore.from_file(def_path).to_parquet(parq_file)
+
+    conn = duckdb.connect(output_db_path)
+
+    print("Processing definition files...")
+    for defn_file in definition_files:
+        t0 = datetime.now()
+        print(f"Processing {defn_file}...")
+
+        # Read data from dbn format and convert to a Polars DataFrame
+        print("Loading data from dbn...")
+        df = pl.from_pandas(db.DBNStore.from_file(defn_file).to_df())
+
+        # Remove user-defined instruments (e.g., spreads)
+        df = df.filter(pl.col("user_defined_instrument") == 'N')
+
+        # Convert datetime columns to unix microseconds
+        df = df.with_columns([
+            (pl.col("ts_event").dt.cast_time_unit("ms").cast(pl.Int64)).alias("ts_event_ms"),
+            (pl.col("expiration").dt.cast_time_unit("ms").cast(pl.Int64)).alias("expiration_ms"),
+            (pl.col("activation").dt.cast_time_unit("ms").cast(pl.Int64)).alias("activation_ms"),
+        ])
         
-        # print("Converting to polars DataFrame and processing timestamps...")
-        definition_df = pl.read_parquet(parq_file)
-        # definition_df.with_columns(
-        #     pl.col("ts_event").dt.timestamp("us").alias("ts_event"),
-        #     pl.col("expiration").dt.timestamp("us").alias("ts_expiration"),
-        # )
-        
+        # Insert into duckdb in chunks
         chunk_size = 100_000
-        for start in range(0, definition_df.height, chunk_size):
-            print(f"Processing rows {start} to {min(start + chunk_size, definition_df.height)}...")
-            end = min(start + chunk_size, definition_df.height)
-            definition_chunk = definition_df[start:end]
+        for start in range(0, df.height, chunk_size):
+            end = min(start + chunk_size, df.height)
+            print(f"Inserting rows {start} to {end} into database...")
+            defn_chunk = df[start:end]
             if table_exists(conn, "definition"):
-                conn.execute(f"INSERT INTO definition SELECT * FROM definition_chunk")
+                conn.execute(f"INSERT INTO definition SELECT * FROM defn_chunk")
             else:
-                duckdb.sql("CREATE TABLE definition AS SELECT * from definition_chunk", connection=conn)
-        
-    
-    # Load ohlcv data
-    print(f"Loading OHLCV data from {len(ohlcv_paths)} files...")
-    for i, ohlcv_path in enumerate(ohlcv_paths):
-        print("Processing file:", ohlcv_path)
-        parq_file = f"{raw_data_folder}/tmp_ohlcv_{i}.parquet"
-        ohlcv_df = db.DBNStore.from_file(ohlcv_path).to_parquet(parq_file)
+                duckdb.sql("CREATE TABLE definition AS SELECT * from defn_chunk", connection=conn)
+                
+        print(f"Processed file in {(datetime.now() - t0).seconds} seconds")
 
-        # print("Converting to polars DataFrame and processing timestamps...")
-        ohlcv_df = pl.read_parquet(parq_file)
-        # ohlcv_df = ohlcv_df.with_columns(
-        #     pl.col("ts_event").dt.timestamp("us").alias("ts_event"),
-        # )
+    valid_instrument_ids = conn.execute("SELECT list(DISTINCT instrument_id) AS values FROM definition").fetchall()[0][0]
 
-        #ohlcv_df["ts_event"] = ohlcv_df.index.astype(int) // 10**9
-        #ohlcv_df = ohlcv_df[["ts_event", *cols]]
+    print("Processing OHLCV files...")
+    for ohlcv_file in ohlcv_files:
+        t0 = datetime.now()
+        print(f"Processing {ohlcv_file}...")
+
+        # Read data from dbn format and convert to a Polars DataFrame
+        print("Loading data from dbn...")
+        df = pl.from_pandas(db.DBNStore.from_file(ohlcv_file).to_df().reset_index(names="ts_event"))
+
+        # Filter to only valid instrument IDs
+        df = df.filter(pl.col("instrument_id").is_in(valid_instrument_ids))
+
+        # Convert datetime columns to unix microseconds
+        df = df.with_columns([
+            (pl.col("ts_event").dt.cast_time_unit("ms").cast(pl.Int64)).alias("ts_event_ms"),
+        ])
         
+        # Insert into duckdb in chunks
         chunk_size = 100_000
-        for start in range(0, ohlcv_df.height, chunk_size):
-            print(f"Processing rows {start} to {min(start + chunk_size, ohlcv_df.height)}...")
-            end = min(start + chunk_size, ohlcv_df.height)
-            ohlcv_chunk = ohlcv_df[start:end]
-
+        for start in range(0, df.height, chunk_size):
+            end = min(start + chunk_size, df.height)
+            print(f"Inserting rows {start} to {end} into database...")
+            ohlcv_chunk = df[start:end]
             if table_exists(conn, "ohlcv"):
                 conn.execute(f"INSERT INTO ohlcv SELECT * FROM ohlcv_chunk")
             else:
                 duckdb.sql("CREATE TABLE ohlcv AS SELECT * from ohlcv_chunk", connection=conn)
-    
+                
+        print(f"Processed file in {(datetime.now() - t0).seconds} seconds")
+
     print("Done!")
-
-
-def convert_timestamps(database_path: str):
-    conn = duckdb.connect(database_path)
     
-    # Convert ts_event and ts_expiration in definition table to unix timestamps
-    conn.execute(f"""
-        ALTER TABLE definition
-        ALTER COLUMN ts_event
-        TYPE BIGINT
-        USING COALESCE(
-            try_strptime(ts_event::TEXT, '%Y-%m-%d %H:%M:%S.%f%z'),
-            try_strptime(ts_event::TEXT, '%Y-%m-%d %H:%M:%S%z')
-        );
-    """)
-    
-    conn.execute(f"ALTER TABLE definition ADD COLUMN ts_expiration BIGINT;")
-    conn.execute(f"""
-        UPDATE definition
-        SET ts_expiration = COALESCE(
-            try_strptime(expiration::TEXT, '%Y-%m-%d %H:%M:%S.%f%z'),
-            try_strptime(expiration::TEXT, '%Y-%m-%d %H:%M:%S%z')
-        );
-    """)
-
-
 
 if __name__ == "__main__":
     build_database(*sys.argv[1:])
+    
