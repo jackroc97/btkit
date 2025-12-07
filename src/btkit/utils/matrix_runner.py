@@ -91,7 +91,7 @@ class MatrixRunner:
                 start_time,
                 end_time,
                 time_step,
-                output_dir,
+                f"{output_dir}/worker_{i + 1}",
                 i + 1,
                 date_settings,
             ))
