@@ -14,8 +14,8 @@ def combine_backtest_results(backtest_logs_path: str, output_db_path: str):
     conn = duckdb.connect(output_db_path)
 
     # Collect all output files
-    metadata_files = glob.glob(f"{backtest_logs_path}/worker_*_metadata.json")
-    trade_files = glob.glob(f"{backtest_logs_path}/worker_*_trade.parquet")
+    metadata_files = glob.glob(f"{backtest_logs_path}/**/worker_*_metadata.json", recursive=True)
+    trade_files = glob.glob(f"{backtest_logs_path}/**/worker_*_trade.parquet", recursive=True)
 
     # Grab all metadata files and combine into a single dataframe
     metadata_df = pl.concat(pl.read_json(path) for path in metadata_files)
