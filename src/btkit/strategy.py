@@ -49,6 +49,8 @@ class Strategy:
                 self.tick()
             
             t1 = datetime.now()
+        except Exception as e:
+            tqdm.write(f"Backtest {worker_id} failed with error: {e}")
         finally:
             self.on_stop()
             self.logger.write_log()

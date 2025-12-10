@@ -235,6 +235,8 @@ class PostprocTool:
         text = [[f"{v:.1f}" if pd.notna(v) else "" for v in row] for row in z]
         zmin, zmax = float(pivot.min().min()), float(pivot.max().max())
         
+        custom = filtered_df.pivot(index=y_variable, columns=x_variable, values="id").values
+        
         # Configure the heatmap
         heatmap = go.Heatmap(
             z=z,
@@ -247,7 +249,13 @@ class PostprocTool:
             text=text,
             texttemplate="%{text}",
             textfont={"size": 10, "color": "black"},
-            name=kwargs.get("name", metric.replace("_", " ").title())
+            name=kwargs.get("name", metric.replace("_", " ").title()),
+            customdata=custom,
+            hovertemplate=
+                "x: %{x}<br>" +
+                "y: %{y}<br>" +
+                "z: %{z}<br>" +
+                "backtest_id: %{customdata}<extra></extra>"
         )
 
         # Add to figure and show
