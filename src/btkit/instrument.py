@@ -128,20 +128,31 @@ class DbnInstrumentClass(Enum):
     PUT = "P"
     
 
+import threading
+
+
+_thread_local = threading.local()
+
 class InstrumentStore:
     database_path: str = ""
-    _connection: duckdb.DuckDBPyConnection = None
+    #_connection: duckdb.DuckDBPyConnection = None
     _now: datetime = None
     
     @classmethod
     def connect_database(cls, path: str) -> None:
         cls.database_path = path
-        cls._connection = duckdb.connect(database=cls.database_path, read_only=True)
+        #cls._connection = duckdb.connect(database=cls.database_path, read_only=True)
+    
+    @staticmethod
+    def _get_connection(cls) -> duckdb.DuckDBPyConnection:
+        if not hasattr(_thread_local, "conn"):
+            _thread_local.conn = duckdb.connect(InstrumentStore.database_path, read_only=True)
+        return _thread_local.conn
     
     
-    @classmethod
-    def disconnect_database(cls) -> None:
-        cls._connection.close()
+    # @classmethod
+    # def disconnect_database(cls) -> None:
+    #     cls._get_connection.close()
         
     
     @classmethod
@@ -175,7 +186,7 @@ class InstrumentStore:
                 FROM definition
                 WHERE instrument_id = {instrument_id}
             """
-        result = cls._connection.execute(query).fetchone()
+        result = cls._get_connection().execute(query).fetchone()
 
         if result is None:
             raise ValueError(f"No instrument found for ID {instrument_id}")
@@ -198,7 +209,7 @@ class InstrumentStore:
             FROM definition
             WHERE instrument_class = 'F' AND symbol LIKE '{symbol}%' AND expiration::date = '{expiration.strftime("%Y-%m-%d")}';
         """
-        result = cls._connection.execute(query).fetchone()
+        result = cls._get_connection().execute(query).fetchone()
 
         if result is None:
             warnings.warn(f"{cls.get_time()} | No future found for symbol {symbol} expiring on {expiration}; returning None.")
@@ -216,7 +227,7 @@ class InstrumentStore:
             WHERE "group" = '{symbol}' AND instrument_class = 'F'
             ORDER BY expiration::date ASC;
         """
-        result = cls._connection.execute(query).fetchall()
+        result = cls._get_connection().execute(query).fetchall()
         
         if result is None:
             raise ValueError(f"No futures found for group {symbol}")
@@ -235,7 +246,7 @@ class InstrumentStore:
               AND strike_price = {strike_price}
               AND instrument_class = '{right.value[0].capitalize()}';
         """
-        result = cls._connection.execute(query).fetchone()
+        result = cls._get_connection().execute(query).fetchone()
 
         if result is None:
             warnings.warn(f"{cls.get_time()} | No option found for underlying symbol {underlying.symbol} with parameters exp={expiration}, stk={strike_price}, right={right.value[0]}; returning None.")
@@ -321,7 +332,7 @@ class InstrumentStore:
             SELECT * FROM filtered
             ORDER BY strike_price, instrument_class
         """
-        df = cls._connection.execute(query).fetch_df()
+        df = cls._get_connection().execute(query).fetch_df()
         return df
     
     
@@ -341,7 +352,7 @@ class InstrumentStore:
             WHERE instrument_id = {instrument.instrument_id} {time_filter}
             ORDER BY ts_event_ms ASC;
         """
-        df = cls._connection.execute(query).fetch_df()
+        df = cls._get_connection().execute(query).fetch_df()
         if df.empty:
             # TODO: Print a warning here instead
             ...
@@ -377,7 +388,7 @@ class InstrumentStore:
             ORDER BY delta_diff ASC
             LIMIT {max_results}
         """
-        return cls._connection.execute(query).fetch_df()
+        return cls._get_connection().execute(query).fetch_df()
 
 
     @classmethod

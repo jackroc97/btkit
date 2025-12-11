@@ -52,6 +52,7 @@ class Strategy:
         except Exception as e:
             tqdm.write(f"Backtest {worker_id} failed with error: {e}")
         finally:
+            #InstrumentStore.disconnect_database()
             self.on_stop()
             self.logger.write_log()
         
