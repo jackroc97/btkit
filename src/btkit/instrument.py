@@ -332,7 +332,10 @@ class InstrumentStore:
             SELECT * FROM filtered
             ORDER BY strike_price, instrument_class
         """
-        df = cls._get_connection().execute(query).fetch_df()
+        rows = cls._get_connection().execute(query).fetchall()
+        columns = [desc[0] for desc in cls._get_connection().description]  # get column names
+        df = pd.DataFrame(rows, columns=columns)
+        #df = cls._get_connection().execute(query).fetch_df()
         return df
     
     
@@ -352,7 +355,10 @@ class InstrumentStore:
             WHERE instrument_id = {instrument.instrument_id} {time_filter}
             ORDER BY ts_event_ms ASC;
         """
-        df = cls._get_connection().execute(query).fetch_df()
+        rows = cls._get_connection().execute(query).fetchall()
+        columns = [desc[0] for desc in cls._get_connection().description]  # get column names
+        df = pd.DataFrame(rows, columns=columns)
+        #df = cls._get_connection().execute(query).fetch_df()
         if df.empty:
             # TODO: Print a warning here instead
             ...
@@ -388,8 +394,11 @@ class InstrumentStore:
             ORDER BY delta_diff ASC
             LIMIT {max_results}
         """
-        return cls._get_connection().execute(query).fetch_df()
-
+        #return cls._get_connection().execute(query).fetch_df()
+        rows = cls._get_connection().execute(query).fetchall()
+        columns = [desc[0] for desc in cls._get_connection().description]  # get column names
+        df = pd.DataFrame(rows, columns=columns)
+        return df
 
     @classmethod
     def instrument_or_none(cls, instrument: Instrument) -> Instrument:
