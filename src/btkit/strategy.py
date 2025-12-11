@@ -48,7 +48,7 @@ class Strategy:
                 self.broker.tick(self.now)
                 self.tick()
             
-            t1 = datetime.now()
+            
         except Exception as e:
             tqdm.write(f"Backtest {worker_id} failed with error: {e}")
         finally:
@@ -56,6 +56,7 @@ class Strategy:
             self.on_stop()
             self.logger.write_log()
         
+        t1 = datetime.now()
         tqdm.write(f"Backtest completed in {(t1-t0).total_seconds():.2f} seconds")
         
         
