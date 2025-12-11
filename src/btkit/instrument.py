@@ -144,7 +144,7 @@ class InstrumentStore:
         #cls._connection = duckdb.connect(database=cls.database_path, read_only=True)
     
     @staticmethod
-    def _get_connection(cls) -> duckdb.DuckDBPyConnection:
+    def _get_connection() -> duckdb.DuckDBPyConnection:
         if not hasattr(_thread_local, "conn"):
             _thread_local.conn = duckdb.connect(InstrumentStore.database_path, read_only=True)
         return _thread_local.conn
