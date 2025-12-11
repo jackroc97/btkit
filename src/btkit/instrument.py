@@ -171,8 +171,8 @@ class InstrumentStore:
                 FROM definition
                 WHERE instrument_id = {int(instrument_id)} 
                     AND instrument_class in ('C', 'P')              -- Only filter to only options
-                    AND ts_event_ms <= {timestamp_ms(InstrumentStore._now)}       -- No options defined in the future 
-                    AND expiration_ms >= {timestamp_ms(InstrumentStore._now)};    -- No options expiring in the past
+                    AND ts_event_ms <= {timestamp_ms(InstrumentStore.get_time())}       -- No options defined in the future 
+                    AND expiration_ms >= {timestamp_ms(InstrumentStore.get_time())};    -- No options expiring in the past
             """
         else:
             query = f"""
@@ -254,8 +254,8 @@ class InstrumentStore:
     @staticmethod 
     def option_chain_for_instrument_id(underlying_id: int, max_strike_dist: float, max_dte: int, time_tol: timedelta) -> pd.DataFrame:
         tol_ms = time_tol.total_seconds() * 1000
-        ts_unix_ms = timestamp_ms(InstrumentStore._now)        
-        min_exp: datetime = InstrumentStore._now.replace(hour=0, minute=0, second=0, microsecond=0)
+        ts_unix_ms = timestamp_ms(InstrumentStore.get_time())        
+        min_exp: datetime = InstrumentStore.get_time().replace(hour=0, minute=0, second=0, microsecond=0)
         max_exp: datetime = min_exp + timedelta(days=max_dte+1)
 
         # TODO: This is deprecated and should be replaced with a call to the option_greeks table
@@ -369,7 +369,7 @@ class InstrumentStore:
                                 dte: int, option_right: OptionRight, at_time: datetime = None, 
                                 time_tol: timedelta = timedelta(minutes=5), max_results: int = 10) -> pd.DataFrame: 
         if at_time is None:
-            at_time = InstrumentStore._now
+            at_time = InstrumentStore.get_time()
         ts_min = timestamp_ms(at_time) - time_tol.total_seconds() * 1000
         ts_max = timestamp_ms(at_time) + time_tol.total_seconds() * 1000
         
