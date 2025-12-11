@@ -48,7 +48,6 @@ class Strategy:
                 self.broker.tick(self.now)
                 self.tick()
             
-            
         except Exception as e:
             tqdm.write(f"Backtest {worker_id} failed with error: {e}")
         finally:

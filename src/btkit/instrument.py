@@ -184,7 +184,7 @@ class InstrumentStore:
             query = f"""
                 SELECT {','.join(columns)}
                 FROM definition
-                WHERE instrument_id = {instrument_id}
+                WHERE instrument_id = {int(instrument_id)}
             """
         result = cls._get_connection().execute(query).fetchone()
 
