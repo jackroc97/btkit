@@ -138,35 +138,30 @@ class InstrumentStore:
     #_connection: duckdb.DuckDBPyConnection = None
     _now: datetime = None
     
-    @classmethod
-    def connect_database(cls, path: str) -> None:
-        cls.database_path = path
-        #cls._connection = duckdb.connect(database=cls.database_path, read_only=True)
+    @staticmethod
+    def connect_database(path: str) -> None:
+        InstrumentStore.database_path = path
+        #InstrumentStore._connection = duckdb.connect(database=InstrumentStore.database_path, read_only=True)
     
     @staticmethod
     def _get_connection() -> duckdb.DuckDBPyConnection:
         if not hasattr(_thread_local, "conn"):
             _thread_local.conn = duckdb.connect(InstrumentStore.database_path, read_only=True)
         return _thread_local.conn
-    
-    
-    # @classmethod
-    # def disconnect_database(cls) -> None:
-    #     cls._get_connection.close()
         
     
-    @classmethod
-    def set_time(cls, now: datetime) -> None:
-        cls._now = now
+    @staticmethod
+    def set_time(now: datetime) -> None:
+        InstrumentStore._now = now
         
         
-    @classmethod 
-    def get_time(cls) -> datetime:
-        return cls._now
+    @staticmethod 
+    def get_time() -> datetime:
+        return InstrumentStore._now
     
 
-    @classmethod
-    def instrument_by_id(cls, instrument_id: int, type_hint: type = None) -> 'Instrument':
+    @staticmethod
+    def instrument_by_id(instrument_id: int, type_hint: type = None) -> 'Instrument':
         columns = ["instrument_id", "symbol", "expiration", "strike_price", "underlying_id", "unit_of_measure_qty", "instrument_class"]
         
         # This is necessary due to an annoying "feature" of databento's schema 
@@ -177,8 +172,8 @@ class InstrumentStore:
                 FROM definition
                 WHERE instrument_id = {int(instrument_id)} 
                     AND instrument_class in ('C', 'P')              -- Only filter to only options
-                    AND ts_event_ms <= {timestamp_ms(cls._now)}       -- No options defined in the future 
-                    AND expiration_ms >= {timestamp_ms(cls._now)};    -- No options expiring in the past
+                    AND ts_event_ms <= {timestamp_ms(InstrumentStore._now)}       -- No options defined in the future 
+                    AND expiration_ms >= {timestamp_ms(InstrumentStore._now)};    -- No options expiring in the past
             """
         else:
             query = f"""
@@ -186,40 +181,40 @@ class InstrumentStore:
                 FROM definition
                 WHERE instrument_id = {int(instrument_id)}
             """
-        result = cls._get_connection().execute(query).fetchone()
+        result = InstrumentStore._get_connection().execute(query).fetchone()
 
         if result is None:
             raise ValueError(f"No instrument found for ID {instrument_id}")
         
         instrument_class = result[-1]
         if instrument_class == DbnInstrumentClass.FUTURE.value:
-            return cls.instrument_or_none(Future(*result[0:3]))
+            return InstrumentStore.instrument_or_none(Future(*result[0:3]))
         elif instrument_class in {DbnInstrumentClass.CALL.value, DbnInstrumentClass.PUT.value}:
             right = OptionRight.CALL if instrument_class == DbnInstrumentClass.CALL.value else OptionRight.PUT
-            return cls.instrument_or_none(Option(*result[0:6], right))
+            return InstrumentStore.instrument_or_none(Option(*result[0:6], right))
         else:
             raise ValueError(f"Unsupported instrument class {instrument_class} for ID {instrument_id}")
     
 
-    @classmethod
-    def future(cls, symbol: str, expiration: date) -> 'Future':
+    @staticmethod
+    def future(symbol: str, expiration: date) -> 'Future':
         columns = ["instrument_id", "symbol", "expiration"]
         query = f"""
             SELECT {','.join(columns)}
             FROM definition
             WHERE instrument_class = 'F' AND symbol LIKE '{symbol}%' AND expiration::date = '{expiration.strftime("%Y-%m-%d")}';
         """
-        result = cls._get_connection().execute(query).fetchone()
+        result = InstrumentStore._get_connection().execute(query).fetchone()
 
         if result is None:
-            warnings.warn(f"{cls.get_time()} | No future found for symbol {symbol} expiring on {expiration}; returning None.")
+            warnings.warn(f"{InstrumentStore.get_time()} | No future found for symbol {symbol} expiring on {expiration}; returning None.")
             return None
         
-        return cls.instrument_or_none(Future(*result))
+        return InstrumentStore.instrument_or_none(Future(*result))
     
 
-    @classmethod
-    def spot_future(cls, symbol: str) -> 'SpotFuture':
+    @staticmethod
+    def spot_future(symbol: str) -> 'SpotFuture':
         columns = ["instrument_id", "expiration"]
         query = f"""
             SELECT DISTINCT {','.join(columns)}
@@ -227,7 +222,7 @@ class InstrumentStore:
             WHERE "group" = '{symbol}' AND instrument_class = 'F'
             ORDER BY expiration::date ASC;
         """
-        result = cls._get_connection().execute(query).fetchall()
+        result = InstrumentStore._get_connection().execute(query).fetchall()
         
         if result is None:
             raise ValueError(f"No futures found for group {symbol}")
@@ -235,8 +230,8 @@ class InstrumentStore:
         return SpotFuture(-1, symbol, _exp_map={ row[1]: row[0] for row in result })
 
     
-    @classmethod
-    def option(cls, underlying: 'Instrument', expiration: date, strike_price: float, right: OptionRight) -> Option:
+    @staticmethod
+    def option(underlying: 'Instrument', expiration: date, strike_price: float, right: OptionRight) -> Option:
         columns = ["instrument_id", "symbol", "expiration", "strike_price", "underlying_id", "unit_of_measure_qty", "instrument_class"]
         query = f"""
             SELECT {','.join(columns)}
@@ -246,22 +241,22 @@ class InstrumentStore:
               AND strike_price = {strike_price}
               AND instrument_class = '{right.value[0].capitalize()}';
         """
-        result = cls._get_connection().execute(query).fetchone()
+        result = InstrumentStore._get_connection().execute(query).fetchone()
 
         if result is None:
-            warnings.warn(f"{cls.get_time()} | No option found for underlying symbol {underlying.symbol} with parameters exp={expiration}, stk={strike_price}, right={right.value[0]}; returning None.")
+            warnings.warn(f"{InstrumentStore.get_time()} | No option found for underlying symbol {underlying.symbol} with parameters exp={expiration}, stk={strike_price}, right={right.value[0]}; returning None.")
             return None
         
         instrument_class = result[-1]
         right = OptionRight.CALL if instrument_class == DbnInstrumentClass.CALL.value else OptionRight.PUT
-        return cls.instrument_or_none(Option(*result[0:6], right))
+        return InstrumentStore.instrument_or_none(Option(*result[0:6], right))
         
 
-    @classmethod 
-    def option_chain_for_instrument_id(cls, underlying_id: int, max_strike_dist: float, max_dte: int, time_tol: timedelta) -> pd.DataFrame:
+    @staticmethod 
+    def option_chain_for_instrument_id(underlying_id: int, max_strike_dist: float, max_dte: int, time_tol: timedelta) -> pd.DataFrame:
         tol_ms = time_tol.total_seconds() * 1000
-        ts_unix_ms = timestamp_ms(cls._now)        
-        min_exp: datetime = cls._now.replace(hour=0, minute=0, second=0, microsecond=0)
+        ts_unix_ms = timestamp_ms(InstrumentStore._now)        
+        min_exp: datetime = InstrumentStore._now.replace(hour=0, minute=0, second=0, microsecond=0)
         max_exp: datetime = min_exp + timedelta(days=max_dte+1)
 
         # TODO: This is deprecated and should be replaced with a call to the option_greeks table
@@ -332,20 +327,20 @@ class InstrumentStore:
             SELECT * FROM filtered
             ORDER BY strike_price, instrument_class
         """
-        rows = cls._get_connection().execute(query).fetchall()
-        columns = [desc[0] for desc in cls._get_connection().description]  # get column names
+        rows = InstrumentStore._get_connection().execute(query).fetchall()
+        columns = [desc[0] for desc in InstrumentStore._get_connection().description]  # get column names
         df = pd.DataFrame(rows, columns=columns)
-        #df = cls._get_connection().execute(query).fetch_df()
+        #df = InstrumentStore._get_connection().execute(query).fetch_df()
         return df
     
     
-    @classmethod
-    def ohlcv_for_instrument(cls, instrument: Instrument) -> pd.DataFrame:
+    @staticmethod
+    def ohlcv_for_instrument(instrument: Instrument) -> pd.DataFrame:
         time_filter = ""
         
         # NOTE: This is required due to the fact that instrument ids can be reused
         if isinstance(instrument, Option):
-            ts_min = timestamp_ms(cls.get_time())
+            ts_min = timestamp_ms(InstrumentStore.get_time())
             ts_max = timestamp_ms(instrument.expiration)
             time_filter = f"AND ts_event_ms BETWEEN {ts_min} AND {ts_max}"
         
@@ -355,25 +350,25 @@ class InstrumentStore:
             WHERE instrument_id = {instrument.instrument_id} {time_filter}
             ORDER BY ts_event_ms ASC;
         """
-        rows = cls._get_connection().execute(query).fetchall()
-        columns = [desc[0] for desc in cls._get_connection().description]  # get column names
+        rows = InstrumentStore._get_connection().execute(query).fetchall()
+        columns = [desc[0] for desc in InstrumentStore._get_connection().description]  # get column names
         df = pd.DataFrame(rows, columns=columns)
-        #df = cls._get_connection().execute(query).fetch_df()
+        #df = InstrumentStore._get_connection().execute(query).fetch_df()
         if df.empty:
             # TODO: Print a warning here instead
             ...
-            #raise ValueError(f"No ohlcv data found for ID {instrument.instrument_id} at time {cls.get_time()}")
+            #raise ValueError(f"No ohlcv data found for ID {instrument.instrument_id} at time {InstrumentStore.get_time()}")
         
         df.set_index('ts_event_ms', inplace=True)
         return df
 
 
-    @classmethod
-    def search_options_by_delta(cls, underlying: Instrument, desired_delta: float, 
+    @staticmethod
+    def search_options_by_delta(underlying: Instrument, desired_delta: float, 
                                 dte: int, option_right: OptionRight, at_time: datetime = None, 
                                 time_tol: timedelta = timedelta(minutes=5), max_results: int = 10) -> pd.DataFrame: 
         if at_time is None:
-            at_time = cls._now
+            at_time = InstrumentStore._now
         ts_min = timestamp_ms(at_time) - time_tol.total_seconds() * 1000
         ts_max = timestamp_ms(at_time) + time_tol.total_seconds() * 1000
         
@@ -394,16 +389,16 @@ class InstrumentStore:
             ORDER BY delta_diff ASC
             LIMIT {max_results}
         """
-        #return cls._get_connection().execute(query).fetch_df()
-        rows = cls._get_connection().execute(query).fetchall()
-        columns = [desc[0] for desc in cls._get_connection().description]  # get column names
+        #return InstrumentStore._get_connection().execute(query).fetch_df()
+        rows = InstrumentStore._get_connection().execute(query).fetchall()
+        columns = [desc[0] for desc in InstrumentStore._get_connection().description]  # get column names
         df = pd.DataFrame(rows, columns=columns)
         return df
 
-    @classmethod
-    def instrument_or_none(cls, instrument: Instrument) -> Instrument:
+    @staticmethod
+    def instrument_or_none(instrument: Instrument) -> Instrument:
         if instrument.has_data():
             return instrument
         else: 
-            warnings.warn(f"{cls.get_time()} | {instrument} has no data; returning None.")
+            warnings.warn(f"{InstrumentStore.get_time()} | {instrument} has no data; returning None.")
             return None
