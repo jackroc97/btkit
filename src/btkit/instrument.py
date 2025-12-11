@@ -151,13 +151,12 @@ class InstrumentStore:
         
     
     @staticmethod
-    def set_time(now: datetime) -> None:
-        InstrumentStore._now = now
-        
-        
-    @staticmethod 
-    def get_time() -> datetime:
-        return InstrumentStore._now
+    def set_time(now) -> None:
+        _thread_local.now = now
+
+    @staticmethod
+    def get_time():
+        return getattr(_thread_local, "now", None)
     
 
     @staticmethod
@@ -327,8 +326,9 @@ class InstrumentStore:
             SELECT * FROM filtered
             ORDER BY strike_price, instrument_class
         """
-        rows = InstrumentStore._get_connection().execute(query).fetchall()
-        columns = [desc[0] for desc in InstrumentStore._get_connection().description]  # get column names
+        conn = InstrumentStore._get_connection()
+        rows = conn.execute(query).fetchall()
+        columns = [desc[0] for desc in conn.description]  # get column names
         df = pd.DataFrame(rows, columns=columns)
         #df = InstrumentStore._get_connection().execute(query).fetch_df()
         return df
@@ -350,8 +350,9 @@ class InstrumentStore:
             WHERE instrument_id = {instrument.instrument_id} {time_filter}
             ORDER BY ts_event_ms ASC;
         """
-        rows = InstrumentStore._get_connection().execute(query).fetchall()
-        columns = [desc[0] for desc in InstrumentStore._get_connection().description]  # get column names
+        conn = InstrumentStore._get_connection()
+        rows = conn.execute(query).fetchall()
+        columns = [desc[0] for desc in conn.description]  # get column names
         df = pd.DataFrame(rows, columns=columns)
         #df = InstrumentStore._get_connection().execute(query).fetch_df()
         if df.empty:
@@ -390,8 +391,9 @@ class InstrumentStore:
             LIMIT {max_results}
         """
         #return InstrumentStore._get_connection().execute(query).fetch_df()
-        rows = InstrumentStore._get_connection().execute(query).fetchall()
-        columns = [desc[0] for desc in InstrumentStore._get_connection().description]  # get column names
+        conn = InstrumentStore._get_connection()
+        rows = conn.execute(query).fetchall()
+        columns = [desc[0] for desc in conn.description]  # get column names
         df = pd.DataFrame(rows, columns=columns)
         return df
 
