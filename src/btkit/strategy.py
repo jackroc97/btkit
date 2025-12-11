@@ -36,6 +36,7 @@ class Strategy:
         self.logger = Logger(self.name, self.version, self._params, starting_balance, output_dir, worker_id=worker_id)  
         self.broker = Broker(starting_balance, self.logger, commission_per_contract)
         
+        run_error = None
         # Begin running the backtest
         try:
             t0 = datetime.now()
@@ -50,10 +51,11 @@ class Strategy:
             
         except Exception as e:
             tqdm.write(f"Backtest {worker_id} failed with error: {e}")
+            run_error = e
         finally:
             #InstrumentStore.disconnect_database()
             self.on_stop()
-            self.logger.write_log()
+            self.logger.write_log(run_error)
         
         t1 = datetime.now()
         tqdm.write(f"Backtest completed in {(t1-t0).total_seconds():.2f} seconds")

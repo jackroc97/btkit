@@ -43,8 +43,9 @@ class Logger:
             } for item in postion.items])
 
 
-    def write_log(self):
+    def write_log(self, error: Exception = None):
         self.metadata["end_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.metadata["run_error"] = str(error)
         with open(f"{self.output_dir}/worker_{self.worker_id}_metadata.json", "w") as metafile:
             metafile.write(json.dumps(self.metadata))
 
