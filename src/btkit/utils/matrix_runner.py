@@ -4,11 +4,13 @@ import pandas as pd
 import sqlite3
 import yaml
 
-from concurrent.futures import ProcessPoolExecutor, as_completed
+#from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from tqdm import tqdm
 from typing import Type
 
+from ..instrument import InstrumentStore
 from ..strategy import Strategy, DateSettings
 
 
@@ -77,7 +79,7 @@ class MatrixRunner:
             strat.run_backtest(starting_balance, start_time, end_time, time_step, output_dir, date_settings, suppress=True)
          
             
-    def run_parallel(self, starting_balance: float, start_time: datetime, end_time: datetime, time_step: timedelta, output_dir: str, date_settings: DateSettings = None, max_workers: int = None):
+    def run_parallel(self, starting_balance: float, start_time: datetime, end_time: datetime, time_step: timedelta, output_dir: str, date_settings: DateSettings = None, max_workers: int = None):        
         if max_workers is None:
             max_workers = multiprocessing.cpu_count()
 
@@ -96,8 +98,10 @@ class MatrixRunner:
                 date_settings,
             ))
 
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             list(tqdm(executor.map(run_single_backtest, tasks), total=len(tasks)))
+        #with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        #    list(tqdm(executor.map(run_single_backtest, tasks), total=len(tasks)))
             
             
     def _resume_from(self, design_id: int, starting_balance: float, start_time: datetime, end_time: datetime, time_step: timedelta, output_dir: str, date_settings: DateSettings = None):
