@@ -147,6 +147,8 @@ class InstrumentStore:
     def _get_connection() -> duckdb.DuckDBPyConnection:
         if not hasattr(_thread_local, "conn"):
             _thread_local.conn = duckdb.connect(InstrumentStore.database_path, read_only=True)
+            _thread_local.conn.execute("PRAGMA threads=1")
+            _thread_local.conn.execute("PRAGMA enable_object_cache")
         return _thread_local.conn
         
     
