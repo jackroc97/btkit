@@ -21,7 +21,16 @@ def combine_backtest_results(backtest_logs_path: str, output_db_path: str):
         "id": pl.Int64,
         "strategy_name": pl.Utf8,
         "strategy_version": pl.Utf8,
-        "strategy_params": pl.Struct({}),
+        "strategy_params": pl.Struct({
+            "design_id": pl.Int64, 
+            "call_delta": pl.Float64, 
+            "call_spread_widths": pl.List(pl.Float64), 
+            "dte": pl.Int64, 
+            "put_delta": pl.Float64, 
+            "put_spread_widths": pl.List(pl.Float64), 
+            "strategy_type": pl.Utf8, 
+            "take_profit_pct": pl.Float64
+        }),
         "starting_cash": pl.Float64,
         "start_time": pl.Datetime,
         "end_time": pl.Datetime,
