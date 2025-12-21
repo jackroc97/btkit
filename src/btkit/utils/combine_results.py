@@ -21,7 +21,7 @@ def combine_backtest_results(backtest_logs_path: str, output_db_path: str):
         "id": pl.Int64,
         "strategy_name": pl.Utf8,
         "strategy_version": pl.Utf8,
-        "strategy_params": pl.Utf8,
+        "strategy_params": pl.Struct({}),
         "starting_cash": pl.Float64,
         "start_time": pl.Datetime,
         "end_time": pl.Datetime,
