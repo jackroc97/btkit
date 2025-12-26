@@ -9,84 +9,73 @@ from zoneinfo import ZoneInfo
 RISK_FREE_RATE = 0.01
 TRADING_DAYS_PER_YEAR = 252
 
-class PostprocTool:
+class PostProcTool:
     def __init__(self, result_db_path: str, backtest_id: int | None = None):
         self.conn = duckdb.connect(result_db_path)
-        #self.conn.execute("PRAGMA threads=auto;")
 
-        # ------------------------------------------------------------
-        # 1. Load backtest base table (authoritative config source)
-        # ------------------------------------------------------------
         bt_filter = f"WHERE id = {backtest_id}" if backtest_id else ""
-        bt_df = self.conn.execute(
-            f"""
-            SELECT
-                backtest.id,
-                backtest.starting_cash,
-                backtest.strategy_params,
-                backtest_metrics.net_profit,
-                backtest_metrics.total_closed_trades,
-                backtest_metrics.percent_profitable,
-                backtest_metrics.median_trade_pnl,
-                backtest_metrics.average_trade_pnl,
-                backtest_metrics.average_win,
-                backtest_metrics.average_loss,
-                backtest_metrics.profit_factor,
-                backtest_metrics.max_drawdown,
-                backtest_metrics.cagr,
-                backtest_metrics.mar,
-                backtest_metrics.sharpe_ratio,
-                backtest_metrics.sortino_ratio,
-                backtest_metrics.calmar_ratio
-
-            FROM backtest
-            {bt_filter}
-            JOIN backtest_metrics ON backtest.id = backtest_metrics.id
-            """
-        ).fetchdf()
-
-        # Expand strategy_params JSON → columns
-        params_df = pd.json_normalize(bt_df["strategy_params"])
-        bt_df = pd.concat(
-            [bt_df.drop(columns=["strategy_params"]), params_df],
-            axis=1
-        )
-
-        # ------------------------------------------------------------
-        # 2. Check if metrics table exists
-        # ------------------------------------------------------------
-        # metrics_exist = self.conn.execute("""
-        #     SELECT COUNT(*) > 0
-        #     FROM information_schema.tables
-        #     WHERE table_name = 'backtest_metrics'
-        # """).fetchone()[0]
-        metrics_exist = True
 
         # ============================================================
         # FAST PATH: metrics already exist
         # ============================================================
+        metrics_exist = len(self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='backtest_metrics';"
+        ).fetchall()) > 0
         if metrics_exist:
-            self.backtest_df = bt_df
-            # m_filter = f"WHERE id = {backtest_id}" if backtest_id else ""
-            # metrics_df = self.conn.execute(
-            #     f"""
-            #     SELECT
-            #         id,strategy_name,strategy_version,starting_cash,start_time,end_time,run_error,design_id,call_delta,call_spread_widths,dte,put_delta,put_spread_widths,strategy_type,take_profit_pct,net_profit,total_closed_trades,percent_profitable,median_trade_pnl,average_trade_pnl,average_win,average_loss,profit_factor,max_drawdown,cagr,mar,sharpe_ratio,sortino_ratio,calmar_ratio
-            #     FROM backtest_metrics
-            #     {m_filter}
-            #     """
-            # ).fetchdf()
+            bt_df = self.conn.execute(
+                f"""
+                SELECT
+                    backtest.id,
+                    backtest.starting_cash,
+                    backtest.strategy_params,
+                    backtest_metrics.net_profit,
+                    backtest_metrics.total_closed_trades,
+                    backtest_metrics.percent_profitable,
+                    backtest_metrics.median_trade_pnl,
+                    backtest_metrics.average_trade_pnl,
+                    backtest_metrics.average_win,
+                    backtest_metrics.average_loss,
+                    backtest_metrics.profit_factor,
+                    backtest_metrics.max_drawdown,
+                    backtest_metrics.max_drawdown_decimal,
+                    backtest_metrics.cagr,
+                    backtest_metrics.mar,
+                    backtest_metrics.sharpe_ratio,
+                    backtest_metrics.sortino_ratio,
+                    backtest_metrics.calmar_ratio
+                FROM backtest
+                {bt_filter}
+                JOIN backtest_metrics ON backtest.id = backtest_metrics.id
+                """
+            ).fetchdf()
 
-            # self.backtest_df = bt_df.merge(
-            #     metrics_df,
-            #     on="id",
-            #     how="left"
-            # )
+            # Expand strategy_params JSON → columns
+            params_df = pd.json_normalize(bt_df["strategy_params"])
+            bt_df = pd.concat(
+                [bt_df.drop(columns=["strategy_params"]), params_df],
+                axis=1
+            )
+            self.backtest_df = bt_df
             return
 
         # ============================================================
         # SLOW PATH: compute metrics
         # ============================================================
+        bt_df = self.conn.execute(
+            f"""
+            SELECT
+                id,
+                starting_cash,
+                strategy_params
+            FROM backtest
+            {bt_filter}
+            """
+        ).fetchdf()
+        params_df = pd.json_normalize(bt_df["strategy_params"])
+        bt_df = pd.concat(
+            [bt_df.drop(columns=["strategy_params"]), params_df],
+            axis=1
+        )
 
         # ------------------------------------------------------------
         # 3. Pre-aggregate trades
@@ -129,7 +118,7 @@ class PostprocTool:
         """)
 
         # ------------------------------------------------------------
-        # 5. Drawdowns
+        # 5. Drawdowns (include decimal max drawdown)
         # ------------------------------------------------------------
         self.conn.execute("""
         CREATE OR REPLACE TEMP VIEW drawdowns AS
@@ -142,12 +131,18 @@ class PostprocTool:
                 PARTITION BY backtest_id
                 ORDER BY time
                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-            ) - equity AS drawdown
+            ) - equity AS drawdown,
+            (MAX(equity) OVER (
+                PARTITION BY backtest_id
+                ORDER BY time
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) - equity)
+            / MAX(equity) OVER (PARTITION BY backtest_id) AS drawdown_decimal
         FROM equity_curve
         """)
 
         # ------------------------------------------------------------
-        # 6. Backtest-level metrics (authoritative results source)
+        # 6. Backtest-level metrics (include decimal max drawdown)
         # ------------------------------------------------------------
         metrics_df = self.conn.execute("""
         SELECT
@@ -155,7 +150,7 @@ class PostprocTool:
 
             SUM(pnl) AS net_profit,
             COUNT(*) AS total_closed_trades,
-            AVG(pnl > 0) * 100 AS percent_profitable,
+            AVG((pnl > 0)::DOUBLE) * 100 AS percent_profitable,
             MEDIAN(pnl) AS median_trade_pnl,
             AVG(pnl) AS average_trade_pnl,
 
@@ -167,6 +162,7 @@ class PostprocTool:
               AS profit_factor,
 
             MAX(drawdown) AS max_drawdown,
+            MAX(drawdown_decimal) AS max_drawdown_decimal,
 
             MIN(time) AS start_time,
             MAX(time) AS end_time,
@@ -178,29 +174,53 @@ class PostprocTool:
         """).fetchdf()
 
         # ------------------------------------------------------------
-        # 7. Python-side metrics (derived only from metrics_df)
+        # 7. Python-side metrics
         # ------------------------------------------------------------
-        metrics_df["start_time"] = pd.to_datetime(
-            metrics_df["start_time"], utc=True
-        ).dt.tz_convert(ZoneInfo("America/New_York"))
+        metrics_df["start_time"] = pd.to_datetime(metrics_df["start_time"], utc=True).dt.tz_convert(ZoneInfo("America/New_York"))
+        metrics_df["end_time"] = pd.to_datetime(metrics_df["end_time"], utc=True).dt.tz_convert(ZoneInfo("America/New_York"))
 
-        metrics_df["end_time"] = pd.to_datetime(
-            metrics_df["end_time"], utc=True
-        ).dt.tz_convert(ZoneInfo("America/New_York"))
-
-        years = (
-            (metrics_df["end_time"] - metrics_df["start_time"])
-            .dt.days / 365.25
-        )
-
+        years = ((metrics_df["end_time"] - metrics_df["start_time"]).dt.days / 365.25)
         metrics_df["cagr"] = np.where(
             years > 0,
-            (metrics_df["end_equity"] / metrics_df["start_equity"])
-            ** (1 / years) - 1,
+            (metrics_df["end_equity"] / metrics_df["start_equity"]) ** (1 / years) - 1,
             np.nan
         )
 
-        metrics_df["mar"] = metrics_df["cagr"] / metrics_df["max_drawdown"].abs()
+        # MAR
+        metrics_df["mar"] = metrics_df["cagr"] / metrics_df["max_drawdown_decimal"]
+
+        # ------------------------------------------------------------
+        # 7a. Compute Sharpe, Sortino using per-trade returns
+        # ------------------------------------------------------------
+        trade_df = self.conn.execute(f"""
+            SELECT
+                backtest_id,
+                pnl,
+                equity
+            FROM equity_curve
+            {f'WHERE backtest_id = {backtest_id}' if backtest_id else ''}
+        """).fetchdf()
+
+        # Returns relative to equity before trade
+        trade_df["equity_before"] = trade_df.groupby("backtest_id")["equity"].shift(1)
+        trade_df["equity_before"] = trade_df["equity_before"].fillna(trade_df.groupby("backtest_id")["equity"].transform("first"))
+        trade_df["returns"] = trade_df["pnl"] / trade_df["equity_before"]
+
+        rf_daily = 0.01 / 252  # approximate daily risk-free rate
+        trade_df["excess_returns"] = trade_df["returns"] - rf_daily
+
+        # Compute per-backtest Sharpe and Sortino ratios
+        ratios_df = trade_df.groupby("backtest_id").apply(lambda g: pd.Series({
+            "sharpe_ratio": (g["excess_returns"].mean() / g["excess_returns"].std()) * np.sqrt(252),
+            "sortino_ratio": (g["excess_returns"].mean() / g["excess_returns"].loc[g["excess_returns"] < 0].std()) * np.sqrt(252)
+        })).reset_index()
+
+        # Merge ratios into metrics_df
+        metrics_df = metrics_df.merge(ratios_df, left_on="id", right_on="backtest_id", how="left")
+        metrics_df.drop(columns=["backtest_id"], inplace=True)
+
+        # Calmar ratio
+        metrics_df["calmar_ratio"] = metrics_df["cagr"] / metrics_df["max_drawdown_decimal"]
 
         # ------------------------------------------------------------
         # 8. Persist metrics (results-only table)
@@ -210,14 +230,11 @@ class PostprocTool:
         SELECT * FROM metrics_df
         LIMIT 0
         """)
-
         self.conn.register("metrics_df", metrics_df)
-
         self.conn.execute("""
         INSERT INTO backtest_metrics
         SELECT * FROM metrics_df
         """)
-
         self.conn.execute("""
         CREATE UNIQUE INDEX idx_backtest_metrics_id
         ON backtest_metrics(id)
@@ -232,21 +249,6 @@ class PostprocTool:
             how="left"
         )
 
-    # ------------------------------------------------------------
-    # On-demand equity curve for visualization
-    # ------------------------------------------------------------
-    def get_equity_curve(self, backtest_id: int) -> pd.DataFrame:
-        df = self.conn.execute("""
-        SELECT time, equity
-        FROM equity_curve
-        WHERE backtest_id = ?
-        ORDER BY time
-        """, [backtest_id]).fetchdf()
-
-        df["time"] = pd.to_datetime(df["time"], utc=True).dt.tz_convert(
-            ZoneInfo("America/New_York")
-        )
-        return df
 
     def summarize(self, backtest_id: int):
         backtest = self.backtest_df[self.backtest_df["id"] == backtest_id].iloc[0]
@@ -269,68 +271,151 @@ class PostprocTool:
         print(f"Calmar Ratio: {backtest['calmar_ratio']:.2f}")
         print("======================================================")
         
+
+    def get_equity_over_time(self, backtest_ids: list[int]) -> pd.DataFrame:
+        """
+        Retrieve per-trade equity curves for a list of backtest IDs.
+
+        Parameters
+        ----------
+        conn : duckdb.DuckDBPyConnection
+            An active DuckDB connection.
+        backtest_ids : list[int]
+            List of backtest IDs to generate equity curves for.
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame containing backtest_id, time, position_uuid, pnl, symbol,
+            expiration, right, and cumulative equity.
+        """
+        if not backtest_ids:
+            return pd.DataFrame()  # Return empty if no backtests provided
+
+        # Format the list for SQL IN clause
+        ids_str = ",".join(str(i) for i in backtest_ids)
+
+        query = f"""
+        WITH selected_backtests AS (
+            SELECT id, starting_cash
+            FROM backtest
+            WHERE id IN ({ids_str})
+        ),
+        trade_pnl AS (
+            SELECT
+                t.backtest_id,
+                t.position_uuid,
+                MAX(t.time) AS time,
+                SUM(
+                    CASE 
+                        WHEN t.action LIKE '%SELL_TO_OPEN%' OR t.action LIKE '%BUY_TO_OPEN%'
+                        THEN t.mkt_price
+                        ELSE -t.mkt_price
+                    END
+                ) AS pnl,
+                ANY_VALUE(t.symbol) AS symbol,
+                ANY_VALUE(t.expiration) AS expiration,
+                ANY_VALUE(t.right) AS right
+            FROM trade t
+            WHERE t.backtest_id IN (SELECT id FROM selected_backtests)
+            GROUP BY t.backtest_id, t.position_uuid
+        )
+        SELECT
+            t.backtest_id,
+            t.time,
+            t.position_uuid,
+            t.pnl,
+            t.symbol,
+            t.expiration,
+            t.right,
+            s.starting_cash + SUM(t.pnl) OVER (
+                PARTITION BY t.backtest_id
+                ORDER BY t.time
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS equity
+        FROM trade_pnl t
+        JOIN selected_backtests s ON t.backtest_id = s.id
+        ORDER BY t.backtest_id, t.time;
+        """
+
+        return self.conn.execute(query).fetchdf()
+
         
     # TODO: ability to add comparisons to other series
-    def equity_curve(self, backtest_id: int, show: bool = True, fig: go.Figure = None, **kwargs) -> go.Figure:
-        df = self.trade_summaries[backtest_id]
+    def equity_curve(self, backtest_ids: list[int], show: bool = True, fig: go.Figure = None, **kwargs) -> go.Figure:
+        df = self.get_equity_over_time(backtest_ids)
         
-        line_plot = go.Line(x=df["time"], y=df["equity"])
+        df = df.groupby("backtest_id")
+        line_plots = []
+        for backtest_id, group in df:
+            line_plots.append(go.Scatter(x=group["time"], y=group["equity"], name=kwargs.get("name", f"Backtest {backtest_id}")))
         
         if fig is None:
             fig = go.Figure()
             fig.update_layout(
-                title = kwargs.get("title", { 'text': f"Session {backtest_id} Equity Curve" }),
+                title = kwargs.get("title", { 'text': f"Backtests {','.join(str(id) for id in backtest_ids)} Equity Curve" }),
                 xaxis_title = kwargs.get("xaxis_title", {'text' : "Time" }),
                 yaxis_title = kwargs.get("yaxis_title", {'text' : "Equity (USD)" }),
             )
             
-        fig.add_trace(line_plot)
+        for line_plot in line_plots:
+            fig.add_trace(line_plot)
         
         if show:
             fig.show()
         
         return fig
-    
-    
-    def pnl_histogram(self, backtest_id: int, show: bool = True, fig: go.Figure = None, **kwargs):
-        df = self.trade_summaries[backtest_id]
+
+
+    def pnl_histogram(self, backtest_ids: list[int], show: bool = True, fig: go.Figure = None, **kwargs) -> go.Figure:
+        df = self.get_equity_over_time(backtest_ids)
         
-        histogram = go.Histogram(x=df["pnl"])
+        df = df.groupby("backtest_id")
+        histograms = []
+        for backtest_id, group in df:
+            histograms.append(go.Histogram(x=group["pnl"], name=kwargs.get("name", f"Backtest {backtest_id}")))
         
         if fig is None:
             fig = go.Figure()
             fig.update_layout(
-                title = kwargs.get("title", { 'text': f"Session {backtest_id} PnL Distribution" }),
+                title = kwargs.get("title", { 'text': f"Backtests {','.join(str(id) for id in backtest_ids)} PnL Distribution" }),
                 xaxis_title = kwargs.get("xaxis_title", {'text' : "Profit and Loss (USD)" }),
                 yaxis_title = kwargs.get("yaxis_title", {'text' : "Occurrences" }),
             )
             
-        fig.add_trace(histogram)
+        for histogram in histograms:
+            fig.add_trace(histogram)
         
         if show:
             fig.show()
         
         return fig
-    
-    
-    def trade_scatterplot(self, backtest_id: int, show: bool = True, subplot: bool = False, **kwargs):
-        df = self.trade_summaries[backtest_id]
+
+
+    def trade_scatterplot(self, backtest_ids: list[int], show: bool = True, fig: go.Figure = None, **kwargs) -> go.Figure:
+        df = self.get_equity_over_time(backtest_ids)
         
-        scatter_plot = go.Scatter(x=df["time"], y=df["pnl"], mode="markers", name=kwargs.get("name", "Trade PnL"))
+        df = df.groupby("backtest_id")
+        scatter_plots = []
+        for backtest_id, group in df:
+            scatter_plots.append(go.Scatter(x=group["time"], y=group["pnl"], mode="markers", name=kwargs.get("name", f"Backtest {backtest_id}")))
         
         # Add to figure and show
-        if not subplot:
+        if fig is None:
             fig = go.Figure()
             fig.update_layout(
-                title = kwargs.get("title", { 'text': f"Session {backtest_id} Trade PnL" }),
+                title = kwargs.get("title", { 'text': f"Backtests {','.join(str(id) for id in backtest_ids)} Trade PnL" }),
                 xaxis_title = kwargs.get("xaxis_title", {'text' : "Time" }),
                 yaxis_title = kwargs.get("yaxis_title", {'text' : "Profit and Loss (USD)" }),
             )
+            
+        for scatter_plot in scatter_plots:
             fig.add_trace(scatter_plot)
-            fig.show()
-            return None
 
-        return scatter_plot
+        if show:
+            fig.show()
+
+        return fig
         
 
     def heatmap(self, metric: str, selectors: dict[str, any], x_variable: str, y_variable: str, show: bool = False, fig: go.Figure = None, **kwargs):
@@ -340,18 +425,20 @@ class PostprocTool:
             filtered_df = filtered_df[filtered_df[col] == val]
         
         # Pivot the dataframe and gather text and min/max z values
-        pivot = filtered_df.pivot(index=x_variable, columns=y_variable, values=metric)
+        pivot = filtered_df.pivot(index=y_variable, columns=x_variable, values=metric)
         z = pivot.values
         text = [[f"{v:.1f}" if pd.notna(v) else "" for v in row] for row in z]
         zmin, zmax = float(pivot.min().min()), float(pivot.max().max())
-        
+
+        # Customdata aligned with z
         custom = filtered_df.pivot(index=y_variable, columns=x_variable, values="id").values
-        
-        # Configure the heatmap
+        custom = custom.astype(str)
+
+        # Heatmap trace
         heatmap = go.Heatmap(
             z=z,
-            x=pivot.columns,
-            y=pivot.index,
+            x=pivot.columns,  # x_variable
+            y=pivot.index,    # y_variable
             showscale=False,
             colorscale=kwargs.get("colorscale", [[0.0, "red"], [0.5, "white"], [1.0, "blue"]]),
             zmin=zmin,
@@ -365,7 +452,7 @@ class PostprocTool:
                 "x: %{x}<br>" +
                 "y: %{y}<br>" +
                 "z: %{z}<br>" +
-                "backtest_id: %{customdata}" + 
+                "backtest_id: %{customdata}" +
                 "<extra></extra>"
         )
 
@@ -374,8 +461,8 @@ class PostprocTool:
             fig = go.Figure()
             fig.update_layout(
                 title = kwargs.get("title", { 'text': metric.replace("_", " ").title() }),
-                #xaxis=dict(type="category"),
-                #yaxis=dict(type="category"),
+                xaxis=dict(type="category"),
+                yaxis=dict(type="category"),
                 xaxis_title = kwargs.get("xaxis_title", {'text' : x_variable.replace("_", " ").title() }),
                 yaxis_title = kwargs.get("yaxis_title", {'text' : y_variable.replace("_", " ").title() }),
             )
