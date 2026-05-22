@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "btkit"
+version = "2.0.0"
+description = "Vectorized options backtesting framework"
+requires-python = ">=3.11"
+dependencies = [
+    "duckdb>=0.10",
+    "polars>=0.20",
+    "pydantic>=2.0",
+    "typer>=0.12",
+    "pyyaml>=6.0",
+    "numba>=0.59",
+    "numpy>=1.26",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+viz = [
+    "plotly>=5.0",
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+btkit = "btkit.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["btkit*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]

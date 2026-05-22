@@ -1,0 +1,58 @@
+# Exit condition test — high dte_exit designed to trigger DTE-based exits.
+# Used in Test 4 (see docs/mvp.md).
+# dte_exit is set to 44 (just below the target dte of 45) so positions
+# close almost immediately on DTE grounds rather than TP/SL.
+
+strategy:
+  name: exit_dte_test
+  version: "1.0"
+
+  instrument:
+    root_symbol: ES
+    asset_class: future
+
+  universe:
+    start_date: "2023-01-03"
+    end_date:   "2023-03-31"
+    session:
+      timezone:      "America/New_York"
+      start_time:    "09:30"
+      end_time:      "16:00"
+      weekdays_only: true
+      skip_dates:    []
+
+  entry:
+    window:
+      start: "10:00"
+      end:   "12:00"
+    max_open_positions: 3
+    conditions: []
+
+  legs:
+    - name: short_put
+      right:    put
+      action:   sell_to_open
+      delta:    -0.25
+      dte:      45
+      quantity: 1
+
+    - name: long_put
+      right:    put
+      action:   buy_to_open
+      delta:    -0.15
+      dte:      45
+      quantity: 1
+
+  exit:
+    stop_loss:   999.00   # disabled
+    take_profit: 999.00   # disabled
+    dte_exit:    44       # just below entry DTE — triggers almost immediately
+    expiry_exit: false
+    conditions:  []
+
+  sizing:
+    contracts: 1
+
+  costs:
+    slippage_pct:     0.0
+    fee_per_contract: 0.0

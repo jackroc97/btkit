@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+.venv/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Database files
+*.db
+*.duckdb
+
+# Test output
+tests/output/
+
+# Databento raw data (large binary files)
+*.dbn
+*.dbn.zst
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Ruff
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/

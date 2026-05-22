@@ -1,0 +1,58 @@
+# Indicator condition test — selective entry condition for Test 5.
+# sma_5 > sma_20 is true roughly half the time (golden cross condition).
+# Used to verify that entry counts are reduced vs. the no-condition baseline.
+
+strategy:
+  name: indicator_conditions_test
+  version: "1.0"
+
+  instrument:
+    root_symbol: ES
+    asset_class: future
+
+  universe:
+    start_date: "2023-01-03"
+    end_date:   "2023-03-31"
+    session:
+      timezone:      "America/New_York"
+      start_time:    "09:30"
+      end_time:      "16:00"
+      weekdays_only: true
+      skip_dates:    []
+
+  entry:
+    window:
+      start: "10:00"
+      end:   "12:00"
+    max_open_positions: 3
+    conditions:
+      - "sma_5 > sma_20"   # selective condition — filters a portion of entries
+
+  legs:
+    - name: short_put
+      right:    put
+      action:   sell_to_open
+      delta:    -0.25
+      dte:      45
+      quantity: 1
+
+    - name: long_put
+      right:    put
+      action:   buy_to_open
+      delta:    -0.15
+      dte:      45
+      quantity: 1
+
+  exit:
+    stop_loss:   2.00
+    take_profit: 0.50
+    dte_exit:    21
+    expiry_exit: true
+    conditions:  []
+
+  sizing:
+    contracts: 1
+
+  costs:
+    slippage_pct:     0.01
+    fee_per_contract: 0.65
