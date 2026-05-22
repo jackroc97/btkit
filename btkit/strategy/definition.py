@@ -1,6 +1,10 @@
 """
 Pydantic models for strategy definition.
 
+A StrategyDefinition contains one or more TradeDefinitions. Each trade is an
+independent position structure with its own instrument, entry rules, legs, and
+exit rules. Universe, costs, and matrix config are shared across all trades.
+
 A StrategyDefinition is loaded from a YAML file by strategy.loader and passed
 to BacktestEngine. For MVP all sweep fields (NumericSweep, IntSweep) must be
 plain scalars — list or SweepRange values are rejected by the engine at run time.
@@ -81,11 +85,9 @@ class EntryWindowConfig(BaseModel):
 
 class EntryConfig(BaseModel):
     window: EntryWindowConfig
-    max_open_positions: int = 1
     conditions: list[str] = []
     min_credit: NumericSweep | None = None   # skip entry if open_mark < this
     max_debit: NumericSweep | None = None    # skip entry if open_mark > this
-    minimum_equity: float | None = None      # skip entry if running equity < this (sequential filter)
 
 
 # ---------------------------------------------------------------------------
@@ -114,12 +116,8 @@ class ExitConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Sizing / costs / matrix
+# Costs / matrix
 # ---------------------------------------------------------------------------
-
-class SizingConfig(BaseModel):
-    contracts: int = 1
-
 
 class CostsConfig(BaseModel):
     slippage_pct: float = 0.0
@@ -155,21 +153,53 @@ class TableCombinations(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Trade definition — one per independent position structure
+# ---------------------------------------------------------------------------
+
+class TradeDefinition(BaseModel):
+    name: str
+    instrument: InstrumentConfig
+    entry: EntryConfig
+    legs: list[LegConfig]
+    exit: ExitConfig
+
+    @model_validator(mode="after")
+    def leg_names_unique(self) -> TradeDefinition:
+        names = [leg.name for leg in self.legs]
+        if len(names) != len(set(names)):
+            raise ValueError("leg names must be unique within a trade")
+        return self
+
+
+# ---------------------------------------------------------------------------
 # Top-level strategy definition
 # ---------------------------------------------------------------------------
 
 class StrategyDefinition(BaseModel):
     name: str
     version: str = "1.0"
-    instrument: InstrumentConfig
     universe: UniverseConfig
-    entry: EntryConfig
-    legs: list[LegConfig]
-    exit: ExitConfig
-    sizing: SizingConfig = SizingConfig()
     costs: CostsConfig = CostsConfig()
     matrix: MatrixConfig = MatrixConfig()
+    trades: list[TradeDefinition]
     combinations: list[StructuredCombination] | TableCombinations | None = None
+
+    @model_validator(mode="after")
+    def trades_share_underlying(self) -> StrategyDefinition:
+        """All trades must reference the same root_symbol."""
+        symbols = {t.instrument.root_symbol for t in self.trades}
+        if len(symbols) > 1:
+            raise ValueError(
+                f"all trades must share the same underlying; got {symbols}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def trade_names_unique(self) -> StrategyDefinition:
+        names = [t.name for t in self.trades]
+        if len(names) != len(set(names)):
+            raise ValueError("trade names must be unique within a strategy")
+        return self
 
     @model_validator(mode="after")
     def validate_combinations_vs_sweeps(self) -> StrategyDefinition:
@@ -181,15 +211,16 @@ class StrategyDefinition(BaseModel):
             return isinstance(v, (list, SweepRange))
 
         sweep_fields: list[str] = []
-        for leg in self.legs:
-            if is_sweep(leg.delta):
-                sweep_fields.append(f"legs[{leg.name}].delta")
-            if is_sweep(leg.dte):
-                sweep_fields.append(f"legs[{leg.name}].dte")
-        for fname in ("stop_loss", "take_profit", "dte_exit"):
-            v = getattr(self.exit, fname)
-            if v is not None and is_sweep(v):
-                sweep_fields.append(f"exit.{fname}")
+        for trade in self.trades:
+            for leg in trade.legs:
+                if is_sweep(leg.delta):
+                    sweep_fields.append(f"trades[{trade.name}].legs[{leg.name}].delta")
+                if is_sweep(leg.dte):
+                    sweep_fields.append(f"trades[{trade.name}].legs[{leg.name}].dte")
+            for fname in ("stop_loss", "take_profit", "dte_exit"):
+                v = getattr(trade.exit, fname)
+                if v is not None and is_sweep(v):
+                    sweep_fields.append(f"trades[{trade.name}].exit.{fname}")
 
         if sweep_fields:
             raise ValueError(
@@ -206,11 +237,12 @@ class StrategyDefinition(BaseModel):
         def is_sweep(v: Any) -> bool:
             return isinstance(v, (list, SweepRange))
 
-        for leg in self.legs:
-            if is_sweep(leg.delta) or is_sweep(leg.dte):
-                return True
-        for fname in ("stop_loss", "take_profit", "dte_exit"):
-            v = getattr(self.exit, fname)
-            if v is not None and is_sweep(v):
-                return True
+        for trade in self.trades:
+            for leg in trade.legs:
+                if is_sweep(leg.delta) or is_sweep(leg.dte):
+                    return True
+            for fname in ("stop_loss", "take_profit", "dte_exit"):
+                v = getattr(trade.exit, fname)
+                if v is not None and is_sweep(v):
+                    return True
         return False

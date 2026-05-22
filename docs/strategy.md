@@ -9,20 +9,20 @@ parameters or explicit combination lists.
 
 ## Full YAML Schema
 
-The example below shows a parameterized strategy using sweep syntax. Scalar values
-(single backtests) follow the same structure with plain numbers instead of lists.
+A strategy contains one or more `trades`. Each trade is an independent position
+structure with its own instrument, entry rules, legs, and exit rules. `universe`,
+`costs`, and `matrix` are shared across all trades and defined at the strategy root.
+
+The example below shows a single-trade parameterized strategy using sweep syntax.
+Scalar values (single backtests) follow the same structure with plain numbers instead
+of lists.
 
 ```yaml
 strategy:
   name: short_put_spread
   version: "1.0"
 
-  # Root instrument (underlying)
-  instrument:
-    root_symbol: ES
-    asset_class: future         # future | equity | etf
-
-  # Backtest date/time universe
+  # Backtest date/time universe — shared across all trades
   universe:
     start_date: "2022-01-03"
     end_date:   "2024-12-31"
@@ -33,50 +33,7 @@ strategy:
       weekdays_only:  true
       skip_dates:     []
 
-  # Entry rules
-  entry:
-    window:
-      start: "09:30"            # no entries before this time
-      end:   "14:00"            # no entries after this time
-    max_open_positions: 3
-    conditions:
-      - "rsi_14 < 40"
-      - "vix_close < 30"
-    min_credit:     0.50        # skip entry if open_mark < this (optional)
-    max_debit:      2.00        # skip entry if open_mark > this (optional)
-    minimum_equity: 10000.0     # skip entry if running equity < this (optional)
-
-  # Leg definitions — numeric fields accept scalar, list, or range (see Sweep Parameters)
-  legs:
-    - name: short_put
-      right:    put
-      action:   sell_to_open
-      delta:    [-0.20, -0.25, -0.30]   # list sweep
-      dte:
-        start: 30
-        stop:  60
-        step:  15                        # range sweep → [30, 45, 60]
-      quantity: 1
-
-    - name: long_put
-      right:    put
-      action:   buy_to_open
-      delta:    -0.15                    # scalar — fixed across all combinations
-      dte:      45
-      quantity: 1
-
-  exit:
-    stop_loss:   [1.50, 2.00, 2.50]     # list sweep
-    take_profit: 0.50                    # scalar
-    dte_exit:    21
-    expiry_exit: true
-    conditions:                          # exit if any condition is true (OR logic)
-      - "rsi_14 > 70"
-      - "vix_close > 40"
-
-  sizing:
-    contracts: 1
-
+  # Transaction costs — shared across all trades
   costs:
     slippage_pct:     0.01
     fee_per_contract: 0.65
@@ -84,6 +41,107 @@ strategy:
   # Matrix expansion settings (only relevant for parameterized strategies)
   matrix:
     max_combinations: 100               # error before running if expansion exceeds this
+
+  # One or more independent trade definitions
+  trades:
+    - name: put_spread
+
+      instrument:
+        root_symbol: ES
+        asset_class: future         # future | equity | etf
+
+      entry:
+        window:
+          start: "09:30"            # no entries before this time
+          end:   "14:00"            # no entries after this time
+        conditions:
+          - "rsi_14 < 40"
+          - "vix_close < 30"
+        min_credit:  0.50           # skip entry if open_mark < this (optional)
+        max_debit:   2.00           # skip entry if open_mark > this (optional)
+
+      # Leg definitions — numeric fields accept scalar, list, or range (see Sweep Parameters)
+      legs:
+        - name:     short_put
+          right:    put
+          action:   sell_to_open
+          delta:    [-0.20, -0.25, -0.30]   # list sweep
+          dte:
+            start: 30
+            stop:  60
+            step:  15                        # range sweep → [30, 45, 60]
+          quantity: 1
+
+        - name:     long_put
+          right:    put
+          action:   buy_to_open
+          delta:    -0.15                    # scalar — fixed across all combinations
+          dte:      45
+          quantity: 1
+
+      exit:
+        stop_loss:   [1.50, 2.00, 2.50]     # list sweep
+        take_profit: 0.50                    # scalar
+        dte_exit:    21
+        expiry_exit: true
+        conditions:                          # exit if any condition is true (OR logic)
+          - "rsi_14 > 70"
+          - "vix_close > 40"
+```
+
+### Multi-trade example: iron condor with independently managed wings
+
+Each wing is its own trade with independent entry signals and exit rules. Both trades
+reference the same underlying — all trades in a strategy must share a single underlying.
+
+```yaml
+strategy:
+  name: iron_condor_independent
+  version: "1.0"
+
+  universe:
+    start_date: "2022-01-03"
+    end_date:   "2024-12-31"
+    session:
+      timezone:      "America/New_York"
+      start_time:    "09:30"
+      end_time:      "16:00"
+      weekdays_only: true
+
+  costs:
+    slippage_pct:     0.01
+    fee_per_contract: 0.65
+
+  trades:
+    - name: put_spread
+      instrument:
+        root_symbol: ES
+        asset_class: future
+      entry:
+        window: {start: "09:30", end: "14:00"}
+        conditions: ["vix_close < 30", "rsi_14 < 40"]
+      legs:
+        - {name: short_put, right: put, action: sell_to_open, delta: -0.20, dte: 45, quantity: 1}
+        - {name: long_put,  right: put, action: buy_to_open,  delta: -0.10, dte: 45, quantity: 1}
+      exit:
+        stop_loss:   2.0
+        take_profit: 0.50
+        dte_exit:    21
+
+    - name: call_spread
+      instrument:
+        root_symbol: ES
+        asset_class: future
+      entry:
+        window: {start: "09:30", end: "14:00"}
+        conditions: ["vix_close < 30", "rsi_14 > 60"]
+      legs:
+        - {name: short_call, right: call, action: sell_to_open, delta: 0.20, dte: 45, quantity: 1}
+        - {name: long_call,  right: call, action: buy_to_open,  delta: 0.10, dte: 45, quantity: 1}
+      exit:
+        stop_loss:   2.0
+        take_profit: 0.50
+        dte_exit:    21
 ```
 
 ---
@@ -271,12 +329,10 @@ class EntryWindowConfig(BaseModel):
 
 
 class EntryConfig(BaseModel):
-    window:             EntryWindowConfig
-    max_open_positions: int = 1
-    conditions:         list[str] = []
-    min_credit:         NumericSweep | None = None  # enter only if open_mark >= this value
-    max_debit:          NumericSweep | None = None  # enter only if open_mark <= this value
-    minimum_equity:     float | None = None         # skip entry if running equity < this value
+    window:      EntryWindowConfig
+    conditions:  list[str] = []
+    min_credit:  NumericSweep | None = None  # enter only if open_mark >= this value
+    max_debit:   NumericSweep | None = None  # enter only if open_mark <= this value
 
 
 class LegConfig(BaseModel):
@@ -294,10 +350,6 @@ class ExitConfig(BaseModel):
     dte_exit:    IntSweep | None = None
     expiry_exit: bool = True
     conditions:  list[str] = []  # exit if any condition is true (OR logic)
-
-
-class SizingConfig(BaseModel):
-    contracts: int = 1
 
 
 class CostsConfig(BaseModel):
@@ -334,21 +386,53 @@ class TableCombinations(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Trade definition — one per independent position structure
+# ---------------------------------------------------------------------------
+
+class TradeDefinition(BaseModel):
+    name:       str
+    instrument: InstrumentConfig
+    entry:      EntryConfig
+    legs:       list[LegConfig]
+    exit:       ExitConfig
+
+    @model_validator(mode="after")
+    def leg_names_unique(self) -> TradeDefinition:
+        names = [leg.name for leg in self.legs]
+        if len(names) != len(set(names)):
+            raise ValueError("leg names must be unique within a trade")
+        return self
+
+
+# ---------------------------------------------------------------------------
 # Top-level strategy definition
 # ---------------------------------------------------------------------------
 
 class StrategyDefinition(BaseModel):
     name:         str
     version:      str = "1.0"
-    instrument:   InstrumentConfig
     universe:     UniverseConfig
-    entry:        EntryConfig
-    legs:         list[LegConfig]
-    exit:         ExitConfig
-    sizing:       SizingConfig = SizingConfig()
     costs:        CostsConfig = CostsConfig()
     matrix:       MatrixConfig = MatrixConfig()
+    trades:       list[TradeDefinition]
     combinations: list[StructuredCombination] | TableCombinations | None = None
+
+    @model_validator(mode="after")
+    def trades_share_underlying(self) -> StrategyDefinition:
+        """All trades must reference the same root_symbol."""
+        symbols = {t.instrument.root_symbol for t in self.trades}
+        if len(symbols) > 1:
+            raise ValueError(
+                f"all trades must share the same underlying; got {symbols}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def trade_names_unique(self) -> StrategyDefinition:
+        names = [t.name for t in self.trades]
+        if len(names) != len(set(names)):
+            raise ValueError("trade names must be unique within a strategy")
+        return self
 
     @model_validator(mode="after")
     def validate_combinations_vs_sweeps(self) -> StrategyDefinition:
@@ -365,13 +449,17 @@ class StrategyDefinition(BaseModel):
 
 The `entry.window` block defines a time range within each session during which new
 positions may be opened. The `EntryScanner` evaluates entry conditions at every
-1-minute bar whose timestamp falls within the window. An entry is opened at any bar
-where all conditions are satisfied and `max_open_positions` has not been reached.
+1-minute bar whose timestamp falls within the window.
+
+Each trade enforces a **one-at-a-time constraint**: a new entry for a given trade is
+only opened once the previous position in that trade has closed. This is enforced
+exactly after Pass 2 (when real exit times are known), not approximated during Pass 1.
+See [Engine Design](#one-at-a-time-constraint) below.
 
 **Design note:** A fixed `time` field was considered but rejected in favour of a
-`window` because many options strategies legitimately want to open multiple positions
-per day as signals recur. The `max_open_positions` parameter is the primary guard
-against runaway accumulation when conditions persist across many consecutive bars.
+`window` to support strategies where signals can fire multiple times per session. The
+one-at-a-time constraint is the guard against concurrent positions accumulating within
+a single trade.
 
 ---
 
@@ -387,8 +475,11 @@ and open mark computation. The entry pipeline is:
 3. Open mark computation
 4. All conditions evaluated     (single phase — full namespace available)
 5. min_credit / max_debit       (mark-based filters)
-6. max_open_positions           (stateful count — always last)
 ```
+
+The one-at-a-time constraint (at most one open position per trade at a time) is **not**
+part of the Pass 1 pipeline. It is applied after Pass 2 once real exit times are known.
+See the engine design notes in `classes.md`.
 
 **Design note:** An earlier design split conditions into pre-leg and post-leg phases
 to filter timestamps before leg selection as a performance optimisation. This was
@@ -486,31 +577,6 @@ For debit strategies (net BTO position): use `max_debit`. The entry is skipped i
 Both fields are sweepable (`NumericSweep | None`) — testing different credit thresholds
 is a common DOE parameter. Using both simultaneously on the same strategy is permitted
 but unusual; validation does not prevent it.
-
----
-
-## Minimum Equity Filter
-
-`entry.minimum_equity` is an optional equity floor that prevents new positions from
-opening when the running account equity has fallen below a threshold. Unlike the
-vectorized condition filters, this is a **sequential** check: it requires knowing
-the realized P&L of all trades closed before each candidate entry, which is not
-available in a single vectorized Polars pass.
-
-**Evaluation:** At the end of Pass 1, after all vectorized filters have been applied,
-`EntryScanner` performs a sequential sweep over the remaining candidates in
-chronological order. It tracks:
-
-```
-current_equity = initial_equity + sum(net_pnl for all positions closed before this entry time)
-```
-
-Any candidate entry where `current_equity < minimum_equity` is dropped.
-
-**Design note:** `initial_equity` is a run-level parameter supplied via the CLI (not
-part of the strategy YAML), so the same strategy file can be run against different
-account sizes. It is stored in the `backtest` output table for traceability and used
-by `PostProcessor` as the starting point for equity curve and drawdown calculations.
 
 ---
 

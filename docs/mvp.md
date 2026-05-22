@@ -56,7 +56,7 @@ The MVP is complete when all of the following hold:
 
 | Component | Scope |
 |---|---|
-| `StrategyDefinition` Pydantic models | Full model definitions; all fields validated at load time |
+| `TradeDefinition` + `StrategyDefinition` Pydantic models | Full model definitions; all fields validated at load time; cross-trade validators (shared underlying, unique trade names) |
 | Sweep parameter types (`NumericSweep`, `IntSweep`, `SweepRange`) | Types defined and validated; expansion deferred — all sweep fields must be scalar for MVP runs |
 | YAML loader | Full validation, clear error messages for malformed strategies |
 | Condition parser | **Simple comparisons only:** `<`, `>`, `<=`, `>=`, `==`, `!=`, `and`, `or`, `not`; leg property references (`short_put.delta`); indicator and bar column references |
@@ -69,7 +69,8 @@ The MVP is complete when all of the following hold:
 | `EntryScanner._apply_window_filters()` | Full: entry window, session config, weekday/skip-date filters |
 | `EntryScanner._select_legs()` | Full: batched DuckDB query on `option_greeks`; best delta+DTE match per leg; drops entries where any leg is unmatched |
 | `EntryScanner._compute_open_mark()` | Full: multi-leg signed sum; TP/SL price derivation |
-| `EntryScanner._evaluate_conditions()` | Steps 1–3: entry conditions (vectorized), min_credit/max_debit, max_open_positions; `minimum_equity` filter (step 4) deferred |
+| `EntryScanner._evaluate_conditions()` | Steps 1–2: entry conditions (vectorized), min_credit/max_debit |
+| `BacktestEngine._enforce_one_at_a_time()` | Full: sequential chronological filter applied per trade after Pass 2, using real exit times |
 | `ExitScanner._load_exit_data()` | Full: single batch query for all leg bars and indicators |
 | `ExitScanner._compute_position_marks()` | Full: close-based spread marks for multi-leg positions |
 | `ExitScanner._find_first_hit()` | Full: all 7 exit conditions in priority order; gap-open detection; worst_mark tracking; indicator exit conditions |
@@ -139,6 +140,219 @@ is a no-op until the sequential equity filter step is implemented.
 `charts.py` and all browser-based output are deferred. `btkit analyze` writes results to
 the terminal. The dashboard format has not yet been specified and will be designed as a
 separate milestone.
+
+---
+
+## Implementation Plan
+
+Components are built in dependency order. Each phase ends with a verification
+checkpoint before the next phase begins. The test suite (SC-1 through SC-7) is
+run in full at the end of Phase 7.
+
+---
+
+### Phase 1 — Database Layer
+
+The database layer is the foundation everything else depends on. Build it first
+so all subsequent phases have a real read/write target to validate against.
+
+**Step 1 — Input database schema.**
+Create the DuckDB schema for the input database: `underlying_bars`, `option_bars`,
+`option_greeks`, `indicator_definition`, `indicator_bars`. Implement
+`InputDatabase.__init__()` (opens connection, calls `CREATE TABLE IF NOT EXISTS`)
+and all read methods: `underlying_bars()`, `option_bars()`, `option_bars_for_legs()`,
+`greeks_at_entry()`, `indicators()`. Each method returns a Polars DataFrame.
+`indicators()` executes the DuckDB PIVOT internally so callers always receive a
+wide DataFrame.
+
+**Step 2 — Output database schema.**
+Create the DuckDB schema for the output database: `backtest`, `position`,
+`position_leg`. Implement `OutputDatabase.create_schema()`, `write_backtest()`,
+and `write_results()`. Verify referential integrity constraints are enforced.
+
+*Checkpoint:* Instantiate both database objects against empty files. Confirm tables
+exist and `PRAGMA table_info` matches the documented schema.
+
+---
+
+### Phase 2 — Data Pipeline (`btkit build`)
+
+**Step 3 — Examine test fixture data.**
+Inspect the Databento `.zip` files in `tests/fixtures/data/` to confirm their
+contents: which `.dbn` schema types are present (definitions, OHLCV-1m), which
+instruments and date ranges are covered, and which fields map to the database
+columns. This drives the ingest implementation and surfaces any format surprises
+before writing code.
+
+**Step 4 — Databento ingest.**
+Implement `DatabaseBuilder._ingest_definitions()`: read `.dbn` definition records
+and build an internal instrument map (instrument_id → symbol, expiration, strike,
+right, multiplier). Implement `DatabaseBuilder._ingest_ohlcv()`: read OHLCV-1m
+records, split into `underlying_bars` and `option_bars`, and pre-join definition
+metadata into `option_bars` at write time. No joins needed at backtest runtime.
+
+**Step 5 — Greeks computation.**
+Implement `GreeksCalculator`. Reads batches of `option_bars` joined with
+`underlying_bars` (for underlying close). Extracts numpy arrays and calls numba
+Black-76 functions for implied vol, delta, gamma, theta, vega. Writes results to
+`option_greeks`. Implement the numba Black-76 core functions in a separate module
+(`pipeline/black76.py`) so they can be tested in isolation.
+
+**Step 6 — Indicator runner.**
+Implement `IndicatorRunner`: load the user's script, call `compute(df)`, split
+the returned wide DataFrame into per-indicator series, write to `indicator_definition`
+and `indicator_bars` (tall format). Handle multi-series output from a single script.
+
+**Step 7 — `DatabaseBuilder` and `btkit build` CLI.**
+Implement `DatabaseBuilder.build()` to orchestrate steps 4–6 in order. Wire up the
+`btkit build` CLI command.
+
+*Checkpoint:* Run `btkit build` against the test fixture data with the test indicator
+script. Run the SC-2 database build queries to verify schema, pre-joined metadata,
+greek completeness, and indicator correctness.
+
+---
+
+### Phase 3 — Strategy Layer
+
+**Step 8 — YAML loader.**
+Implement `strategy/loader.py`: read a YAML file, instantiate `StrategyDefinition`
+via Pydantic (validation runs automatically), and return the model. Provide clear
+error messages for malformed fields. For MVP, reject any strategy where sweep fields
+are non-scalar (list or `SweepRange`).
+
+**Step 9 — Condition parser.**
+Implement `parse_condition(expr: str) -> pl.Expr` in `strategy/loader.py`.
+Supports: simple comparisons (`<`, `>`, `<=`, `>=`, `==`, `!=`), boolean operators
+(`and`, `or`, `not`), indicator column references, underlying bar column references
+(`close`, `open`, `high`, `low`, `volume`), and leg property dot-notation
+(`short_put.delta`, `short_put.strike`). Validates that all referenced names exist
+in the expected namespace and raises a descriptive error at load time if not.
+
+*Checkpoint:* Load each of the six test strategy YAML files. Confirm valid files
+parse without error and that deliberately malformed files (bad field names, missing
+required fields, non-scalar sweep in MVP mode) raise descriptive validation errors.
+
+---
+
+### Phase 4 — Backtest Engine: Pass 1 (Entry)
+
+**Step 10 — Window and session filters.**
+Implement `EntryScanner._apply_window_filters()`. Filters the underlying bars
+DataFrame to rows falling within `entry.window` (time of day) and `universe.session`
+(weekday filter, skip_dates). No DB access — pure Polars datetime operations.
+
+**Step 11 — Leg selection.**
+Implement `EntryScanner._select_legs()`. For the remaining candidate timestamps,
+issues a single batched DuckDB query against `option_greeks` to find the
+best-matching option for each leg (minimise `|actual_delta - target_delta|` within
+`dte_tolerance`). Drops any timestamp where a leg cannot be matched. Attaches per-leg
+columns (`leg_{name}_instrument_id`, `leg_{name}_open_price`, etc.) to the candidates
+DataFrame.
+
+**Step 12 — Open mark computation.**
+Implement `EntryScanner._compute_open_mark()`. Computes `open_mark` as the signed
+sum of leg open prices (`+` for BTO, `-` for STO), weighted by `quantity`. Derives
+`tp_price` and `sl_price` from `take_profit` and `stop_loss` applied to `open_mark`.
+
+**Step 13 — Condition evaluation.**
+Implement `EntryScanner._evaluate_conditions()`. Applies compiled Polars expressions
+from `parse_condition()` (AND logic) then `min_credit`/`max_debit` mark filters.
+Resolves the leg property namespace (e.g. `short_put.delta`) by renaming columns
+before expression evaluation.
+
+*Checkpoint:* Run `EntryScanner.scan()` against the test database with the base
+test strategy. Verify entry count and spot-check a handful of entry rows against
+expected values. SC-5 indicator condition tests can be partially validated here.
+
+---
+
+### Phase 5 — Backtest Engine: Pass 2 (Exit) + One-at-a-Time
+
+**Step 14 — Load exit data.**
+Implement `ExitScanner._load_exit_data()`. Issues a single batch query to load all
+`option_bars` rows needed to monitor every open position (spanning from the earliest
+entry time to the latest possible exit across all entries). Also loads the indicator
+DataFrame for the same window. This is the only DB read in Pass 2.
+
+**Step 15 — Position marks.**
+Implement `ExitScanner._compute_position_marks()`. Joins the batch-loaded option bars
+against each entry's leg instrument IDs. Computes `position_mark` per bar per entry
+as the signed sum of leg closes. Returns a long DataFrame of `(entry_id, ts_event,
+position_mark)`.
+
+**Step 16 — Exit detection.**
+Implement `ExitScanner._find_first_hit()`. For each entry, walks `position_mark`
+forward from `entry_time` and applies the seven exit conditions in priority order:
+gap-open SL (1), gap-open TP (2), stop loss (3), take profit (4), indicator condition
+(5), DTE exit (6), expiry (7). Records `exit_time`, `exit_mark`, `exit_reason`, and
+`worst_mark`. Applies fill price rules from `fill_price_and_costs.md`.
+
+**Step 17 — One-at-a-time filter.**
+Implement `BacktestEngine._enforce_one_at_a_time()`. Walks the (entry_time,
+exit_time) pairs for a single trade in chronological order and drops any entry whose
+`entry_time` falls before the previous position's `exit_time`. Returns filtered
+(entries, exits) pair.
+
+*Checkpoint:* Run Pass 1 + Pass 2 end-to-end for the SC-4 exit condition strategies.
+Verify that `exit_reason` matches the expected value for each engineered strategy.
+Spot-check one gap-open exit: confirm `exit_mark` is the spread open mark, not the
+TP/SL threshold price. Verify the one-at-a-time filter produces no overlapping
+positions for any trade.
+
+---
+
+### Phase 6 — PnL, Output, and `btkit run`
+
+**Step 18 — PnL calculation.**
+Implement `PnLCalculator.compute()`. Concatenates all per-trade entries and exits,
+joins on `entry_id`, and computes: `gross_pnl = open_mark - exit_mark`,
+`slippage_cost = exit_mark * slippage_pct`,
+`fee_cost = fee_per_contract * total_contracts * 2`, `net_pnl = gross_pnl -
+slippage_cost - fee_cost`. Carries `trade_name` through to the positions DataFrame.
+
+**Step 19 — Engine wiring and output.**
+Implement `BacktestEngine._write_backtest_record()` (inserts backtest row, returns id)
+and wire `BacktestEngine.run()` end-to-end across all trades. Implement
+`OutputDatabase.write_results()` to write positions and legs in a single transaction.
+
+**Step 20 — `btkit run` CLI.**
+Wire up the `btkit run` command: load strategy YAML, open input and output databases,
+instantiate and run `BacktestEngine`, print the resulting `backtest_id`.
+
+*Checkpoint:* Run `btkit run` with the base test strategy. Execute the SC-7
+integrity queries. Manually compute P&L for a handful of known positions (SC-6
+partial) and compare against the database.
+
+---
+
+### Phase 7 — Analysis and Full Pipeline
+
+**Step 21 — `PostProcessor` metrics.**
+Implement `PostProcessor.metrics()`: load positions from the output database and
+compute the full metric set — net profit, total trades, win rate, profit factor,
+avg/median win/loss, max drawdown, CAGR, MAR, Sharpe, Sortino, Calmar, premium
+capture rate, avg/median/worst MAE. MAE is derived from `worst_mark` and `open_mark`.
+Implement `equity_curve()`, `trade_pnl_series()`, and `summarize()`.
+
+**Step 22 — `btkit analyze` and `btkit pipeline` CLI.**
+Wire up `btkit analyze` (loads output DB, calls `PostProcessor.summarize()`, prints
+to terminal). Wire up `btkit pipeline` (chains build → run → analyze with
+skip-if-exists logic on the input DB).
+
+*Checkpoint:* Run the full SC test suite:
+
+| Test | Command |
+|---|---|
+| SC-1 | `btkit pipeline` end-to-end; exits 0, metrics printed |
+| SC-2 | DB build queries: schema, pre-join, greeks, indicators |
+| SC-3 | Multi-trade independent wings; trade attribution; no overlaps |
+| SC-4 | Five exit condition strategies; correct `exit_reason` per run |
+| SC-5 | Indicator condition gate; always-true ≈ base; always-false = 0 |
+| SC-6 | Manual metric verification against computed values |
+| SC-7 | Output DB integrity queries; all return 0 rows |
+
+MVP is complete when all seven pass.
 
 ---
 
@@ -250,39 +464,52 @@ Expected: only the leading rows where the rolling window has not yet filled (20 
 
 ---
 
-### Test 3 — Multi-leg strategy / iron condor (SC-3)
+### Test 3 — Multi-trade strategy / independent wings (SC-3)
 
-**Goal:** Verify that a four-leg iron condor strategy produces correctly structured
-positions and legs.
+**Goal:** Verify that a two-trade strategy (independently managed put spread and call
+spread) produces correctly structured positions, legs, and trade attribution.
 
-**Strategy file:** `strategy_iron_condor.yaml` — an iron condor with four legs:
-`long_put`, `short_put`, `short_call`, `long_call`.
+**Strategy file:** `strategy_independent_wings.yaml` — two trades, each a two-leg spread:
+- `put_spread`: `short_put` (STO) + `long_put` (BTO)
+- `call_spread`: `short_call` (STO) + `long_call` (BTO)
 
-**Execution:** `btkit run` with the iron condor strategy.
+**Execution:** `btkit run` with the independent wings strategy.
 
-**Verification — leg count:**
+**Verification — trade attribution:**
+```sql
+SELECT trade_name, COUNT(*) AS position_count FROM position GROUP BY trade_name;
+```
+Expected: rows for both `put_spread` and `call_spread`; no NULL `trade_name`.
+
+**Verification — leg count per position:**
 ```sql
 SELECT position_id, COUNT(*) AS leg_count FROM position_leg GROUP BY position_id;
 ```
-Expected: every position has exactly 4 legs.
+Expected: every position has exactly 2 legs.
 
-**Verification — leg actions:**
+**Verification — leg actions per position:**
 ```sql
-SELECT action, COUNT(*) FROM position_leg GROUP BY action;
+SELECT p.trade_name, pl.action, COUNT(*) FROM position_leg pl
+JOIN position p ON pl.position_id = p.id
+GROUP BY p.trade_name, pl.action;
 ```
-Expected: equal counts of `STO` and `BTO` (2 of each per position).
+Expected: 1 STO and 1 BTO per position for both trades.
 
-**Verification — leg structure:**
+**Verification — one-at-a-time constraint:**
 ```sql
-SELECT right, action FROM position_leg WHERE position_id = 1 ORDER BY strike_price;
+-- No two positions from the same trade overlap in time
+SELECT a.trade_name, a.id, b.id
+FROM position a JOIN position b
+  ON a.trade_name = b.trade_name AND a.id < b.id
+WHERE a.open_time < b.exit_time AND b.open_time < a.exit_time
+  AND a.exit_time IS NOT NULL AND b.exit_time IS NOT NULL;
 ```
-Expected (for a standard iron condor): `P/BTO` (lowest strike), `P/STO`, `C/STO`, `C/BTO`
-(highest strike).
+Expected: 0 rows — no overlapping positions within any single trade.
 
 **Verification — spread mark:**
-For one known entry timestamp, manually compute:
+For one known entry timestamp in the put spread, manually compute:
 ```
-open_mark = (long_put_price * 1) + (short_put_price * -1) + (short_call_price * -1) + (long_call_price * 1)
+open_mark = (short_put_price * -1) + (long_put_price * 1)
 ```
 Compare against `position.open_mark` for that row.
 
@@ -411,11 +638,11 @@ AND exit_mark IS NOT NULL;
 -- Expected: 0
 ```
 
-**Leg count consistency (iron condor test only):**
+**Leg count consistency (SC-3 only):**
 ```sql
 SELECT position_id, COUNT(*) AS leg_count FROM position_leg
-GROUP BY position_id HAVING leg_count != 4;
--- Expected: 0 rows
+GROUP BY position_id HAVING leg_count != 2;
+-- Expected: 0 rows for the independent wings strategy (2 legs per position)
 ```
 
 **Aggregate consistency:**

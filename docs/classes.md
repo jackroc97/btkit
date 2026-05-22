@@ -380,18 +380,45 @@ class BacktestEngine:
 
     def run(self) -> int:
         """
-        Executes the three-pass vectorized backtest.
+        Executes the three-pass vectorized backtest across all trades.
         Returns the backtest_id written to the output database.
         strategy must be a fully-scalar StrategyDefinition (all SweepParam
         fields resolved to plain values). MatrixRunner handles expansion
         before dispatching to BacktestEngine.
+
+        Pass 1 and Pass 2 run independently per trade. After Pass 2, the
+        one-at-a-time constraint is applied per trade using real exit times.
+        Pass 3 joins all trade results into a single set of position records.
         """
         backtest_id = self._write_backtest_record()
-        entries     = EntryScanner(self.input_db, self.strategy).scan()
-        exits       = ExitScanner(self.input_db, self.strategy).scan(entries)
-        positions   = PnLCalculator(self.strategy).compute(entries, exits)
+        all_entries, all_exits = {}, {}
+        for trade in self.strategy.trades:
+            entries = EntryScanner(self.input_db, trade).scan()
+            exits   = ExitScanner(self.input_db, trade).scan(entries)
+            entries, exits = self._enforce_one_at_a_time(entries, exits)
+            all_entries[trade.name] = entries
+            all_exits[trade.name]   = exits
+        positions = PnLCalculator(self.strategy).compute(all_entries, all_exits)
         self.output_db.write_results(backtest_id, positions.positions, positions.legs)
         return backtest_id
+
+    def _enforce_one_at_a_time(
+        self,
+        entries: pl.DataFrame,
+        exits: pl.DataFrame,
+    ) -> tuple[pl.DataFrame, pl.DataFrame]:
+        """
+        Filters entries and exits to enforce the one-at-a-time constraint:
+        no new position may open before the previous position has closed.
+
+        Walks (entry_time, exit_time) pairs in chronological order and drops
+        any entry whose entry_time falls before the previous position's exit_time.
+        Returns the filtered (entries, exits) pair.
+
+        This step runs after Pass 2 so that real exit times are used — no
+        estimation or approximation is needed.
+        """
+        ...
 ```
 
 ---
@@ -439,11 +466,11 @@ never shared across process boundaries.
 
 Pass 1. Scans underlying bars and indicators to identify all valid entry timestamps
 within the configured entry window, then selects the specific option legs for each
-entry via a greeks lookup.
+entry via a greeks lookup. Operates on a single `TradeDefinition`.
 
 ```python
 class EntryScanner:
-    def __init__(self, db: InputDatabase, strategy: StrategyDefinition): ...
+    def __init__(self, db: InputDatabase, trade: TradeDefinition): ...
 
     def scan(self) -> pl.DataFrame:
         """
@@ -494,16 +521,12 @@ class EntryScanner:
         Applies in sequence:
           1. All entry.conditions (AND logic; if/then parsed to implication) — vectorized
           2. min_credit / max_debit filters — vectorized
-          3. max_open_positions (stateful count) — vectorized guard
-          4. minimum_equity filter (sequential): sweeps candidates in chronological
-             order, tracking current_equity = initial_equity + cumulative net_pnl of
-             all positions closed before each candidate entry time. Drops candidates
-             where current_equity < minimum_equity. This step runs after steps 1–3
-             because it is inherently sequential and cannot be expressed as a Polars
-             filter over the candidate DataFrame alone.
 
-        Steps 1–3 are compiled Polars expressions applied in a single vectorized pass.
-        Step 4 runs only when entry.minimum_equity is set.
+        Both steps are compiled Polars expressions applied in a single vectorized pass.
+
+        The one-at-a-time constraint is NOT applied here — it requires real exit times
+        from Pass 2 and is enforced by BacktestEngine._enforce_one_at_a_time() after
+        ExitScanner completes.
         """
         ...
 ```
@@ -515,10 +538,11 @@ class EntryScanner:
 Pass 2. For each entry, scans forward through 1-minute bars to find the first bar
 where a TP, SL, DTE, or expiry exit condition is met. Also tracks `worst_mark`
 across the scan. Implements the fill price rules from `fill_price_and_costs.md`.
+Operates on a single `TradeDefinition`.
 
 ```python
 class ExitScanner:
-    def __init__(self, db: InputDatabase, strategy: StrategyDefinition): ...
+    def __init__(self, db: InputDatabase, trade: TradeDefinition): ...
 
     def scan(self, entries: pl.DataFrame) -> pl.DataFrame:
         """
@@ -602,16 +626,22 @@ class PnLCalculator:
 
     def compute(
         self,
-        entries: pl.DataFrame,
-        exits: pl.DataFrame
+        all_entries: dict[str, pl.DataFrame],
+        all_exits:   dict[str, pl.DataFrame],
     ) -> BacktestPositions:
         """
+        Receives one entries DataFrame and one exits DataFrame per trade (keyed
+        by trade name). Concatenates all trades, then for each position:
+
         1. Join entries + exits on entry_id.
         2. gross_pnl = open_mark - exit_mark
            (sign convention follows leg actions; no spread-specific assumption)
         3. slippage_cost = exit_mark * slippage_pct
         4. fee_cost = fee_per_contract * total_contracts * 2  (open + close)
         5. net_pnl = gross_pnl - slippage_cost - fee_cost
+
+        trade_name is carried through from the entries DataFrame and written to
+        the positions output so results from different trades are distinguishable.
         worst_mark is passed through from exits unchanged.
         """
         ...

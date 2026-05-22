@@ -37,19 +37,27 @@ a derived aggregation rather than the primary data source.
 **Constraint:** The three-pass vectorized backtest (Entry → Exit → PnL) cannot express
 conditions that depend on the sequential history of the run in a pure Polars pass.
 
-The design resolves this with targeted sequential steps at well-defined points:
-- `max_open_positions` is a vectorized approximation (count of open positions at each
-  timestamp), not a true sequential check.
-- `minimum_equity` is evaluated as a sequential final step in Pass 1, after all
-  vectorized filters, by sweeping entry candidates in chronological order and tracking
-  running equity. This is the only non-vectorized filter in the critical path.
+The design resolves this with a targeted sequential step at a well-defined point:
+- The **one-at-a-time constraint** (at most one open position per trade at a time) is
+  enforced by `BacktestEngine._enforce_one_at_a_time()` between Pass 2 and Pass 3.
+  Because it runs after Pass 2, it uses real exit times — no estimation is required.
+  It is a simple chronological walk over (entry_time, exit_time) pairs per trade.
 
 **Impact:** Complex position-sizing rules that depend on current portfolio state (e.g.,
-Kelly-fraction sizing, risk-parity weighting) cannot be expressed in the current model.
-`fixed_contracts` sizing is the only supported method.
+Kelly-fraction sizing, risk-parity weighting, equity floors) cannot be expressed in the
+current three-pass model. Per-leg `quantity` is the only supported sizing mechanism.
 
-**Reach goal:** A portfolio-level post-filter pass that adjusts or rejects entries based
-on full portfolio state, run after the vectorized entry scan.
+**Future: Pass 4 — Portfolio State Filter**
+
+A fourth pass run after PnLCalculator would have access to complete realized P&L,
+real exit times, and full portfolio state. This is the natural home for:
+- `minimum_equity` — skip entries where running account equity has fallen below a floor
+- Margin-aware position filtering — skip entries where estimated margin consumed by
+  open positions exceeds a threshold (see Margin and Capital Requirements below)
+- Dynamic sizing — scale `quantity` based on current equity or risk metrics
+
+Pass 4 is not part of the MVP or core development. It is documented here as the
+correct architectural location for these features when they are needed.
 
 ---
 
@@ -65,10 +73,10 @@ individual positions.
 **Impact:** Strategies that would be margin-constrained in live trading may appear
 over-deployed in backtests.
 
-**Mitigation:** Use `max_open_positions` and `minimum_equity` together as conservative
-proxies for capital constraints. For example, if each short put spread consumes roughly
-$5,000 in margin on a $50,000 account, set `max_open_positions: 10` and
-`minimum_equity: 5000`.
+**Mitigation:** The one-at-a-time constraint (at most one open position per trade) is
+a conservative proxy for capital constraints. For more granular control, a future
+Pass 4 filter would be the correct place to enforce margin limits (see Vectorized
+Design and Sequential State above).
 
 **Reach goal:** A per-position margin model that deducts estimated margin from available
 equity as positions are opened and credits it back on close.

@@ -34,19 +34,22 @@ class PnLCalculator:
 
     def compute(
         self,
-        entries: pl.DataFrame,
-        exits: pl.DataFrame,
+        all_entries: dict[str, pl.DataFrame],
+        all_exits: dict[str, pl.DataFrame],
     ) -> BacktestPositions:
         """
-        Join entries + exits on entry_id and compute net P&L for each position.
+        Receives one entries DataFrame and one exits DataFrame per trade (keyed
+        by trade name). Concatenates all trades, then for each position:
 
         Steps:
-            1. Join entries and exits on entry_id.
+            1. Join entries + exits on entry_id.
             2. gross_pnl = open_mark - exit_mark
             3. slippage_cost = exit_mark * costs.slippage_pct
             4. fee_cost = costs.fee_per_contract * total_contracts_in_position * 2
             5. net_pnl = gross_pnl - slippage_cost - fee_cost
 
+        trade_name is carried through from the entries DataFrames and written to
+        the positions output so results from different trades are distinguishable.
         worst_mark is passed through from exits unchanged — it is already computed
         by ExitScanner during the bar scan.
 

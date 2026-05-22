@@ -22,13 +22,13 @@ from __future__ import annotations
 import polars as pl
 
 from btkit.db.input_db import InputDatabase
-from btkit.strategy.definition import StrategyDefinition
+from btkit.strategy.definition import TradeDefinition
 
 
 class ExitScanner:
-    def __init__(self, db: InputDatabase, strategy: StrategyDefinition) -> None:
+    def __init__(self, db: InputDatabase, trade: TradeDefinition) -> None:
         self.db = db
-        self.strategy = strategy
+        self.trade = trade
 
     def scan(self, entries: pl.DataFrame) -> pl.DataFrame:
         """

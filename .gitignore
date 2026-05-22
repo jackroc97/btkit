@@ -25,6 +25,10 @@ tests/output/
 *.dbn
 *.dbn.zst
 
+# Test fixture data (large files)
+tests/fixtures/data/*
+!tests/fixtures/data/.gitkeep
+
 # macOS
 .DS_Store
 

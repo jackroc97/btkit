@@ -1,16 +1,19 @@
 """
 EntryScanner — Pass 1 of the vectorized backtest.
 
-Scans the session to find every valid entry signal, selects option legs for each,
-computes the opening spread mark, and evaluates entry conditions. Returns a
-DataFrame where each row is a fully-specified entry ready for ExitScanner.
+Scans the session to find every valid entry signal for a single TradeDefinition,
+selects option legs for each, computes the opening spread mark, and evaluates
+entry conditions. Returns a DataFrame where each row is a fully-specified entry
+ready for ExitScanner.
 
 Pipeline within scan():
     1. _apply_window_filters()   — time/session filter (cheap, no DB access)
     2. _select_legs()            — batched DuckDB query on option_greeks
     3. _compute_open_mark()      — spread mark + TP/SL price derivation
-    4. _evaluate_conditions()    — conditions, min_credit/max_debit,
-                                   max_open_positions, minimum_equity filter
+    4. _evaluate_conditions()    — conditions, min_credit/max_debit (vectorized)
+
+The one-at-a-time constraint is NOT applied here. It is enforced by
+BacktestEngine._enforce_one_at_a_time() after Pass 2 using real exit times.
 """
 
 from __future__ import annotations
@@ -18,32 +21,30 @@ from __future__ import annotations
 import polars as pl
 
 from btkit.db.input_db import InputDatabase
-from btkit.strategy.definition import StrategyDefinition
+from btkit.strategy.definition import TradeDefinition
 
 
 class EntryScanner:
     def __init__(
         self,
         db: InputDatabase,
-        strategy: StrategyDefinition,
-        initial_equity: float = 100_000.0,
+        trade: TradeDefinition,
     ) -> None:
         self.db = db
-        self.strategy = strategy
-        self.initial_equity = initial_equity
+        self.trade = trade
 
     def scan(self) -> pl.DataFrame:
         """
         Run the full entry scan and return one row per valid entry.
 
         Returned columns:
-            entry_time, open_mark, tp_price, sl_price, dte_exit_time,
+            trade_name, entry_time, open_mark, tp_price, sl_price, dte_exit_time,
             + per leg: leg_{name}_instrument_id, leg_{name}_open_price,
                        leg_{name}_multiplier, leg_{name}_strike,
                        leg_{name}_expiration, leg_{name}_right, leg_{name}_action
         """
         bars = self.db.underlying_bars(
-            instrument_id=...,  # resolved from strategy.instrument
+            instrument_id=...,  # resolved from trade.instrument
             start=...,
             end=...,
         )

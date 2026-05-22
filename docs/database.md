@@ -229,6 +229,7 @@ net of costs unless otherwise noted.
 CREATE TABLE position (
     id              INTEGER PRIMARY KEY,
     backtest_id     INTEGER         NOT NULL REFERENCES backtest(id),
+    trade_name      VARCHAR         NOT NULL,   -- matches trades[n].name from strategy YAML
     open_time       TIMESTAMPTZ     NOT NULL,
     exit_time       TIMESTAMPTZ,                -- NULL if still open at end of backtest
     exit_reason     VARCHAR,                    -- 'take_profit' | 'stop_loss' |
@@ -245,6 +246,10 @@ CREATE TABLE position (
 
 **Design notes:**
 
+- `trade_name` links each position back to the trade definition in the strategy YAML
+  that produced it. For single-trade strategies this is a constant; for multi-trade
+  strategies (e.g. independent put and call spreads) it allows `PostProcessor` to
+  report per-trade metrics and lets users filter results by wing.
 - `open_mark` and `exit_mark` use generic "mark" naming rather than spread-specific
   terminology. "Mark" is the standard financial term for the current market value of a
   position and applies equally to single-leg options, multi-leg spreads, and future

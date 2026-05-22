@@ -1,12 +1,15 @@
 """
 BacktestEngine — orchestrates a single backtest run.
 
-Wires together the three passes (EntryScanner → ExitScanner → PnLCalculator)
-and writes results to the output database. Receives a fully-scalar
-StrategyDefinition (all sweep fields resolved to plain values).
+Runs EntryScanner and ExitScanner for each trade, enforces the one-at-a-time
+constraint per trade using real exit times, then runs PnLCalculator across all
+trades combined. Receives a fully-scalar StrategyDefinition (all sweep fields
+resolved to plain values).
 """
 
 from __future__ import annotations
+
+import polars as pl
 
 from btkit.backtest.entry import EntryScanner
 from btkit.backtest.exit import ExitScanner
@@ -31,7 +34,7 @@ class BacktestEngine:
 
     def run(self) -> int:
         """
-        Execute the three-pass vectorized backtest.
+        Execute the three-pass vectorized backtest across all trades.
         Returns the backtest_id written to the output database.
 
         strategy must be a fully-scalar StrategyDefinition (no SweepRange or
@@ -39,11 +42,30 @@ class BacktestEngine:
         combination to a scalar definition before dispatching here.
         """
         backtest_id = self._write_backtest_record()
-        entries = EntryScanner(self.input_db, self.strategy, self.initial_equity).scan()
-        exits = ExitScanner(self.input_db, self.strategy).scan(entries)
-        positions = PnLCalculator(self.strategy).compute(entries, exits)
+        all_entries: dict[str, pl.DataFrame] = {}
+        all_exits: dict[str, pl.DataFrame] = {}
+        for trade in self.strategy.trades:
+            entries = EntryScanner(self.input_db, trade).scan()
+            exits = ExitScanner(self.input_db, trade).scan(entries)
+            entries, exits = self._enforce_one_at_a_time(entries, exits)
+            all_entries[trade.name] = entries
+            all_exits[trade.name] = exits
+        positions = PnLCalculator(self.strategy).compute(all_entries, all_exits)
         self.output_db.write_results(backtest_id, positions.positions, positions.legs)
         return backtest_id
+
+    def _enforce_one_at_a_time(
+        self,
+        entries: pl.DataFrame,
+        exits: pl.DataFrame,
+    ) -> tuple[pl.DataFrame, pl.DataFrame]:
+        """
+        Filters entries and exits so no new position opens before the previous
+        one closes. Walks (entry_time, exit_time) pairs in chronological order
+        and drops any entry whose entry_time falls before the previous exit_time.
+        Returns the filtered (entries, exits) pair.
+        """
+        raise NotImplementedError
 
     def _write_backtest_record(self) -> int:
         """
