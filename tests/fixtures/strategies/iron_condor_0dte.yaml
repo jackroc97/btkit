@@ -1,0 +1,82 @@
+strategy:
+  name: iron_condor_0dte
+  version: "1.0"
+
+  universe:
+    start_date: "2026-04-22"
+    end_date:   "2026-05-21"
+    session:
+      timezone:      "America/New_York"
+      start_time:    "09:30"
+      end_time:      "17:00"
+      weekdays_only: true
+      skip_dates:    []
+
+  costs:
+    slippage_pct:     0.01
+    fee_per_contract: 0.65
+
+  trades:
+    - name: put_spread
+      instrument:
+        root_symbol: ES
+        asset_class: future
+
+      entry:
+        window:
+          start: "09:45"
+          end:   "16:30"
+        min_credit: 0.20   # $10 / 50 (ES multiplier) per point
+
+      legs:
+        - name: short_put
+          right:    put
+          action:   sell_to_open
+          delta:    -0.075
+          dte:      0
+          quantity: 1
+
+        - name: long_put
+          right:        put
+          action:       buy_to_open
+          reference_leg: short_put
+          strike_offset: -50.0   # $50 wide — long put 50 points below short put
+          dte:          0
+          quantity:     1
+
+      exit:
+        take_profit_pct: 0.70   # exit at 70% of premium received
+        stop_loss:       5.00   # $250 / 50 (ES multiplier) per point
+        expiry_exit:     true
+
+    - name: call_spread
+      instrument:
+        root_symbol: ES
+        asset_class: future
+
+      entry:
+        window:
+          start: "09:45"
+          end:   "16:30"
+        min_credit: 0.20   # $10 / 50 (ES multiplier) per point
+
+      legs:
+        - name: short_call
+          right:    call
+          action:   sell_to_open
+          delta:    0.035
+          dte:      0
+          quantity: 1
+
+        - name: long_call
+          right:        call
+          action:       buy_to_open
+          reference_leg: short_call
+          strike_offset: 50.0   # $50 wide — long call 50 points above short call
+          dte:          0
+          quantity:     1
+
+      exit:
+        take_profit_pct: 0.70
+        stop_loss:       5.00
+        expiry_exit:     true

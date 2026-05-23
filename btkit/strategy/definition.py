@@ -98,9 +98,25 @@ class LegConfig(BaseModel):
     name: str
     right: Literal["call", "put"]
     action: Literal["buy_to_open", "sell_to_open"]
-    delta: NumericSweep
     dte: IntSweep
     quantity: int = 1
+    # Selection mode A: delta-targeted (standard)
+    delta: NumericSweep | None = None
+    # Selection mode B: fixed strike offset from a reference leg
+    strike_offset: float | None = None   # positive = above ref strike, negative = below
+    reference_leg: str | None = None     # name of the leg whose strike is the origin
+
+    @model_validator(mode="after")
+    def validate_selection_mode(self) -> LegConfig:
+        has_offset = self.strike_offset is not None
+        has_delta  = self.delta is not None
+        if has_offset and has_delta:
+            raise ValueError("delta and strike_offset are mutually exclusive")
+        if not has_offset and not has_delta:
+            raise ValueError("one of delta or strike_offset is required")
+        if has_offset and self.reference_leg is None:
+            raise ValueError("reference_leg is required when strike_offset is set")
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -109,10 +125,19 @@ class LegConfig(BaseModel):
 
 class ExitConfig(BaseModel):
     stop_loss: NumericSweep
-    take_profit: NumericSweep
+    take_profit: NumericSweep | None = None      # fixed per-point offset from open_mark
+    take_profit_pct: NumericSweep | None = None  # fraction of open_mark to retain (e.g. 0.70 = exit at 70% profit)
     dte_exit: IntSweep | None = None
     expiry_exit: bool = True
     conditions: list[str] = []   # OR logic — position closes if any condition is true
+
+    @model_validator(mode="after")
+    def validate_take_profit(self) -> ExitConfig:
+        if self.take_profit is None and self.take_profit_pct is None:
+            raise ValueError("one of take_profit or take_profit_pct is required")
+        if self.take_profit is not None and self.take_profit_pct is not None:
+            raise ValueError("take_profit and take_profit_pct are mutually exclusive")
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +195,19 @@ class TradeDefinition(BaseModel):
             raise ValueError("leg names must be unique within a trade")
         return self
 
+    @model_validator(mode="after")
+    def reference_legs_valid(self) -> TradeDefinition:
+        delta_leg_names = {leg.name for leg in self.legs if leg.strike_offset is None}
+        for leg in self.legs:
+            if leg.reference_leg is None:
+                continue
+            if leg.reference_leg not in delta_leg_names:
+                raise ValueError(
+                    f"leg '{leg.name}' references '{leg.reference_leg}' which must be "
+                    "a delta-selected leg defined earlier in the legs list"
+                )
+        return self
+
 
 # ---------------------------------------------------------------------------
 # Top-level strategy definition
@@ -213,11 +251,11 @@ class StrategyDefinition(BaseModel):
         sweep_fields: list[str] = []
         for trade in self.trades:
             for leg in trade.legs:
-                if is_sweep(leg.delta):
+                if leg.delta is not None and is_sweep(leg.delta):
                     sweep_fields.append(f"trades[{trade.name}].legs[{leg.name}].delta")
                 if is_sweep(leg.dte):
                     sweep_fields.append(f"trades[{trade.name}].legs[{leg.name}].dte")
-            for fname in ("stop_loss", "take_profit", "dte_exit"):
+            for fname in ("stop_loss", "take_profit", "take_profit_pct", "dte_exit"):
                 v = getattr(trade.exit, fname)
                 if v is not None and is_sweep(v):
                     sweep_fields.append(f"trades[{trade.name}].exit.{fname}")
@@ -239,9 +277,9 @@ class StrategyDefinition(BaseModel):
 
         for trade in self.trades:
             for leg in trade.legs:
-                if is_sweep(leg.delta) or is_sweep(leg.dte):
+                if (leg.delta is not None and is_sweep(leg.delta)) or is_sweep(leg.dte):
                     return True
-            for fname in ("stop_loss", "take_profit", "dte_exit"):
+            for fname in ("stop_loss", "take_profit", "take_profit_pct", "dte_exit"):
                 v = getattr(trade.exit, fname)
                 if v is not None and is_sweep(v):
                     return True

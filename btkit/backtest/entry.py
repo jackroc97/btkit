@@ -184,62 +184,121 @@ class EntryScanner:
     ) -> pl.DataFrame:
         """
         For each remaining candidate timestamp, find the best-matching option
-        for every leg simultaneously in a single DB query.
+        for every leg.
 
-        Previously called greeks_for_entry() once per leg (N roundtrips). Now
-        calls greeks_for_all_legs() once regardless of leg count. The best
-        match per (ts_event, leg) is chosen in Polars by minimising
-        |actual_delta - target_delta|. Timestamps where any leg has no match
-        within tolerance are dropped via inner join.
+        Legs are processed in two passes:
+          Pass 1 — delta-selected legs: one batched greeks_for_all_legs() call,
+            best match chosen by minimising |actual_delta - target_delta|.
+          Pass 2 — strike-offset legs: for each such leg, compute the target
+            strike from the reference leg's selected strike, then call
+            greeks_for_strike_legs() and pick the closest available strike.
+
+        Timestamps where any leg has no match are dropped via inner join.
         """
         ts_events = candidates["ts_event"].to_list()
-
-        leg_specs = [
-            {
-                "name":         leg.name,
-                "right":        "C" if leg.right == "call" else "P",
-                "target_delta": float(leg.delta),
-                "target_dte":   int(leg.dte),
-            }
-            for leg in self.trade.legs
-        ]
-
-        all_candidates = self.db.greeks_for_all_legs(
-            underlying_id=underlying_id,
-            ts_events=ts_events,
-            leg_specs=leg_specs,
-            delta_tolerance=0.10,
-            dte_tolerance=5,
-        )
-
-        if all_candidates.is_empty():
-            return pl.DataFrame()
-
-        # Partition once by leg_name rather than filtering N times (O(rows) vs
-        # O(rows × legs)). group_by returns string or tuple keys depending on
-        # Polars version, so normalise to str before building the dict.
-        partitions: dict[str, pl.DataFrame] = {}
-        for key, group_df in all_candidates.group_by("leg_name"):
-            leg_name = key[0] if isinstance(key, (list, tuple)) else key
-            partitions[leg_name] = group_df
+        delta_legs  = [leg for leg in self.trade.legs if leg.strike_offset is None]
+        offset_legs = [leg for leg in self.trade.legs if leg.strike_offset is not None]
 
         result = candidates.select("ts_event")
 
-        for leg in self.trade.legs:
-            target_delta = float(leg.delta)
-            leg_df = partitions.get(leg.name)
+        # ------------------------------------------------------------------
+        # Pass 1: delta-selected legs (single batched DB query)
+        # ------------------------------------------------------------------
+        if delta_legs:
+            leg_specs = [
+                {
+                    "name":         leg.name,
+                    "right":        "C" if leg.right == "call" else "P",
+                    "target_delta": float(leg.delta),
+                    "target_dte":   int(leg.dte),
+                }
+                for leg in delta_legs
+            ]
 
-            if leg_df is None or leg_df.is_empty():
+            all_candidates = self.db.greeks_for_all_legs(
+                underlying_id=underlying_id,
+                ts_events=ts_events,
+                leg_specs=leg_specs,
+                delta_tolerance=0.10,
+                dte_tolerance=5,
+            )
+
+            if all_candidates.is_empty():
                 return pl.DataFrame()
 
-            best = (
-                leg_df
-                .with_columns(
-                    (pl.col("delta") - target_delta).abs().alias("_delta_diff")
+            partitions: dict[str, pl.DataFrame] = {}
+            for key, group_df in all_candidates.group_by("leg_name"):
+                leg_name = key[0] if isinstance(key, (list, tuple)) else key
+                partitions[leg_name] = group_df
+
+            for leg in delta_legs:
+                target_delta = float(leg.delta)
+                leg_df = partitions.get(leg.name)
+
+                if leg_df is None or leg_df.is_empty():
+                    return pl.DataFrame()
+
+                best = (
+                    leg_df
+                    .with_columns(
+                        (pl.col("delta") - target_delta).abs().alias("_delta_diff")
+                    )
+                    .sort(["ts_event", "_delta_diff"])
+                    .unique(subset=["ts_event"], keep="first")
+                    .drop(["_delta_diff", "leg_name"])
                 )
-                .sort(["ts_event", "_delta_diff"])
+
+                rename_map = {
+                    col: f"leg_{leg.name}_{col}"
+                    for col in best.columns
+                    if col != "ts_event"
+                }
+                best = best.rename(rename_map).with_columns([
+                    pl.lit(leg.action).alias(f"leg_{leg.name}_action"),
+                    pl.lit(leg.quantity).alias(f"leg_{leg.name}_quantity"),
+                ])
+
+                result = result.join(best, on="ts_event", how="inner")
+
+        # ------------------------------------------------------------------
+        # Pass 2: strike-offset legs (one DB query per leg)
+        # ------------------------------------------------------------------
+        for leg in offset_legs:
+            ref_strike_col = f"leg_{leg.reference_leg}_strike_price"
+            if ref_strike_col not in result.columns:
+                return pl.DataFrame()
+
+            right_char = "C" if leg.right == "call" else "P"
+            dte_lo = int(leg.dte) - 5
+            dte_hi = int(leg.dte) + 5
+
+            strike_targets = result.select([
+                "ts_event",
+                pl.lit(leg.name).alias("leg_name"),
+                pl.lit(right_char).alias("right"),
+                (pl.col(ref_strike_col) + pl.lit(float(leg.strike_offset))).alias("target_strike"),
+                pl.lit(dte_lo).cast(pl.Int32).alias("dte_lo"),
+                pl.lit(dte_hi).cast(pl.Int32).alias("dte_hi"),
+            ])
+
+            offset_candidates = self.db.greeks_for_strike_legs(
+                underlying_id=underlying_id,
+                strike_targets=strike_targets,
+            )
+
+            if offset_candidates.is_empty():
+                return pl.DataFrame()
+
+            target_strikes = strike_targets.select(["ts_event", "target_strike"])
+            best = (
+                offset_candidates
+                .join(target_strikes, on="ts_event", how="left")
+                .with_columns(
+                    (pl.col("strike_price") - pl.col("target_strike")).abs().alias("_strike_diff")
+                )
+                .sort(["ts_event", "_strike_diff"])
                 .unique(subset=["ts_event"], keep="first")
-                .drop(["_delta_diff", "leg_name"])
+                .drop(["_strike_diff", "leg_name", "target_strike"])
             )
 
             rename_map = {
@@ -271,8 +330,19 @@ class EntryScanner:
 
         exit_cfg = self.trade.exit
         entries = entries.with_columns([mark_expr.alias("open_mark")])
+
+        if exit_cfg.take_profit_pct is not None:
+            # tp_price = open_mark × (1 - pct): exit when mark falls to this fraction
+            tp_expr = (
+                pl.col("open_mark") * pl.lit(1.0 - float(exit_cfg.take_profit_pct))
+            ).alias("tp_price")
+        else:
+            tp_expr = (
+                pl.col("open_mark") - pl.lit(float(exit_cfg.take_profit))
+            ).alias("tp_price")
+
         entries = entries.with_columns([
-            (pl.col("open_mark") - pl.lit(float(exit_cfg.take_profit))).alias("tp_price"),
+            tp_expr,
             (pl.col("open_mark") + pl.lit(float(exit_cfg.stop_loss))).alias("sl_price"),
             pl.lit(exit_cfg.dte_exit).cast(pl.Int32).alias("dte_exit"),
         ])

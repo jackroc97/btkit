@@ -288,6 +288,53 @@ class InputDatabase:
             self._con.unregister("_entry_ts")
             self._con.unregister("_leg_params")
 
+    def greeks_for_strike_legs(
+        self,
+        underlying_id: int,
+        strike_targets: pl.DataFrame,
+        *,
+        strike_tolerance: float = 1.0,
+    ) -> pl.DataFrame:
+        """
+        For each (ts_event, leg_name) in strike_targets, find the option whose
+        strike_price is within strike_tolerance of target_strike and whose DTE
+        falls in [dte_lo, dte_hi].
+
+        strike_targets columns: ts_event, leg_name, right (C/P), target_strike,
+        dte_lo, dte_hi.
+
+        Returns the same column set as greeks_for_all_legs() so that
+        EntryScanner._select_legs() can apply identical post-processing.
+        Caller picks the closest-strike match per (ts_event, leg_name) in Polars.
+        """
+        ts_min = strike_targets["ts_event"].min()
+        ts_max = strike_targets["ts_event"].max()
+        self._con.register("_strike_targets", strike_targets)
+        try:
+            return self._con.execute(
+                """
+                SELECT st.leg_name, og.ts_event, og.instrument_id, og.underlying_id,
+                       og.dte, og.iv, og.delta, og.gamma, og.theta, og.vega,
+                       ob.strike_price, ob.expiration, ob."right", ob.multiplier,
+                       ob.symbol, ob.close
+                FROM option_greeks og
+                JOIN option_bars ob
+                  ON og.instrument_id = ob.instrument_id
+                 AND og.ts_event      = ob.ts_event
+                JOIN _strike_targets st
+                  ON og.ts_event               = st.ts_event
+                 AND ob."right"                = st.right
+                 AND og.dte                    BETWEEN st.dte_lo AND st.dte_hi
+                 AND abs(ob.strike_price - st.target_strike) <= ?
+                WHERE og.underlying_id = ?
+                  AND og.ts_event BETWEEN ? AND ?
+                  AND ob.close IS NOT NULL
+                """,
+                [strike_tolerance, underlying_id, ts_min, ts_max],
+            ).pl()
+        finally:
+            self._con.unregister("_strike_targets")
+
     # ------------------------------------------------------------------
     # Indicators
     # ------------------------------------------------------------------
