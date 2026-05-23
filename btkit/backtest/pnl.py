@@ -5,11 +5,14 @@ Pure arithmetic: joins entries and exits, applies slippage and fees, and
 produces final position and leg records matching the output database schema.
 No database access — operates entirely on in-memory Polars DataFrames.
 
-Cost model (docs/fill_price_and_costs.md):
-    gross_pnl    = open_mark - exit_mark
-    slippage     = |exit_mark| * slippage_pct
-    fees         = fee_per_contract * total_contracts * 2  (open + close)
-    net_pnl      = gross_pnl - slippage - fees
+Cost model:
+    gross_pnl    = (open_mark - exit_mark) × multiplier          [dollars]
+    slippage     = |exit_mark| × multiplier × slippage_pct        [dollars]
+    fee          = fee_per_contract                                [dollars, flat per round-trip]
+    net_pnl      = gross_pnl - slippage - fee                     [dollars]
+
+open_mark, exit_mark, and worst_mark remain in per-point terms in the output.
+All PnL columns (gross_pnl, slippage_cost, fee_cost, net_pnl) are in dollars.
 """
 
 from __future__ import annotations
@@ -67,14 +70,18 @@ class PnLCalculator:
                 continue
 
             # -- Positions --
-            total_contracts = sum(leg.quantity for leg in trade.legs)
-            fee_cost_val = float(costs.fee_per_contract) * total_contracts * 2
+            # All legs share the same underlying multiplier; read it from the first leg.
+            first_leg = trade.legs[0].name
+            multiplier_col = f"leg_{first_leg}_multiplier"
 
             pos = entries.join(exits, on="entry_id", how="inner")
             pos = pos.with_columns([
-                (pl.col("open_mark") - pl.col("exit_mark")).alias("gross_pnl"),
-                (pl.col("exit_mark").abs() * pl.lit(float(costs.slippage_pct))).alias("slippage_cost"),
-                pl.lit(fee_cost_val).alias("fee_cost"),
+                # Dollar gross: per-point spread × multiplier
+                ((pl.col("open_mark") - pl.col("exit_mark")) * pl.col(multiplier_col)).alias("gross_pnl"),
+                # Dollar slippage: % of dollar exit value
+                (pl.col("exit_mark").abs() * pl.col(multiplier_col) * pl.lit(float(costs.slippage_pct))).alias("slippage_cost"),
+                # Flat dollar fee per round-trip
+                pl.lit(float(costs.fee_per_contract)).alias("fee_cost"),
             ]).with_columns(
                 (pl.col("gross_pnl") - pl.col("slippage_cost") - pl.col("fee_cost")).alias("net_pnl")
             )
