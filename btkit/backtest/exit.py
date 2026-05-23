@@ -15,6 +15,16 @@ Exit priority order (see docs/strategy.md):
     7. Expiry
 
 Fill price rules: docs/fill_price_and_costs.md.
+
+Performance notes:
+    - Entries are chunked by expiration tuple before calling _load_exit_data().
+      Each chunk has a bounded set of instrument IDs and a short time window,
+      keeping option_bars_for_legs queries tractable at multi-year scale.
+    - indicators may be pre-loaded by the engine and passed in to avoid a second
+      DB fetch per trade.
+    - worst_mark is computed in a single pass via cum_max().over("entry_id")
+      during _find_first_hit(), eliminating the previous second full scan of
+      position_marks.
 """
 
 from __future__ import annotations
@@ -34,35 +44,62 @@ class ExitScanner:
         db: InputDatabase,
         strategy: StrategyDefinition,
         trade: TradeDefinition,
+        indicators: pl.DataFrame | None = None,
     ) -> None:
         self.db = db
         self.strategy = strategy
         self.trade = trade
+        # Pre-loaded indicators from the engine (avoids a second DB fetch per trade).
+        self._preloaded_indicators = indicators
 
     def scan(self, entries: pl.DataFrame) -> pl.DataFrame:
         """
         For each entry row, find the first exit event.
 
+        Entries are chunked by their expiration tuple before processing. Within
+        one expiration cycle, the set of unique leg instrument IDs is small and
+        the monitoring window is bounded, keeping memory usage constant
+        regardless of overall backtest length.
+
         Returns one row per entry with columns:
             entry_id, exit_time, exit_mark, worst_mark, exit_reason
-
-        exit_reason: 'take_profit' | 'stop_loss' | 'condition' | 'dte_exit' | 'expiry'
         """
         if entries.is_empty():
             return _empty_exits_df()
 
-        option_bars, indicators = self._load_exit_data(entries)
-        if option_bars.is_empty():
+        # Chunk by the calendar month of the earliest leg expiration. Monthly
+        # buckets produce O(months) groups rather than O(unique_exp_tuples)
+        # groups. The latter explodes when independent leg selection occasionally
+        # picks different expiration cycles for different legs (e.g. short_put
+        # selects May 16, long_put selects May 23), creating one group per
+        # (exp1, exp2, ...) combination and defeating the batching goal.
+        # Monthly buckets bound the time window and instrument-ID set without
+        # the per-group query overhead of fine-grained tuple chunking.
+        exp_cols = [f"leg_{leg.name}_expiration" for leg in self.trade.legs]
+        entries_bucketed = entries.with_columns(
+            pl.min_horizontal(exp_cols).dt.strftime("%Y-%m").alias("_exp_bucket")
+        )
+
+        chunks: list[pl.DataFrame] = []
+        for _, cohort in entries_bucketed.group_by("_exp_bucket", maintain_order=True):
+            cohort = cohort.drop("_exp_bucket")
+            option_bars, indicators = self._load_exit_data(cohort)
+            if option_bars.is_empty():
+                continue
+            position_marks = self._compute_position_marks(option_bars, cohort)
+            if position_marks.is_empty():
+                continue
+            exits_chunk = self._find_first_hit(position_marks, indicators, cohort)
+            if not exits_chunk.is_empty():
+                chunks.append(exits_chunk)
+
+        if not chunks:
             return _empty_exits_df()
 
-        position_marks = self._compute_position_marks(option_bars, entries)
-        if position_marks.is_empty():
-            return _empty_exits_df()
-
-        return self._find_first_hit(position_marks, indicators, entries)
+        return pl.concat(chunks)
 
     # ------------------------------------------------------------------
-    # Step 1: Batch-load all data for open positions
+    # Step 1: Batch-load all data for a cohort of open positions
     # ------------------------------------------------------------------
 
     def _load_exit_data(
@@ -70,13 +107,12 @@ class ExitScanner:
         entries: pl.DataFrame,
     ) -> tuple[pl.DataFrame, pl.DataFrame]:
         """
-        Batch-load all data needed to monitor open positions. Single DB read for
-        all entries combined. Returns:
+        Batch-load all data needed to monitor the open positions in this cohort.
+        Single DB read per cohort. Returns:
           - option_bars: all leg bars from the earliest entry_time to the latest
-            possible exit (max expiration across all entries), covering all unique
-            leg instrument IDs.
+            possible exit (max expiration across cohort entries).
           - indicators: wide indicator DataFrame for the underlying over the same
-            time window, for evaluating exit.conditions per bar.
+            window (from pre-loaded data if available, otherwise fetched from DB).
         """
         instrument_ids: set[int] = set()
         for leg in self.trade.legs:
@@ -98,12 +134,7 @@ class ExitScanner:
 
         option_bars = self.db.option_bars_for_legs(list(instrument_ids), min_entry, end_dt)
 
-        underlying_id = self.db.instrument_id_for_symbol(self.trade.instrument.root_symbol)
-        indicators = (
-            self.db.indicators(underlying_id, min_entry, end_dt)
-            if underlying_id is not None
-            else pl.DataFrame()
-        )
+        indicators = self._get_indicators(min_entry, end_dt)
 
         return option_bars, indicators
 
@@ -127,8 +158,7 @@ class ExitScanner:
 
         Option bars are sparse (only when traded), so different legs rarely share
         the same ts_event. We full-outer-join all legs on (entry_id, ts_event) and
-        forward-fill stale prices within each entry_id — standard practice for
-        illiquid options monitored on a regular bar schedule.
+        forward-fill stale prices within each entry_id.
         """
         per_leg: list[pl.DataFrame] = []
 
@@ -163,12 +193,10 @@ class ExitScanner:
         if not per_leg:
             return pl.DataFrame()
 
-        # Full outer join so every ts_event from any leg is represented.
         result = per_leg[0]
         for lb in per_leg[1:]:
             result = result.join(lb, on=["entry_id", "ts_event"], how="full", coalesce=True)
 
-        # Forward-fill stale prices (option bars are sparse) within each entry.
         close_cols = [f"_leg_{leg.name}_mark_close" for leg in self.trade.legs]
         open_cols  = [f"_leg_{leg.name}_mark_open"  for leg in self.trade.legs]
 
@@ -177,7 +205,6 @@ class ExitScanner:
             *[pl.col(c).forward_fill().over("entry_id") for c in open_cols],
         ])
 
-        # Drop rows where any leg has no price yet (before first bar for that leg).
         result = result.drop_nulls(subset=close_cols + open_cols)
 
         if result.is_empty():
@@ -205,6 +232,9 @@ class ExitScanner:
         Priority encoding: 1=gap_sl, 2=gap_tp, 3=stop_loss, 4=take_profit,
                            5=condition, 6=dte_exit, 7=expiry.
 
+        worst_mark is computed in a single pass via cum_max().over("entry_id"),
+        avoiding the previous second full scan of position_marks.
+
         Fill price:
             gap_sl / gap_tp       → spread_open_mark
             stop_loss (close)     → sl_price
@@ -213,7 +243,6 @@ class ExitScanner:
         """
         exit_cfg = self.trade.exit
 
-        # --- Attach per-entry thresholds to every monitoring bar ---
         exp_cols = [f"leg_{leg.name}_expiration" for leg in self.trade.legs]
         entry_meta = (
             entries
@@ -222,19 +251,26 @@ class ExitScanner:
             .select(["entry_id", "entry_time", "tp_price", "sl_price", "dte_exit", "trade_expiration"])
         )
 
-        m = position_marks.join(entry_meta, on="entry_id", how="left")
+        # Sort once; used by both forward-fill (already done) and cum_max below.
+        m = (
+            position_marks
+            .sort(["entry_id", "ts_event"])
+            .join(entry_meta, on="entry_id", how="left")
+        )
 
-        # --- Join indicator columns (if any) ---
+        # Running worst mark per entry — single pass, no second scan needed.
+        m = m.with_columns(
+            pl.col("position_mark").cum_max().over("entry_id").alias("_running_worst")
+        )
+
         if not indicators.is_empty() and len(indicators.columns) > 1:
             m = m.join(indicators, on="ts_event", how="left")
 
-        # --- dte_now: days until option expiration ---
         m = m.with_columns(
             (pl.col("trade_expiration").cast(pl.Date) - pl.col("ts_event").dt.date())
             .dt.total_days().cast(pl.Int32).alias("_dte_now")
         )
 
-        # --- Per-bar exit flags ---
         m = m.with_columns([
             (pl.col("spread_open_mark") >= pl.col("sl_price")).alias("_gap_sl"),
             (pl.col("spread_open_mark") <= pl.col("tp_price")).alias("_gap_tp"),
@@ -242,7 +278,6 @@ class ExitScanner:
             (pl.col("position_mark")    <= pl.col("tp_price")).alias("_tp"),
         ])
 
-        # --- Indicator condition (OR logic across all exit conditions) ---
         cond_expr = pl.lit(False)
         for cond_str in exit_cfg.conditions:
             try:
@@ -254,7 +289,6 @@ class ExitScanner:
         except Exception:
             m = m.with_columns(pl.lit(False).alias("_condition"))
 
-        # --- DTE exit flag ---
         if exit_cfg.dte_exit is not None:
             m = m.with_columns(
                 (pl.col("_dte_now") <= pl.lit(int(exit_cfg.dte_exit))).alias("_dte_exit")
@@ -262,7 +296,6 @@ class ExitScanner:
         else:
             m = m.with_columns(pl.lit(False).alias("_dte_exit"))
 
-        # --- Expiry exit flag ---
         if exit_cfg.expiry_exit:
             m = m.with_columns(
                 (pl.col("ts_event").dt.date() >= pl.col("trade_expiration")).alias("_expiry")
@@ -270,10 +303,6 @@ class ExitScanner:
         else:
             m = m.with_columns(pl.lit(False).alias("_expiry"))
 
-        # --- Assign priority (lowest = highest priority) ---
-        # When both gap_sl and gap_tp are true simultaneously it's impossible
-        # (sl_price > tp_price always), so the when/then chain is clean.
-        # For close-based SL/TP: guard against double-counting with gap cases.
         m = m.with_columns(
             pl.when(pl.col("_gap_sl")).then(pl.lit(1))
             .when(pl.col("_gap_tp")).then(pl.lit(2))
@@ -285,7 +314,6 @@ class ExitScanner:
             .otherwise(pl.lit(None).cast(pl.Int32)).alias("_priority")
         )
 
-        # --- First exit bar per entry ---
         exit_bars = m.filter(pl.col("_priority").is_not_null())
         first_exit = (
             exit_bars
@@ -293,7 +321,6 @@ class ExitScanner:
             .unique(subset=["entry_id"], keep="first")
         )
 
-        # --- Determine exit_mark and exit_reason ---
         first_exit = first_exit.with_columns([
             pl.when(pl.col("_priority").is_in([1, 2])).then(pl.col("spread_open_mark"))
             .when(pl.col("_priority") == 3).then(pl.col("sl_price"))
@@ -307,44 +334,59 @@ class ExitScanner:
             .when(pl.col("_priority") == 6).then(pl.lit("dte_exit"))
             .otherwise(pl.lit("expiry"))
             .alias("exit_reason"),
-        ]).rename({"ts_event": "exit_time"})
+        ]).rename({"ts_event": "exit_time", "_running_worst": "worst_mark"})
 
         # --- Handle entries with no exit hit (force expiry at last available bar) ---
         found_ids = first_exit["entry_id"].to_list()
-        missing = position_marks.filter(
-            ~pl.col("entry_id").is_in(found_ids)
-        )
+        missing = m.filter(~pl.col("entry_id").is_in(found_ids))
         if not missing.is_empty():
             last_bars = (
                 missing
-                .sort("ts_event")
                 .unique(subset=["entry_id"], keep="last")
                 .with_columns([
                     pl.col("position_mark").alias("exit_mark"),
                     pl.lit("expiry").alias("exit_reason"),
+                    pl.col("_running_worst").alias("worst_mark"),
                 ])
                 .rename({"ts_event": "exit_time"})
-                .select(["entry_id", "exit_time", "exit_mark", "exit_reason"])
+                .select(["entry_id", "exit_time", "exit_mark", "exit_reason", "worst_mark"])
             )
-            first_exit_base = pl.concat([
-                first_exit.select(["entry_id", "exit_time", "exit_mark", "exit_reason"]),
+            return pl.concat([
+                first_exit.select(["entry_id", "exit_time", "exit_mark", "exit_reason", "worst_mark"]),
                 last_bars,
             ])
-        else:
-            first_exit_base = first_exit.select(
-                ["entry_id", "exit_time", "exit_mark", "exit_reason"]
-            )
 
-        # --- worst_mark = max(position_mark) from entry to exit per entry ---
-        worst_marks = (
-            position_marks
-            .join(first_exit_base.select(["entry_id", "exit_time"]), on="entry_id", how="left")
-            .filter(pl.col("ts_event") <= pl.col("exit_time"))
-            .group_by("entry_id")
-            .agg(pl.col("position_mark").max().alias("worst_mark"))
+        return first_exit.select(
+            ["entry_id", "exit_time", "exit_mark", "exit_reason", "worst_mark"]
         )
 
-        return first_exit_base.join(worst_marks, on="entry_id", how="left")
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _get_indicators(
+        self,
+        min_entry: datetime,
+        end_dt: datetime,
+    ) -> pl.DataFrame:
+        """
+        Return the indicators DataFrame for this cohort's time window.
+
+        If the engine pre-loaded indicators, use them as-is (the left join in
+        _find_first_hit naturally limits to bars present in position_marks).
+        Otherwise, fetch from DB only when exit conditions need indicators.
+        """
+        if self._preloaded_indicators is not None:
+            return self._preloaded_indicators
+
+        if not self.trade.exit.conditions:
+            return pl.DataFrame()
+
+        underlying_id = self.db.instrument_id_for_symbol(self.trade.instrument.root_symbol)
+        if underlying_id is None:
+            return pl.DataFrame()
+
+        return self.db.indicators(underlying_id, min_entry, end_dt)
 
 
 # ---------------------------------------------------------------------------
@@ -352,11 +394,10 @@ class ExitScanner:
 # ---------------------------------------------------------------------------
 
 def _empty_exits_df() -> pl.DataFrame:
-    """Return an empty DataFrame with the minimum required exit columns."""
     return pl.DataFrame({
-        "entry_id":   pl.Series([], dtype=pl.UInt32),
-        "exit_time":  pl.Series([], dtype=pl.Datetime("us", "UTC")),
-        "exit_mark":  pl.Series([], dtype=pl.Float64),
-        "worst_mark": pl.Series([], dtype=pl.Float64),
+        "entry_id":    pl.Series([], dtype=pl.UInt32),
+        "exit_time":   pl.Series([], dtype=pl.Datetime("us", "UTC")),
+        "exit_mark":   pl.Series([], dtype=pl.Float64),
+        "worst_mark":  pl.Series([], dtype=pl.Float64),
         "exit_reason": pl.Series([], dtype=pl.Utf8),
     })
