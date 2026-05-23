@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS option_greeks (
     vega            DOUBLE
 );
 CREATE INDEX IF NOT EXISTS idx_option_greeks_lookup
-    ON option_greeks (underlying_id, dte, ts_event);
+    ON option_greeks (underlying_id, ts_event, dte);
 
 CREATE TABLE IF NOT EXISTS indicator_definition (
     id                  INTEGER PRIMARY KEY,
@@ -226,6 +226,67 @@ class InputDatabase:
             ).pl()
         finally:
             self._con.unregister("_entry_ts")
+
+    def greeks_for_all_legs(
+        self,
+        underlying_id: int,
+        ts_events: list,
+        leg_specs: list[dict],
+        *,
+        delta_tolerance: float = 0.10,
+        dte_tolerance: int = 5,
+    ) -> pl.DataFrame:
+        """
+        Batched replacement for calling greeks_for_entry() once per leg.
+
+        leg_specs is a list of dicts with keys: name, right (C/P), target_delta,
+        target_dte. Returns one DataFrame for all legs tagged with a leg_name
+        column; caller partitions by leg_name and picks the best match per
+        ts_event.
+
+        Improvements over per-leg greeks_for_entry():
+          - Single DB roundtrip regardless of leg count.
+          - ts_event BETWEEN min/max filter lets the (underlying_id, ts_event, dte)
+            index prune the scan before the join with _entry_ts.
+        """
+        ts_df = pl.DataFrame({"ts_event": pl.Series(ts_events, dtype=pl.Datetime("us", "UTC"))})
+        params_df = pl.DataFrame({
+            "leg_name":  [s["name"]  for s in leg_specs],
+            "leg_right": [s["right"] for s in leg_specs],
+            "delta_lo":  [float(s["target_delta"]) - delta_tolerance for s in leg_specs],
+            "delta_hi":  [float(s["target_delta"]) + delta_tolerance for s in leg_specs],
+            "dte_lo":    [int(s["target_dte"]) - dte_tolerance for s in leg_specs],
+            "dte_hi":    [int(s["target_dte"]) + dte_tolerance for s in leg_specs],
+        })
+        self._con.register("_entry_ts", ts_df)
+        self._con.register("_leg_params", params_df)
+        ts_min = min(ts_events)
+        ts_max = max(ts_events)
+        try:
+            return self._con.execute(
+                """
+                SELECT lp.leg_name, og.ts_event, og.instrument_id, og.underlying_id,
+                       og.dte, og.iv, og.delta, og.gamma, og.theta, og.vega,
+                       ob.strike_price, ob.expiration, ob."right", ob.multiplier,
+                       ob.symbol, ob.close
+                FROM option_greeks og
+                JOIN option_bars ob
+                  ON og.instrument_id = ob.instrument_id
+                 AND og.ts_event      = ob.ts_event
+                JOIN _entry_ts et ON og.ts_event = et.ts_event
+                JOIN _leg_params lp
+                  ON ob."right"  = lp.leg_right
+                 AND og.dte     BETWEEN lp.dte_lo   AND lp.dte_hi
+                 AND og.delta   BETWEEN lp.delta_lo AND lp.delta_hi
+                WHERE og.underlying_id = ?
+                  AND og.ts_event BETWEEN ? AND ?
+                  AND ob.close IS NOT NULL
+                """,
+                [underlying_id, ts_min, ts_max],
+            ).pl()
+        finally:
+            self._con.unregister("_entry_ts")
+            self._con.unregister("_leg_params")
 
     # ------------------------------------------------------------------
     # Indicators
