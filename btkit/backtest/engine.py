@@ -19,6 +19,8 @@ Performance notes:
 from __future__ import annotations
 
 import json
+import time
+import traceback
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -52,26 +54,54 @@ class BacktestEngine:
         Returns the backtest_id written to the output database.
         """
         backtest_id = self._write_backtest_record()
-        indicators = self._load_indicators_once()
+        warnings: list[dict] = []
+        start = time.perf_counter()
 
-        all_entries: dict[str, pl.DataFrame] = {}
-        all_exits: dict[str, pl.DataFrame] = {}
-        entry_id_offset = 0
+        try:
+            indicators = self._load_indicators_once()
 
-        for trade in self.strategy.trades:
-            entries = EntryScanner(
-                self.input_db, self.strategy, trade, indicators=indicators
-            ).scan(entry_id_offset)
-            exits = ExitScanner(
-                self.input_db, self.strategy, trade, indicators=indicators
-            ).scan(entries)
-            entries, exits = self._enforce_one_at_a_time(entries, exits)
-            all_entries[trade.name] = entries
-            all_exits[trade.name] = exits
-            entry_id_offset += len(entries)
+            all_entries: dict[str, pl.DataFrame] = {}
+            all_exits: dict[str, pl.DataFrame] = {}
+            entry_id_offset = 0
 
-        positions = PnLCalculator(self.strategy).compute(all_entries, all_exits)
-        self.output_db.write_results(backtest_id, positions.positions, positions.legs)
+            for trade in self.strategy.trades:
+                entry_scanner = EntryScanner(
+                    self.input_db, self.strategy, trade, indicators=indicators
+                )
+                entries = entry_scanner.scan(entry_id_offset)
+                warnings.extend(entry_scanner.warnings)
+
+                exit_scanner = ExitScanner(
+                    self.input_db, self.strategy, trade, indicators=indicators
+                )
+                exits = exit_scanner.scan(entries)
+                warnings.extend(exit_scanner.warnings)
+
+                entries, exits = self._enforce_one_at_a_time(entries, exits)
+                all_entries[trade.name] = entries
+                all_exits[trade.name] = exits
+                entry_id_offset += len(entries)
+
+            positions = PnLCalculator(self.strategy).compute(all_entries, all_exits)
+            self.output_db.write_results(backtest_id, positions.positions, positions.legs)
+
+            self.output_db.finalize_backtest(
+                backtest_id,
+                status="completed",
+                duration_s=time.perf_counter() - start,
+                warnings=warnings,
+            )
+        except Exception:
+            self.output_db.finalize_backtest(
+                backtest_id,
+                status="error",
+                duration_s=time.perf_counter() - start,
+                warnings=warnings,
+                error_message=str(traceback.format_exc().splitlines()[-1]),
+                error_traceback=traceback.format_exc(),
+            )
+            raise
+
         return backtest_id
 
     def _load_indicators_once(self) -> pl.DataFrame:

@@ -32,7 +32,12 @@ class OutputDatabase:
                 initial_equity    DOUBLE          NOT NULL,
                 slippage_pct      DOUBLE          NOT NULL,
                 fee_per_contract  DOUBLE          NOT NULL,
-                created_at        TIMESTAMPTZ     NOT NULL
+                created_at        TIMESTAMPTZ     NOT NULL,
+                status            VARCHAR,
+                duration_s        DOUBLE,
+                warnings          JSON,
+                error_message     VARCHAR,
+                error_traceback   VARCHAR
             )
         """)
         self._con.execute("""
@@ -96,6 +101,37 @@ class OutputDatabase:
             ],
         )
         return next_id
+
+    def finalize_backtest(
+        self,
+        backtest_id: int,
+        *,
+        status: str,
+        duration_s: float,
+        warnings: list[dict],
+        error_message: str | None = None,
+        error_traceback: str | None = None,
+    ) -> None:
+        """Update a backtest record with run outcome after completion or failure."""
+        self._con.execute(
+            """
+            UPDATE backtest SET
+                status          = ?,
+                duration_s      = ?,
+                warnings        = ?,
+                error_message   = ?,
+                error_traceback = ?
+            WHERE id = ?
+            """,
+            [
+                status,
+                duration_s,
+                json.dumps(warnings) if warnings else None,
+                error_message,
+                error_traceback,
+                backtest_id,
+            ],
+        )
 
     def write_results(
         self,

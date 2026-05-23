@@ -49,8 +49,8 @@ class ExitScanner:
         self.db = db
         self.strategy = strategy
         self.trade = trade
-        # Pre-loaded indicators from the engine (avoids a second DB fetch per trade).
         self._preloaded_indicators = indicators
+        self.warnings: list[dict] = []
 
     def scan(self, entries: pl.DataFrame) -> pl.DataFrame:
         """
@@ -282,11 +282,23 @@ class ExitScanner:
         for cond_str in exit_cfg.conditions:
             try:
                 cond_expr = cond_expr | parse_condition(cond_str)
-            except Exception:
-                pass
+            except Exception as e:
+                self.warnings.append({
+                    "phase": "exit",
+                    "trade": self.trade.name,
+                    "type": "condition_error",
+                    "condition": cond_str,
+                    "error": str(e),
+                })
         try:
             m = m.with_columns(cond_expr.alias("_condition"))
-        except Exception:
+        except Exception as e:
+            self.warnings.append({
+                "phase": "exit",
+                "trade": self.trade.name,
+                "type": "condition_eval_error",
+                "error": str(e),
+            })
             m = m.with_columns(pl.lit(False).alias("_condition"))
 
         if exit_cfg.dte_exit is not None:

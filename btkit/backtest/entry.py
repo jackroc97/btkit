@@ -60,8 +60,8 @@ class EntryScanner:
         self.strategy = strategy
         self.trade = trade
         self._tz = ZoneInfo(strategy.universe.session.timezone)
-        # Pre-loaded indicators from the engine (avoids a second DB fetch).
         self._preloaded_indicators = indicators
+        self.warnings: list[dict] = []
 
     def scan(self, entry_id_offset: int = 0) -> pl.DataFrame:
         """
@@ -301,7 +301,14 @@ class EntryScanner:
             expr = parse_condition(cond_str)
             try:
                 entries = entries.filter(expr)
-            except Exception:
+            except Exception as e:
+                self.warnings.append({
+                    "phase": "entry",
+                    "trade": self.trade.name,
+                    "type": "condition_error",
+                    "condition": cond_str,
+                    "error": str(e),
+                })
                 return entries.clear()
 
         if entry_cfg.min_credit is not None:
