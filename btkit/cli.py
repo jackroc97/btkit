@@ -6,6 +6,7 @@ Commands:
     btkit run       Run a backtest from a strategy YAML (single run only for MVP).
     btkit analyze   Compute metrics and print results to terminal.
     btkit pipeline  Full pipeline: build (if needed) → run → analyze.
+    btkit serve     Launch the interactive Dash dashboard for a backtest run.
 
 Usage:
     btkit build   --data-path DATA --db-path DB [--indicators SCRIPT ...]
@@ -13,6 +14,7 @@ Usage:
     btkit analyze --output-db DB [--backtest-id N | --matrix-id N]
     btkit pipeline --data-path DATA --strategy YAML --db-path DB --output-db DB
                    [--indicators SCRIPT ...] [--initial-equity N] [--rebuild]
+    btkit serve   --output-db DB [--backtest-id N] [--port 8050]
 """
 
 from __future__ import annotations
@@ -149,6 +151,26 @@ def pipeline(
         summary = processor.summarize(formatted=True)
 
     typer.echo(summary)
+
+
+@app.command()
+def serve(
+    output_db: str = typer.Option(..., help="Path to the output database."),
+    backtest_id: int = typer.Option(default=None, help="Backtest run to display (defaults to most recent)."),
+    port: int = typer.Option(default=8050, help="Port for the dashboard server."),
+    debug: bool = typer.Option(default=False, help="Run Dash in debug mode (enables hot-reload)."),
+) -> None:
+    """Launch the interactive dashboard for a backtest run."""
+    try:
+        from btkit.analysis.dashboard import run_dashboard
+    except ImportError:
+        typer.echo(
+            "Dashboard dependencies not installed. Run: pip install btkit[viz]",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    run_dashboard(output_db, backtest_id=backtest_id, port=port, debug=debug)
 
 
 if __name__ == "__main__":

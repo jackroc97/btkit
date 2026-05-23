@@ -80,5 +80,5 @@ strategy:
 
       exit:
         take_profit_pct: 0.70
-        stop_loss:       5.00
+        stop_loss:       5.00   # $250 / 50 (ES multiplier) per point
         expiry_exit:     true

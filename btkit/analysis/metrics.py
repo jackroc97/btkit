@@ -171,12 +171,14 @@ class PostProcessor:
     def trade_pnl_series(self) -> pl.DataFrame:
         """
         Returns one row per trade with columns:
-            open_time, exit_time, exit_reason, net_pnl, worst_mark
+            trade_name, open_time, exit_time, exit_reason,
+            open_mark, exit_mark, net_pnl, worst_mark
         Ordered by open_time.
         """
         return (
             self._load_positions()
-            .select(["open_time", "exit_time", "exit_reason", "net_pnl", "worst_mark"])
+            .select(["trade_name", "open_time", "exit_time", "exit_reason",
+                     "open_mark", "exit_mark", "net_pnl", "worst_mark"])
             .sort("open_time")
         )
 

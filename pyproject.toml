@@ -21,6 +21,7 @@ dependencies = [
 [project.optional-dependencies]
 viz = [
     "plotly>=5.0",
+    "dash>=2.14",
 ]
 dev = [
     "pytest>=8.0",

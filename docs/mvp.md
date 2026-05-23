@@ -37,6 +37,9 @@ The MVP is complete when all of the following hold:
 7. **Output database integrity.** The output database accurately records every position
    and leg, with correct open/exit marks, fill prices, costs, and net P&L.
 
+8. **Dashboard.** `btkit serve` launches an interactive Dash dashboard showing an equity
+   curve chart, a strategy metrics summary table, and a sortable/filterable trade list.
+
 ---
 
 ## What Will Be Implemented
@@ -85,14 +88,16 @@ The MVP is complete when all of the following hold:
 | `position` table | Full schema including `worst_mark` |
 | `position_leg` table | Full schema |
 
-### Analysis — `btkit analyze`
+### Analysis — `btkit analyze` / `btkit serve`
 
 | Component | Scope |
 |---|---|
 | `PostProcessor.metrics()` | Full metric set: net profit, total trades, win rate, profit factor, avg win/loss, median P&L, max drawdown, CAGR, MAR, Sharpe, Sortino, Calmar, premium capture rate, avg/median/worst MAE |
-| `PostProcessor.equity_curve()` | Returns Polars DataFrame; no chart rendering |
-| `PostProcessor.trade_pnl_series()` | Returns Polars DataFrame; no chart rendering |
+| `PostProcessor.equity_curve()` | Returns Polars DataFrame used by dashboard |
+| `PostProcessor.trade_pnl_series()` | Returns Polars DataFrame used by dashboard |
 | `PostProcessor.summarize()` | Formatted table to terminal |
+| `dashboard.create_app()` | Builds Dash app: equity curve, metrics table, trade list |
+| `dashboard.run_dashboard()` | Starts Dash development server on configurable port |
 
 ### CLI
 
@@ -100,8 +105,9 @@ The MVP is complete when all of the following hold:
 |---|---|
 | `btkit build` | Full: data path, db path, optional indicator script paths |
 | `btkit run` | Single-run only; `--initial-equity`; `--workers` and `--max-combinations` absent for MVP |
-| `btkit analyze` | Terminal output only; `--open-browser` absent for MVP |
+| `btkit analyze` | Terminal output only |
 | `btkit pipeline` | Full: chains build (with skip-if-exists logic) → run → analyze |
+| `btkit serve` | Launch Dash dashboard; `--output-db`, `--backtest-id`, `--port`, `--debug` |
 
 ---
 
@@ -135,11 +141,26 @@ pipeline.
 evaluated during Pass 1. Entries are not filtered by running equity in the MVP. The field
 is a no-op until the sequential equity filter step is implemented.
 
-### Visualization
+### Visualization — `btkit serve`
 
-`charts.py` and all browser-based output are deferred. `btkit analyze` writes results to
-the terminal. The dashboard format has not yet been specified and will be designed as a
-separate milestone.
+An interactive Dash dashboard is available for single-run analysis. Launch with:
+
+```
+btkit serve --output-db <path> [--backtest-id N] [--port 8050]
+```
+
+The dashboard contains three components:
+
+1. **Equity curve** — cumulative portfolio value over time, plotted as a Plotly line chart
+   with shaded fill and a reference line at starting equity.
+2. **Strategy metrics table** — all 16 key performance and risk statistics (net profit,
+   win rate, profit factor, drawdown, CAGR, Sharpe, Sortino, Calmar, MAE, and more),
+   with P&L coloured green/red.
+3. **Trade list table** — every individual position with open/exit timestamps, duration,
+   exit reason, per-point marks, and net P&L; sortable and filterable; exit reason
+   coloured by outcome (green = take_profit, red = stop_loss, amber = expiry).
+
+Requires the `viz` optional dependencies: `pip install btkit[viz]`.
 
 ---
 
@@ -716,6 +737,15 @@ premium_capture_rate, avg_mae, median_mae, worst_mae. Daily Sharpe uses `mean/st
 Sortino uses downside std only; CAGR uses `(final/initial)^(1/years)-1`. `btkit pipeline`
 chains build → run → analyze with skip-if-exists on the input DB. `btkit analyze`
 defaults to the most recent backtest when `--backtest-id` is omitted.
+
+**Dashboard — `btkit serve`**
+
+`btkit/analysis/dashboard.py` implements a Dash application with three panels: an equity
+curve chart (Plotly Scatter with shaded fill, reference line at starting equity), a
+strategy metrics summary table (16 metrics with P&L colouring), and a sortable/filterable
+trade list (exit reason and P&L coloured by outcome). All data is loaded once at startup;
+the database connection is closed before the server begins accepting requests. `btkit serve`
+wraps `run_dashboard()` with graceful error handling when `dash` is not installed.
 
 ---
 
