@@ -654,6 +654,182 @@ SELECT SUM(net_pnl) FROM position WHERE backtest_id = <id>;
 
 ---
 
+## Implementation Status
+
+All seven phases are complete. The MVP is fully operational.
+
+### What Was Built
+
+**Phase 1 — Database Layer**
+
+Both `InputDatabase` and `OutputDatabase` are implemented against DuckDB. All read
+methods return Polars DataFrames. `OutputDatabase.write_results()` writes positions and
+legs in a single transaction. Schema creation is idempotent (`CREATE TABLE IF NOT EXISTS`).
+
+**Phase 2 — Data Pipeline**
+
+`DatabaseBuilder` ingests Databento `.dbn` files via `databento-dbn`. Definition metadata
+(symbol, expiration, strike, right, multiplier) is pre-joined into `option_bars` at write
+time. `GreeksCalculator` computes Black-76 implied vol, delta, gamma, theta, and vega
+using numba JIT functions (`pipeline/black76.py`). `IndicatorRunner` loads and executes
+user-supplied `compute(df)` scripts, writing results to `indicator_definition` (tall
+metadata) and `indicator_bars` (tall values). Multi-indicator output from a single script
+is supported.
+
+**Phase 3 — Strategy Layer**
+
+`StrategyDefinition` and `TradeDefinition` Pydantic models with full validation. YAML
+loader rejects non-scalar sweep fields for MVP runs. `parse_condition()` uses the Python
+`ast` module to compile condition strings into Polars expressions, supporting comparisons,
+boolean operators, indicator column references, underlying bar column references, and
+leg property dot-notation (e.g. `short_put.delta`).
+
+**Phase 4 — EntryScanner (Pass 1)**
+
+Three-step pipeline: window/session filters → leg selection (batched DuckDB query on
+`option_greeks`, best delta+DTE match per leg) → open mark + TP/SL price derivation →
+condition evaluation (AND logic, min_credit/max_debit). Returns one DataFrame row per
+candidate entry with fully resolved leg columns.
+
+**Phase 5 — ExitScanner (Pass 2) + One-at-a-Time**
+
+Single batch DB read for all exit data. Position marks computed via full outer join of
+all leg bars on `(entry_id, ts_event)` followed by forward-fill within each entry (see
+Implementation Decisions below). All seven exit conditions implemented in priority order
+with correct fill prices. `BacktestEngine._enforce_one_at_a_time()` walks entry/exit
+pairs chronologically and drops overlapping entries per trade.
+
+**Phase 6 — PnLCalculator (Pass 3) + `btkit run`**
+
+Inner join of entries and exits on `entry_id`. Cost model: `gross_pnl = open_mark -
+exit_mark`, `slippage_cost = |exit_mark| × slippage_pct`, `fee_cost = fee_per_contract ×
+total_contracts × 2`, `net_pnl = gross_pnl - slippage_cost - fee_cost`. Leg records
+written with action codes (`STO`/`BTO`), one row per `(entry_id, leg)`. `btkit run` CLI
+wired end-to-end.
+
+**Phase 7 — Analysis + `btkit pipeline`**
+
+`PostProcessor` computes 18 metrics from the output database: net_profit, total_trades,
+percent_profitable, profit_factor, avg_win, avg_loss, median_pnl, max_drawdown,
+max_drawdown_pct, cagr, mar, sharpe_ratio, sortino_ratio, calmar_ratio,
+premium_capture_rate, avg_mae, median_mae, worst_mae. Daily Sharpe uses `mean/std × √252`;
+Sortino uses downside std only; CAGR uses `(final/initial)^(1/years)-1`. `btkit pipeline`
+chains build → run → analyze with skip-if-exists on the input DB. `btkit analyze`
+defaults to the most recent backtest when `--backtest-id` is omitted.
+
+---
+
+### Test Fixture Dataset
+
+The test database built from `tests/fixtures/data/` (two Databento `.zip` files for ES
+front-month, May 2026) contains:
+
+| Table | Row count |
+|---|---|
+| `underlying_bars` | 37,865 |
+| `option_bars` | 929,582 |
+| `option_greeks` | 912,035 |
+| `indicator_definition` | 8 |
+| `indicator_bars` | 75,655 |
+
+The indicator script at `tests/fixtures/indicators.py` computes eight series: `sma_5`,
+`sma_20`, `sma_50`, `sma_200`, `rsi_14`, `atr_14`, `bb_upper_20`, `bb_lower_20`.
+
+---
+
+### Performance Baseline
+
+Measured on 1 month of ES data using `scripts/benchmark_backtest.py` (5 timed runs,
+1 warm-up, `:memory:` output DB to exclude write I/O):
+
+| Phase / Step | Median |
+|---|---|
+| EntryScanner — window filter | 10.7 ms |
+| EntryScanner — leg selection | 126.1 ms |
+| EntryScanner — open mark | 1.1 ms |
+| EntryScanner — conditions | 2.4 ms |
+| ExitScanner — load exit data | 87.9 ms |
+| ExitScanner — position marks | 45.4 ms |
+| ExitScanner — find first hit | 60.2 ms |
+| PnL | 9.1 ms |
+| **Full engine.run()** | **435 ms** |
+
+Dominant costs are leg selection (DuckDB `option_greeks` query, 126 ms) and loading exit
+data (DuckDB `option_bars` batch query, 88 ms). Both are single round-trips; further
+improvement would require index tuning or data layout changes.
+
+---
+
+### Key Implementation Decisions
+
+**Sparse option bars → full outer join + forward-fill**
+
+Option legs from the same spread rarely have bars at the same timestamps (different
+strikes, different expirations trade at different times). An inner join on
+`(entry_id, ts_event)` dropped ~28% of entries (508 → 365). The fix uses a full outer
+join across all legs so every ts_event from any leg is represented, then
+`forward_fill().over("entry_id")` propagates the last known price for each leg within
+each position, then `drop_nulls` removes rows where any leg has no price yet. This is
+standard practice for monitoring illiquid options on a regular bar schedule.
+
+**DuckDB PIVOT cannot use parameters — pivot in Polars instead**
+
+DuckDB's auto-pivot (extracting column names from data at query time) cannot have `?`
+parameters in its source subquery (`ParserException: PIVOT statements with pivot elements
+extracted from the data cannot have parameters in their source`). The `indicators()` method
+now fetches a tall DataFrame with parameters then calls `tall.pivot(on="name",
+index="ts_event", values="value", aggregate_function="first")` in Polars.
+
+**`dt.hour()` returns Int8 — cast to Int32 before multiplying**
+
+Polars `dt.hour()` returns `Int8`. Multiplying by 3600 to convert to seconds overflows
+(`10 × 3600 = 36000 > 127`), producing wrap-around negatives. The window filter in
+`EntryScanner._apply_window_filters()` casts both the hour and minute components to
+`Int32` before multiplication.
+
+**`is_in()` with Series deprecated in Polars 1.41.0**
+
+`Series.is_in(other_series)` is deprecated when `other` is a Series of the same dtype.
+All `is_in()` calls in `exit.py`, `engine.py`, and `pnl.py` use `.to_list()` to convert
+the filter set to a Python list before passing it.
+
+---
+
+### Known Limitations
+
+**Entries with no monitoring bars (~5% of entries).** When a leg has no `option_bars`
+rows after its entry time (illiquid options with no post-entry trades), the entry does
+not appear in `position_marks` at all and is dropped by the `PnLCalculator` inner join.
+These entries are silently excluded from results. In a 1-month run with the test strategy,
+26 of 508 entries (5%) were lost this way.
+
+**`exit_price` in `position_leg` is NULL.** Per-leg exit prices are not tracked through
+the exit pipeline — only the aggregate `exit_mark` at the position level is computed.
+The `exit_price` column in `position_leg` is written as NULL for all legs.
+
+**`minimum_equity` entry filter is a no-op.** The field is validated and stored in
+`StrategyDefinition` but not evaluated during Pass 1. Entries are not filtered by
+running equity in this release.
+
+**Matrix runs and parallelism are deferred.** Any strategy YAML containing non-scalar
+sweep fields (`SweepRange` or list-valued parameters) will be rejected by the loader.
+
+---
+
+### SC-7 Integrity Results
+
+All five integrity queries pass on a live run with the test fixture database:
+
+| Query | Result |
+|---|---|
+| Orphaned legs (position_leg with no matching position) | 0 |
+| Exits before open (exit_time ≤ open_time) | 0 |
+| Invalid exit reasons | 0 |
+| P&L inconsistency (\|net_pnl − (open_mark − exit_mark − costs)\| > 0.01) | 0 |
+| Wrong leg count per position | 0 |
+
+---
+
 ## Out-of-Scope for btkit 2.0 (not MVP-specific)
 
 The following items are not planned for any near-term milestone and are noted in
