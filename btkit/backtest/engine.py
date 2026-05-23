@@ -85,10 +85,9 @@ class BacktestEngine:
                 keep_ids.append(row["entry_id"])
                 last_exit_time = row["exit_time"]
 
-        keep = pl.Series("entry_id", keep_ids)
         return (
-            entries.filter(pl.col("entry_id").is_in(keep)),
-            exits.filter(pl.col("entry_id").is_in(keep)),
+            entries.filter(pl.col("entry_id").is_in(keep_ids)),
+            exits.filter(pl.col("entry_id").is_in(keep_ids)),
         )
 
     def _write_backtest_record(self) -> int:

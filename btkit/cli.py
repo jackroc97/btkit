@@ -85,12 +85,12 @@ def run(
 @app.command()
 def analyze(
     output_db: str = typer.Option(..., help="Path to the output database."),
-    backtest_id: int = typer.Option(default=None, help="Analyse a single backtest run."),
+    backtest_id: int = typer.Option(default=None, help="Analyse a specific backtest run (defaults to most recent)."),
     matrix_id: int = typer.Option(default=None, help="Analyse all runs from a matrix expansion."),
 ) -> None:
     """Compute metrics and print results to terminal."""
-    if (backtest_id is None) == (matrix_id is None):
-        typer.echo("Provide exactly one of --backtest-id or --matrix-id.", err=True)
+    if backtest_id is not None and matrix_id is not None:
+        typer.echo("Provide at most one of --backtest-id or --matrix-id.", err=True)
         raise typer.Exit(code=1)
 
     with OutputDatabase(output_db) as odb:

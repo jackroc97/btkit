@@ -88,12 +88,12 @@ class PnLCalculator:
             )
 
             # -- Legs: one row per (entry, leg) --
-            kept_ids = pos["entry_id"]
+            kept_id_list = pos["entry_id"].to_list()
             for leg in trade.legs:
                 action_code = "STO" if leg.action == "sell_to_open" else "BTO"
                 leg_df = (
                     entries
-                    .filter(pl.col("entry_id").is_in(kept_ids))
+                    .filter(pl.col("entry_id").is_in(kept_id_list))
                     .select([
                         "entry_id",
                         pl.col(f"leg_{leg.name}_instrument_id").alias("instrument_id"),

@@ -310,8 +310,9 @@ class ExitScanner:
         ]).rename({"ts_event": "exit_time"})
 
         # --- Handle entries with no exit hit (force expiry at last available bar) ---
+        found_ids = first_exit["entry_id"].to_list()
         missing = position_marks.filter(
-            ~pl.col("entry_id").is_in(first_exit["entry_id"])
+            ~pl.col("entry_id").is_in(found_ids)
         )
         if not missing.is_empty():
             last_bars = (
