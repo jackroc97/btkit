@@ -22,6 +22,7 @@ dependencies = [
 viz = [
     "plotly>=5.0",
     "dash>=2.14",
+    "dash-ag-grid>=31.0",
 ]
 dev = [
     "pytest>=8.0",

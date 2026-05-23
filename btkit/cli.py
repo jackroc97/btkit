@@ -156,6 +156,7 @@ def pipeline(
 @app.command()
 def serve(
     output_db: str = typer.Option(..., help="Path to the output database."),
+    input_db: str = typer.Option(default=None, help="Path to the input database (enables per-trade candle charts)."),
     backtest_id: int = typer.Option(default=None, help="Backtest run to display (defaults to most recent)."),
     port: int = typer.Option(default=8050, help="Port for the dashboard server."),
     debug: bool = typer.Option(default=False, help="Run Dash in debug mode (enables hot-reload)."),
@@ -170,7 +171,8 @@ def serve(
         )
         raise typer.Exit(code=1)
 
-    run_dashboard(output_db, backtest_id=backtest_id, port=port, debug=debug)
+    run_dashboard(output_db, input_db_path=input_db,
+                  backtest_id=backtest_id, port=port, debug=debug)
 
 
 if __name__ == "__main__":
