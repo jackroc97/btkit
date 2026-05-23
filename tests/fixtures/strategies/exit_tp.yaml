@@ -1,17 +1,13 @@
-# Exit condition test — tight take_profit designed to trigger TP exits.
-# Used in Test 4 (see docs/mvp.md).
+# Exit condition test — very tight take_profit to force TP exits.
+# Used in Test 4 (SC-4): expected exit_reason = 'take_profit'.
 
 strategy:
   name: exit_tp_test
   version: "1.0"
 
-  instrument:
-    root_symbol: ES
-    asset_class: future
-
   universe:
-    start_date: "2023-01-03"
-    end_date:   "2023-03-31"
+    start_date: "2026-04-22"
+    end_date:   "2026-05-21"
     session:
       timezone:      "America/New_York"
       start_time:    "09:30"
@@ -19,38 +15,40 @@ strategy:
       weekdays_only: true
       skip_dates:    []
 
-  entry:
-    window:
-      start: "10:00"
-      end:   "12:00"
-    max_open_positions: 3
-    conditions: []
-
-  legs:
-    - name: short_put
-      right:    put
-      action:   sell_to_open
-      delta:    -0.25
-      dte:      45
-      quantity: 1
-
-    - name: long_put
-      right:    put
-      action:   buy_to_open
-      delta:    -0.15
-      dte:      45
-      quantity: 1
-
-  exit:
-    stop_loss:   999.00   # effectively disabled
-    take_profit: 0.05     # very tight — should trigger quickly
-    dte_exit:    null
-    expiry_exit: false
-    conditions:  []
-
-  sizing:
-    contracts: 1
-
   costs:
     slippage_pct:     0.0
     fee_per_contract: 0.0
+
+  trades:
+    - name: short_put_spread
+      instrument:
+        root_symbol: ES
+        asset_class: future
+
+      entry:
+        window:
+          start: "10:00"
+          end:   "12:00"
+        conditions: []
+
+      legs:
+        - name: short_put
+          right:    put
+          action:   sell_to_open
+          delta:    -0.25
+          dte:      21
+          quantity: 1
+
+        - name: long_put
+          right:    put
+          action:   buy_to_open
+          delta:    -0.15
+          dte:      21
+          quantity: 1
+
+      exit:
+        stop_loss:   999.00   # effectively disabled
+        take_profit: 0.05     # very tight — triggers almost immediately
+        dte_exit:    null
+        expiry_exit: false
+        conditions:  []

@@ -4,9 +4,8 @@ InputDatabase — read-only access to the btkit input database.
 All query methods return Polars DataFrames. A single DuckDB connection is kept
 open for the lifetime of the object; call close() or use as a context manager.
 
-The input database is built by pipeline.builder.DatabaseBuilder and is treated
-as immutable during backtest runs. Multiple BacktestEngine instances (in parallel
-matrix runs) each open their own InputDatabase connection to the same file.
+The input database schema is created by DatabaseBuilder. InputDatabase opens
+the file read-only — it cannot modify the database.
 """
 
 from __future__ import annotations
@@ -15,6 +14,76 @@ from datetime import datetime
 
 import duckdb
 import polars as pl
+
+# SQL that creates the input database schema. Called by DatabaseBuilder, not here.
+INPUT_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS underlying_bars (
+    ts_event        TIMESTAMPTZ     NOT NULL,
+    instrument_id   INTEGER         NOT NULL,
+    symbol          VARCHAR         NOT NULL,
+    open            DOUBLE          NOT NULL,
+    high            DOUBLE          NOT NULL,
+    low             DOUBLE          NOT NULL,
+    close           DOUBLE          NOT NULL,
+    volume          BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_underlying_bars
+    ON underlying_bars (instrument_id, ts_event);
+
+CREATE TABLE IF NOT EXISTS option_bars (
+    ts_event        TIMESTAMPTZ     NOT NULL,
+    instrument_id   INTEGER         NOT NULL,
+    underlying_id   INTEGER         NOT NULL,
+    symbol          VARCHAR         NOT NULL,
+    expiration      DATE            NOT NULL,
+    strike_price    DOUBLE          NOT NULL,
+    "right"         VARCHAR(1)      NOT NULL,
+    multiplier      INTEGER         NOT NULL,
+    open            DOUBLE,
+    high            DOUBLE,
+    low             DOUBLE,
+    close           DOUBLE,
+    volume          BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_option_bars_lookup
+    ON option_bars (underlying_id, "right", expiration, strike_price, ts_event);
+CREATE INDEX IF NOT EXISTS idx_option_bars_instrument
+    ON option_bars (instrument_id, ts_event);
+
+CREATE TABLE IF NOT EXISTS option_greeks (
+    ts_event        TIMESTAMPTZ     NOT NULL,
+    instrument_id   INTEGER         NOT NULL,
+    underlying_id   INTEGER         NOT NULL,
+    dte             INTEGER         NOT NULL,
+    T               DOUBLE          NOT NULL,
+    iv              DOUBLE,
+    delta           DOUBLE,
+    gamma           DOUBLE,
+    theta           DOUBLE,
+    vega            DOUBLE
+);
+CREATE INDEX IF NOT EXISTS idx_option_greeks_lookup
+    ON option_greeks (underlying_id, dte, ts_event);
+
+CREATE TABLE IF NOT EXISTS indicator_definition (
+    id                  INTEGER PRIMARY KEY,
+    name                VARCHAR     NOT NULL,
+    underlying_id       INTEGER     NOT NULL,
+    underlying_symbol   VARCHAR     NOT NULL,
+    params              JSON,
+    script_source       TEXT        NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_indicator_def_unique
+    ON indicator_definition (name, underlying_id);
+
+CREATE TABLE IF NOT EXISTS indicator_bars (
+    ts_event        TIMESTAMPTZ     NOT NULL,
+    indicator_id    INTEGER         NOT NULL REFERENCES indicator_definition(id),
+    value           DOUBLE
+);
+CREATE INDEX IF NOT EXISTS idx_indicator_bars
+    ON indicator_bars (indicator_id, ts_event);
+"""
 
 
 class InputDatabase:
@@ -32,10 +101,19 @@ class InputDatabase:
         end: datetime,
     ) -> pl.DataFrame:
         """
-        1-minute OHLCV bars for the given underlying instrument over [start, end].
+        1-minute OHLCV bars for the given underlying over [start, end].
         Returns columns: ts_event, instrument_id, symbol, open, high, low, close, volume.
         """
-        raise NotImplementedError
+        return self._con.execute(
+            """
+            SELECT ts_event, instrument_id, symbol, open, high, low, close, volume
+            FROM underlying_bars
+            WHERE instrument_id = ?
+              AND ts_event >= ? AND ts_event <= ?
+            ORDER BY ts_event
+            """,
+            [instrument_id, start, end],
+        ).pl()
 
     # ------------------------------------------------------------------
     # Option bars
@@ -48,10 +126,21 @@ class InputDatabase:
         end: datetime,
     ) -> pl.DataFrame:
         """
-        1-minute OHLCV bars for a single option instrument. Includes pre-joined
+        1-minute OHLCV bars for a single option instrument including pre-joined
         definition metadata: expiration, strike_price, right, multiplier.
         """
-        raise NotImplementedError
+        return self._con.execute(
+            """
+            SELECT ts_event, instrument_id, underlying_id, symbol,
+                   expiration, strike_price, "right", multiplier,
+                   open, high, low, close, volume
+            FROM option_bars
+            WHERE instrument_id = ?
+              AND ts_event >= ? AND ts_event <= ?
+            ORDER BY ts_event
+            """,
+            [instrument_id, start, end],
+        ).pl()
 
     def option_bars_for_legs(
         self,
@@ -62,9 +151,25 @@ class InputDatabase:
         """
         Batch-loads bars for a set of option instrument IDs over [start, end].
         Used by ExitScanner to load all open-position legs in a single query.
-        Returns the same schema as option_bars plus instrument_id.
+        Returns the same columns as option_bars.
         """
-        raise NotImplementedError
+        ids_df = pl.DataFrame({"instrument_id": instrument_ids})
+        self._con.register("_leg_ids", ids_df)
+        try:
+            return self._con.execute(
+                """
+                SELECT ob.ts_event, ob.instrument_id, ob.underlying_id, ob.symbol,
+                       ob.expiration, ob.strike_price, ob."right", ob.multiplier,
+                       ob.open, ob.high, ob.low, ob.close, ob.volume
+                FROM option_bars ob
+                JOIN _leg_ids li ON ob.instrument_id = li.instrument_id
+                WHERE ob.ts_event >= ? AND ob.ts_event <= ?
+                ORDER BY ob.instrument_id, ob.ts_event
+                """,
+                [start, end],
+            ).pl()
+        finally:
+            self._con.unregister("_leg_ids")
 
     # ------------------------------------------------------------------
     # Greeks / leg selection
@@ -81,15 +186,46 @@ class InputDatabase:
         dte_tolerance: int = 5,
     ) -> pl.DataFrame:
         """
-        For each timestamp in ts_events, returns candidate options near the
-        desired delta and DTE. The caller (EntryScanner._select_legs) picks
-        the best match per timestamp by minimising |actual_delta - target_delta|.
+        For each timestamp in ts_events, returns all candidate options within
+        delta_tolerance of target_delta and dte_tolerance of target_dte.
+
+        EntryScanner._select_legs() picks the best match per timestamp by
+        minimising |actual_delta - target_delta|.
 
         Returns columns: ts_event, instrument_id, underlying_id, dte, iv, delta,
-        gamma, theta, vega — joined with option_bars for strike, expiration, right,
-        multiplier, and close price.
+        gamma, theta, vega, strike_price, expiration, right, multiplier, close.
         """
-        raise NotImplementedError
+        ts_df = pl.DataFrame({"ts_event": ts_events})
+        self._con.register("_entry_ts", ts_df)
+        try:
+            return self._con.execute(
+                """
+                SELECT og.ts_event, og.instrument_id, og.underlying_id,
+                       og.dte, og.iv, og.delta, og.gamma, og.theta, og.vega,
+                       ob.strike_price, ob.expiration, ob."right", ob.multiplier,
+                       ob.close
+                FROM option_greeks og
+                JOIN option_bars ob
+                  ON og.instrument_id = ob.instrument_id
+                 AND og.ts_event = ob.ts_event
+                JOIN _entry_ts et ON og.ts_event = et.ts_event
+                WHERE og.underlying_id = ?
+                  AND ob."right" = ?
+                  AND og.dte BETWEEN ? AND ?
+                  AND og.delta BETWEEN ? AND ?
+                  AND ob.close IS NOT NULL
+                """,
+                [
+                    underlying_id,
+                    right,
+                    target_dte - dte_tolerance,
+                    target_dte + dte_tolerance,
+                    target_delta - delta_tolerance,
+                    target_delta + delta_tolerance,
+                ],
+            ).pl()
+        finally:
+            self._con.unregister("_entry_ts")
 
     # ------------------------------------------------------------------
     # Indicators
@@ -103,13 +239,47 @@ class InputDatabase:
     ) -> pl.DataFrame:
         """
         Returns a wide DataFrame with one column per indicator name, indexed
-        by ts_event. Internally executes a DuckDB PIVOT over indicator_bars
-        joined with indicator_definition. Callers always receive a wide DataFrame
-        — the tall storage format is transparent.
+        by ts_event. Executes a DuckDB PIVOT over indicator_bars joined with
+        indicator_definition. Returns empty DataFrame if no indicators exist.
 
-        Returns columns: ts_event, <indicator_name_1>, <indicator_name_2>, ...
+        Columns: ts_event, <indicator_name_1>, <indicator_name_2>, ...
         """
-        raise NotImplementedError
+        # Check whether any indicators exist for this underlying first.
+        count = self._con.execute(
+            "SELECT COUNT(*) FROM indicator_definition WHERE underlying_id = ?",
+            [underlying_id],
+        ).fetchone()[0]
+        if count == 0:
+            return pl.DataFrame({"ts_event": pl.Series([], dtype=pl.Datetime("us", "UTC"))})
+
+        return self._con.execute(
+            """
+            PIVOT (
+                SELECT ib.ts_event, idef.name, ib.value
+                FROM indicator_bars ib
+                JOIN indicator_definition idef ON ib.indicator_id = idef.id
+                WHERE idef.underlying_id = ?
+                  AND ib.ts_event >= ? AND ib.ts_event <= ?
+            ) ON name USING FIRST(value)
+            ORDER BY ts_event
+            """,
+            [underlying_id, start, end],
+        ).pl()
+
+    # ------------------------------------------------------------------
+    # Instrument lookup
+    # ------------------------------------------------------------------
+
+    def instrument_id_for_symbol(self, root_symbol: str) -> int | None:
+        """
+        Returns the instrument_id for the given root_symbol from underlying_bars,
+        or None if not found.
+        """
+        row = self._con.execute(
+            "SELECT instrument_id FROM underlying_bars WHERE symbol LIKE ? LIMIT 1",
+            [f"{root_symbol}%"],
+        ).fetchone()
+        return row[0] if row else None
 
     # ------------------------------------------------------------------
     # Lifecycle

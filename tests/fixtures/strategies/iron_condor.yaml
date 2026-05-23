@@ -1,17 +1,14 @@
-# Iron condor — four-leg strategy for multi-leg correctness testing.
-# Used in Test 3 (see docs/mvp.md).
+# Independent wings iron condor — two-trade strategy for SC-3.
+# put_spread and call_spread are managed independently (opened/closed separately).
+# Used in Test 3 (SC-3).
 
 strategy:
-  name: iron_condor_test
+  name: independent_wings_test
   version: "1.0"
 
-  instrument:
-    root_symbol: ES
-    asset_class: future
-
   universe:
-    start_date: "2023-01-03"
-    end_date:   "2023-03-31"
+    start_date: "2026-04-22"
+    end_date:   "2026-05-21"
     session:
       timezone:      "America/New_York"
       start_time:    "09:30"
@@ -19,52 +16,73 @@ strategy:
       weekdays_only: true
       skip_dates:    []
 
-  entry:
-    window:
-      start: "10:00"
-      end:   "11:00"
-    max_open_positions: 1
-    conditions: []
-
-  legs:
-    - name: long_put
-      right:    put
-      action:   buy_to_open
-      delta:    -0.10
-      dte:      45
-      quantity: 1
-
-    - name: short_put
-      right:    put
-      action:   sell_to_open
-      delta:    -0.20
-      dte:      45
-      quantity: 1
-
-    - name: short_call
-      right:    call
-      action:   sell_to_open
-      delta:    0.20
-      dte:      45
-      quantity: 1
-
-    - name: long_call
-      right:    call
-      action:   buy_to_open
-      delta:    0.10
-      dte:      45
-      quantity: 1
-
-  exit:
-    stop_loss:   3.00
-    take_profit: 0.50
-    dte_exit:    21
-    expiry_exit: true
-    conditions:  []
-
-  sizing:
-    contracts: 1
-
   costs:
     slippage_pct:     0.01
     fee_per_contract: 0.65
+
+  trades:
+    - name: put_spread
+      instrument:
+        root_symbol: ES
+        asset_class: future
+
+      entry:
+        window:
+          start: "10:00"
+          end:   "11:00"
+        conditions: []
+
+      legs:
+        - name: short_put
+          right:    put
+          action:   sell_to_open
+          delta:    -0.25
+          dte:      21
+          quantity: 1
+
+        - name: long_put
+          right:    put
+          action:   buy_to_open
+          delta:    -0.15
+          dte:      21
+          quantity: 1
+
+      exit:
+        stop_loss:   2.00
+        take_profit: 0.50
+        dte_exit:    7
+        expiry_exit: true
+        conditions:  []
+
+    - name: call_spread
+      instrument:
+        root_symbol: ES
+        asset_class: future
+
+      entry:
+        window:
+          start: "10:00"
+          end:   "11:00"
+        conditions: []
+
+      legs:
+        - name: short_call
+          right:    call
+          action:   sell_to_open
+          delta:    0.25
+          dte:      21
+          quantity: 1
+
+        - name: long_call
+          right:    call
+          action:   buy_to_open
+          delta:    0.15
+          dte:      21
+          quantity: 1
+
+      exit:
+        stop_loss:   2.00
+        take_profit: 0.50
+        dte_exit:    7
+        expiry_exit: true
+        conditions:  []
