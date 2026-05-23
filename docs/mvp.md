@@ -609,7 +609,7 @@ trades (ideally 5–15) can be enumerated by hand. Record each trade's `open_mar
 | `percent_profitable` | `COUNT(*) WHERE net_pnl > 0` / `total_trades` |
 | `profit_factor` | `SUM(net_pnl WHERE net_pnl > 0)` / `ABS(SUM(net_pnl WHERE net_pnl < 0))` |
 | `avg_mae` | `MEAN(ABS(worst_mark - open_mark))` across all positions |
-| `net_pnl` per row | `(open_mark - exit_mark) - slippage_cost - fee_cost` |
+| `net_pnl` per row | `(open_mark - exit_mark) × multiplier - slippage_cost - fee_cost` |
 
 Run `btkit analyze --backtest-id <id>` and compare each metric in the terminal output
 against the manually computed values. Allow floating-point tolerance of ±0.01.
@@ -651,11 +651,15 @@ AND exit_reason IS NOT NULL;
 
 **P&L consistency:**
 ```sql
--- net_pnl = (open_mark - exit_mark) - slippage_cost - fee_cost
--- Allow for floating-point tolerance
-SELECT COUNT(*) FROM position
-WHERE ABS(net_pnl - (open_mark - exit_mark - slippage_cost - fee_cost)) > 0.01
-AND exit_mark IS NOT NULL;
+-- net_pnl = (open_mark - exit_mark) × multiplier - slippage_cost - fee_cost
+-- multiplier is stored on position_leg; join to retrieve it.
+-- Allow for floating-point tolerance.
+SELECT COUNT(*) FROM position p
+JOIN (
+    SELECT position_id, MAX(multiplier) AS multiplier FROM position_leg GROUP BY position_id
+) m ON m.position_id = p.id
+WHERE ABS(p.net_pnl - ((p.open_mark - p.exit_mark) * m.multiplier - p.slippage_cost - p.fee_cost)) > 0.01
+AND p.exit_mark IS NOT NULL;
 -- Expected: 0
 ```
 
@@ -722,11 +726,14 @@ pairs chronologically and drops overlapping entries per trade.
 
 **Phase 6 — PnLCalculator (Pass 3) + `btkit run`**
 
-Inner join of entries and exits on `entry_id`. Cost model: `gross_pnl = open_mark -
-exit_mark`, `slippage_cost = |exit_mark| × slippage_pct`, `fee_cost = fee_per_contract ×
-total_contracts × 2`, `net_pnl = gross_pnl - slippage_cost - fee_cost`. Leg records
-written with action codes (`STO`/`BTO`), one row per `(entry_id, leg)`. `btkit run` CLI
-wired end-to-end.
+Inner join of entries and exits on `entry_id`. Cost model (all dollar terms):
+`gross_pnl = (open_mark - exit_mark) × multiplier`,
+`slippage_cost = |exit_mark| × multiplier × slippage_pct`,
+`fee_cost = fee_per_contract` (flat per round-trip, not scaled by contracts or multiplier),
+`net_pnl = gross_pnl - slippage_cost - fee_cost`.
+`open_mark`, `exit_mark`, and `worst_mark` remain in per-point terms in the database;
+all P&L columns are in dollars. Leg records written with action codes (`STO`/`BTO`),
+one row per `(entry_id, leg)`. `btkit run` CLI wired end-to-end.
 
 **Phase 7 — Analysis + `btkit pipeline`**
 
@@ -740,12 +747,17 @@ defaults to the most recent backtest when `--backtest-id` is omitted.
 
 **Dashboard — `btkit serve`**
 
-`btkit/analysis/dashboard.py` implements a Dash application with three panels: an equity
-curve chart (Plotly Scatter with shaded fill, reference line at starting equity), a
-strategy metrics summary table (16 metrics with P&L colouring), and a sortable/filterable
-trade list (exit reason and P&L coloured by outcome). All data is loaded once at startup;
-the database connection is closed before the server begins accepting requests. `btkit serve`
-wraps `run_dashboard()` with graceful error handling when `dash` is not installed.
+`btkit/analysis/dashboard.py` implements a Dash/ag-Grid application with five panels:
+
+1. **Equity curve** — Plotly Scatter with fill between the equity line and the starting-equity baseline; Y-axis auto-scaled to the actual equity range (not from zero).
+2. **Bootstrap equity fan** — 1 000 resampled equity curves (trade-order resampling with replacement), displayed as nested percentile bands (5–95, 10–90, 25–75), median, and the actual curve.
+3. **P&L histogram** — Plotly Histogram with a radio toggle between all-trades and wins/losses split.
+4. **Strategy metrics table** — 16 metrics in an ag-Grid with P&L colouring on Net Profit.
+5. **Trade list** — ag-Grid with sort, filter, and pagination; exit reason and P&L coloured by outcome; chart icon column opens a per-trade candlestick page in a new tab.
+
+Per-trade chart pages are served at `GET /chart/<position_id>` by a Flask route registered on the Dash server. Each page embeds the Lightweight Charts JS library (CDN) with the ES underlying bars loaded from the input database and entry/exit markers overlaid. Requires `--input-db` to be passed to `btkit serve`.
+
+All data is loaded once at startup; the database connection is closed before the server begins accepting requests. `btkit serve` wraps `run_dashboard()` with a graceful import error when `btkit[viz]` is not installed.
 
 ---
 
