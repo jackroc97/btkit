@@ -9,6 +9,9 @@ resolved to plain values).
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
+
 import polars as pl
 
 from btkit.backtest.entry import EntryScanner
@@ -45,8 +48,8 @@ class BacktestEngine:
         all_entries: dict[str, pl.DataFrame] = {}
         all_exits: dict[str, pl.DataFrame] = {}
         for trade in self.strategy.trades:
-            entries = EntryScanner(self.input_db, trade).scan()
-            exits = ExitScanner(self.input_db, trade).scan(entries)
+            entries = EntryScanner(self.input_db, self.strategy, trade).scan()
+            exits = ExitScanner(self.input_db, self.strategy, trade).scan(entries)
             entries, exits = self._enforce_one_at_a_time(entries, exits)
             all_entries[trade.name] = entries
             all_exits[trade.name] = exits
@@ -65,7 +68,28 @@ class BacktestEngine:
         and drops any entry whose entry_time falls before the previous exit_time.
         Returns the filtered (entries, exits) pair.
         """
-        raise NotImplementedError
+        if entries.is_empty():
+            return entries, exits
+
+        combined = (
+            entries.select(["entry_id", "entry_time"])
+            .join(exits.select(["entry_id", "exit_time"]), on="entry_id", how="left")
+            .sort("entry_time")
+        )
+
+        keep_ids: list[int] = []
+        last_exit_time = None
+
+        for row in combined.iter_rows(named=True):
+            if last_exit_time is None or row["entry_time"] >= last_exit_time:
+                keep_ids.append(row["entry_id"])
+                last_exit_time = row["exit_time"]
+
+        keep = pl.Series("entry_id", keep_ids)
+        return (
+            entries.filter(pl.col("entry_id").is_in(keep)),
+            exits.filter(pl.col("entry_id").is_in(keep)),
+        )
 
     def _write_backtest_record(self) -> int:
         """
@@ -73,4 +97,12 @@ class BacktestEngine:
         strategy_params is serialized to JSON for self-describing output.
         matrix_id and combination_id are NULL for single runs.
         """
-        raise NotImplementedError
+        return self.output_db.write_backtest({
+            "strategy_name": self.strategy.name,
+            "strategy_version": self.strategy.version,
+            "strategy_params": json.loads(self.strategy.model_dump_json()),
+            "initial_equity": self.initial_equity,
+            "slippage_pct": self.strategy.costs.slippage_pct,
+            "fee_per_contract": self.strategy.costs.fee_per_contract,
+            "created_at": datetime.now(timezone.utc),
+        })

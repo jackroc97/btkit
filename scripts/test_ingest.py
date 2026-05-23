@@ -12,12 +12,16 @@ if os.path.exists(db_path):
     os.remove(db_path)
 
 print("=== Building database ===")
-builder = DatabaseBuilder(raw_data_path="tests/fixtures/data", db_path=db_path)
+builder = DatabaseBuilder(
+    raw_data_path="tests/fixtures/data",
+    db_path=db_path,
+    indicator_scripts=["tests/fixtures/indicators.py"],
+)
 builder.build()
 
 print("\n=== Verifying tables ===")
 con = duckdb.connect(db_path, read_only=True)
-for table in ("underlying_bars", "option_bars", "option_greeks"):
+for table in ("underlying_bars", "option_bars", "option_greeks", "indicator_definition", "indicator_bars"):
     n = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
     print(f"{table}: {n:,} rows")
 

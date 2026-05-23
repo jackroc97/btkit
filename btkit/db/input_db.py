@@ -203,7 +203,7 @@ class InputDatabase:
                 SELECT og.ts_event, og.instrument_id, og.underlying_id,
                        og.dte, og.iv, og.delta, og.gamma, og.theta, og.vega,
                        ob.strike_price, ob.expiration, ob."right", ob.multiplier,
-                       ob.close
+                       ob.symbol, ob.close
                 FROM option_greeks og
                 JOIN option_bars ob
                   ON og.instrument_id = ob.instrument_id
@@ -252,19 +252,22 @@ class InputDatabase:
         if count == 0:
             return pl.DataFrame({"ts_event": pl.Series([], dtype=pl.Datetime("us", "UTC"))})
 
-        return self._con.execute(
+        # DuckDB PIVOT cannot use parameters in its source subquery, so fetch
+        # tall and pivot in Polars instead.
+        tall = self._con.execute(
             """
-            PIVOT (
-                SELECT ib.ts_event, idef.name, ib.value
-                FROM indicator_bars ib
-                JOIN indicator_definition idef ON ib.indicator_id = idef.id
-                WHERE idef.underlying_id = ?
-                  AND ib.ts_event >= ? AND ib.ts_event <= ?
-            ) ON name USING FIRST(value)
-            ORDER BY ts_event
+            SELECT ib.ts_event, idef.name, ib.value
+            FROM indicator_bars ib
+            JOIN indicator_definition idef ON ib.indicator_id = idef.id
+            WHERE idef.underlying_id = ?
+              AND ib.ts_event >= ? AND ib.ts_event <= ?
+            ORDER BY ib.ts_event
             """,
             [underlying_id, start, end],
         ).pl()
+        if tall.is_empty():
+            return pl.DataFrame({"ts_event": pl.Series([], dtype=pl.Datetime("us", "UTC"))})
+        return tall.pivot(on="name", index="ts_event", values="value", aggregate_function="first")
 
     # ------------------------------------------------------------------
     # Instrument lookup
