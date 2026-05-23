@@ -66,6 +66,7 @@ class UniverseConfig(BaseModel):
 class InstrumentConfig(BaseModel):
     root_symbol: str
     asset_class: Literal["future", "equity", "etf"]
+    expiry_close_time: time | None = None  # local time after which expiry_exit triggers on expiration day
 
 
 # ---------------------------------------------------------------------------

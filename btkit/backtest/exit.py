@@ -309,9 +309,17 @@ class ExitScanner:
             m = m.with_columns(pl.lit(False).alias("_dte_exit"))
 
         if exit_cfg.expiry_exit:
-            m = m.with_columns(
-                (pl.col("ts_event").dt.date() >= pl.col("trade_expiration")).alias("_expiry")
-            )
+            expiry_expr = pl.col("ts_event").dt.date() >= pl.col("trade_expiration")
+            close_time = self.trade.instrument.expiry_close_time
+            if close_time is not None:
+                tz_str = self.strategy.universe.session.timezone
+                close_sec = close_time.hour * 3600 + close_time.minute * 60
+                local_sec = (
+                    pl.col("ts_event").dt.convert_time_zone(tz_str).dt.hour().cast(pl.Int32) * 3600
+                    + pl.col("ts_event").dt.convert_time_zone(tz_str).dt.minute().cast(pl.Int32) * 60
+                )
+                expiry_expr = expiry_expr & (local_sec >= pl.lit(close_sec))
+            m = m.with_columns(expiry_expr.alias("_expiry"))
         else:
             m = m.with_columns(pl.lit(False).alias("_expiry"))
 

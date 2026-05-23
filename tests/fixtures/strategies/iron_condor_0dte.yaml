@@ -21,6 +21,7 @@ strategy:
       instrument:
         root_symbol: ES
         asset_class: future
+        expiry_close_time: "16:00"
 
       entry:
         window:
@@ -53,6 +54,7 @@ strategy:
       instrument:
         root_symbol: ES
         asset_class: future
+        expiry_close_time: "16:00"
 
       entry:
         window:
