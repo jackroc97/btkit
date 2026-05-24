@@ -17,10 +17,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, model_validator
 
-
 # ---------------------------------------------------------------------------
 # Sweep parameter types
 # ---------------------------------------------------------------------------
+
 
 class SweepRange(BaseModel):
     start: float
@@ -32,8 +32,7 @@ class SweepRange(BaseModel):
         result = []
         v = self.start
         eps = abs(self.step) * 1e-9
-        while (self.step > 0 and v <= self.stop + eps) or \
-              (self.step < 0 and v >= self.stop - eps):
+        while (self.step > 0 and v <= self.stop + eps) or (self.step < 0 and v >= self.stop - eps):
             result.append(round(v, 10))
             v += self.step
         return result
@@ -48,6 +47,7 @@ IntSweep = int | list[int] | SweepRange
 # ---------------------------------------------------------------------------
 # Session / universe
 # ---------------------------------------------------------------------------
+
 
 class SessionConfig(BaseModel):
     timezone: str = "America/New_York"
@@ -66,13 +66,18 @@ class UniverseConfig(BaseModel):
 class InstrumentConfig(BaseModel):
     root_symbol: str
     asset_class: Literal["future", "equity", "etf"]
-    expiry_close_time: time | None = None  # local time after which expiry_exit triggers on expiration day
-    roll_days_before_expiry: int = 7       # futures only: roll to next contract this many days before front-month expiry
+    expiry_close_time: time | None = (
+        None  # local time after which expiry_exit triggers on expiration day
+    )
+    roll_days_before_expiry: int = (
+        7  # futures only: roll to next contract this many days before front-month expiry
+    )
 
 
 # ---------------------------------------------------------------------------
 # Entry
 # ---------------------------------------------------------------------------
+
 
 class EntryWindowConfig(BaseModel):
     start: time
@@ -88,13 +93,14 @@ class EntryWindowConfig(BaseModel):
 class EntryConfig(BaseModel):
     window: EntryWindowConfig
     conditions: list[str] = []
-    min_credit: NumericSweep | None = None   # skip entry if open_mark < this
-    max_debit: NumericSweep | None = None    # skip entry if open_mark > this
+    min_credit: NumericSweep | None = None  # skip entry if open_mark < this
+    max_debit: NumericSweep | None = None  # skip entry if open_mark > this
 
 
 # ---------------------------------------------------------------------------
 # Legs
 # ---------------------------------------------------------------------------
+
 
 class LegConfig(BaseModel):
     name: str
@@ -105,17 +111,17 @@ class LegConfig(BaseModel):
     # Selection mode A: delta-targeted (standard)
     delta: NumericSweep | None = None
     delta_tolerance: float = 0.10  # ±band around target_delta for candidate search
-    dte_tolerance: int = 5         # ±band around target_dte for candidate search
+    dte_tolerance: int = 5  # ±band around target_dte for candidate search
     # Selection mode B: fixed strike offset from a reference leg
     # When strike_offset is set, dte is ignored — the expiration is inherited
     # from the reference leg to guarantee all legs share the same expiry.
-    strike_offset: float | None = None   # positive = above ref strike, negative = below
-    reference_leg: str | None = None     # name of the leg whose strike is the origin
+    strike_offset: float | None = None  # positive = above ref strike, negative = below
+    reference_leg: str | None = None  # name of the leg whose strike is the origin
 
     @model_validator(mode="after")
     def validate_selection_mode(self) -> LegConfig:
         has_offset = self.strike_offset is not None
-        has_delta  = self.delta is not None
+        has_delta = self.delta is not None
         if has_offset and has_delta:
             raise ValueError("delta and strike_offset are mutually exclusive")
         if not has_offset and not has_delta:
@@ -129,13 +135,16 @@ class LegConfig(BaseModel):
 # Exit
 # ---------------------------------------------------------------------------
 
+
 class ExitConfig(BaseModel):
     stop_loss: NumericSweep
-    take_profit: NumericSweep | None = None      # fixed per-point offset from open_mark
-    take_profit_pct: NumericSweep | None = None  # fraction of open_mark to retain (e.g. 0.70 = exit at 70% profit)
+    take_profit: NumericSweep | None = None  # fixed per-point offset from open_mark
+    take_profit_pct: NumericSweep | None = (
+        None  # fraction of open_mark to retain (e.g. 0.70 = exit at 70% profit)
+    )
     dte_exit: IntSweep | None = None
     expiry_exit: bool = True
-    conditions: list[str] = []   # OR logic — position closes if any condition is true
+    conditions: list[str] = []  # OR logic — position closes if any condition is true
 
     @model_validator(mode="after")
     def validate_take_profit(self) -> ExitConfig:
@@ -149,6 +158,7 @@ class ExitConfig(BaseModel):
 # ---------------------------------------------------------------------------
 # Costs / matrix
 # ---------------------------------------------------------------------------
+
 
 class CostsConfig(BaseModel):
     slippage_pct: float = 0.0
@@ -170,7 +180,7 @@ StructuredCombination = dict[str, dict[str, Any]]
 
 class TableCombinations(BaseModel):
     mode: Literal["table"]
-    columns: list[str]              # dot-path refs e.g. "short_put.delta"
+    columns: list[str]  # dot-path refs e.g. "short_put.delta"
     rows: list[list[float | int]]
 
     @model_validator(mode="after")
@@ -186,6 +196,7 @@ class TableCombinations(BaseModel):
 # ---------------------------------------------------------------------------
 # Trade definition — one per independent position structure
 # ---------------------------------------------------------------------------
+
 
 class TradeDefinition(BaseModel):
     name: str
@@ -219,6 +230,7 @@ class TradeDefinition(BaseModel):
 # Top-level strategy definition
 # ---------------------------------------------------------------------------
 
+
 class StrategyDefinition(BaseModel):
     name: str
     version: str = "1.0"
@@ -233,9 +245,7 @@ class StrategyDefinition(BaseModel):
         """All trades must reference the same root_symbol."""
         symbols = {t.instrument.root_symbol for t in self.trades}
         if len(symbols) > 1:
-            raise ValueError(
-                f"all trades must share the same underlying; got {symbols}"
-            )
+            raise ValueError(f"all trades must share the same underlying; got {symbols}")
         return self
 
     @model_validator(mode="after")

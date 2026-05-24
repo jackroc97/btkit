@@ -87,12 +87,18 @@ def _ast_to_polars(node, source: str) -> pl.Expr:
         left = _ast_to_polars(node.left, source)
         right = _ast_to_polars(node.comparators[0], source)
         op = node.ops[0]
-        if isinstance(op, _ast.Lt):   return left < right
-        if isinstance(op, _ast.Gt):   return left > right
-        if isinstance(op, _ast.LtE):  return left <= right
-        if isinstance(op, _ast.GtE):  return left >= right
-        if isinstance(op, _ast.Eq):   return left == right
-        if isinstance(op, _ast.NotEq): return left != right
+        if isinstance(op, _ast.Lt):
+            return left < right
+        if isinstance(op, _ast.Gt):
+            return left > right
+        if isinstance(op, _ast.LtE):
+            return left <= right
+        if isinstance(op, _ast.GtE):
+            return left >= right
+        if isinstance(op, _ast.Eq):
+            return left == right
+        if isinstance(op, _ast.NotEq):
+            return left != right
         raise ValueError(f"Unsupported comparison operator in: {source!r}")
 
     if isinstance(node, _ast.BoolOp):
@@ -113,7 +119,9 @@ def _ast_to_polars(node, source: str) -> pl.Expr:
             return ~_ast_to_polars(node.operand, source)
         if isinstance(node.op, _ast.USub):
             # Negative numeric literal: -0.30 → pl.lit(-0.30)
-            if isinstance(node.operand, _ast.Constant) and isinstance(node.operand.value, (int, float)):
+            if isinstance(node.operand, _ast.Constant) and isinstance(
+                node.operand.value, (int, float)
+            ):
                 return pl.lit(-node.operand.value)
         raise ValueError(f"Unsupported unary operator in: {source!r}")
 

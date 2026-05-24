@@ -18,7 +18,9 @@ def compute(df: pl.DataFrame) -> pl.DataFrame:
 
     Returns the same DataFrame with sma_20 and sma_5 appended.
     """
-    return df.with_columns([
-        pl.col("close").rolling_mean(20).alias("sma_20"),
-        pl.col("close").rolling_mean(5).alias("sma_5"),
-    ])
+    return df.with_columns(
+        [
+            pl.col("close").rolling_mean(20).alias("sma_20"),
+            pl.col("close").rolling_mean(5).alias("sma_5"),
+        ]
+    )

@@ -27,8 +27,9 @@ from btkit.strategy.definition import StrategyDefinition
 @dataclass
 class BacktestPositions:
     """Computed results ready to be written to the output database."""
-    positions: pl.DataFrame   # matches position table schema
-    legs: pl.DataFrame        # matches position_leg table schema
+
+    positions: pl.DataFrame  # matches position table schema
+    legs: pl.DataFrame  # matches position_leg table schema
 
 
 class PnLCalculator:
@@ -75,33 +76,51 @@ class PnLCalculator:
             multiplier_col = f"leg_{first_leg}_multiplier"
 
             pos = entries.join(exits, on="entry_id", how="inner")
-            pos = pos.with_columns([
-                # Dollar gross: per-point spread × multiplier
-                ((pl.col("open_mark") - pl.col("exit_mark")) * pl.col(multiplier_col)).alias("gross_pnl"),
-                # Dollar slippage: % of dollar exit value
-                (pl.col("exit_mark").abs() * pl.col(multiplier_col) * pl.lit(float(costs.slippage_pct))).alias("slippage_cost"),
-                # Flat dollar fee per round-trip
-                pl.lit(float(costs.fee_per_contract)).alias("fee_cost"),
-            ]).with_columns(
-                (pl.col("gross_pnl") - pl.col("slippage_cost") - pl.col("fee_cost")).alias("net_pnl")
+            pos = pos.with_columns(
+                [
+                    # Dollar gross: per-point spread × multiplier
+                    ((pl.col("open_mark") - pl.col("exit_mark")) * pl.col(multiplier_col)).alias(
+                        "gross_pnl"
+                    ),
+                    # Dollar slippage: % of dollar exit value
+                    (
+                        pl.col("exit_mark").abs()
+                        * pl.col(multiplier_col)
+                        * pl.lit(float(costs.slippage_pct))
+                    ).alias("slippage_cost"),
+                    # Flat dollar fee per round-trip
+                    pl.lit(float(costs.fee_per_contract)).alias("fee_cost"),
+                ]
+            ).with_columns(
+                (pl.col("gross_pnl") - pl.col("slippage_cost") - pl.col("fee_cost")).alias(
+                    "net_pnl"
+                )
             )
 
             positions_list.append(
-                pos.rename({"entry_time": "open_time"}).select([
-                    "entry_id", "trade_name", "open_time", "exit_time", "exit_reason",
-                    "open_mark", "exit_mark", "worst_mark",
-                    "slippage_cost", "fee_cost", "net_pnl",
-                ])
+                pos.rename({"entry_time": "open_time"}).select(
+                    [
+                        "entry_id",
+                        "trade_name",
+                        "open_time",
+                        "exit_time",
+                        "exit_reason",
+                        "open_mark",
+                        "exit_mark",
+                        "worst_mark",
+                        "slippage_cost",
+                        "fee_cost",
+                        "net_pnl",
+                    ]
+                )
             )
 
             # -- Legs: one row per (entry, leg) --
             kept_id_list = pos["entry_id"].to_list()
             for leg in trade.legs:
                 action_code = "STO" if leg.action == "sell_to_open" else "BTO"
-                leg_df = (
-                    entries
-                    .filter(pl.col("entry_id").is_in(kept_id_list))
-                    .select([
+                leg_df = entries.filter(pl.col("entry_id").is_in(kept_id_list)).select(
+                    [
                         "entry_id",
                         pl.col(f"leg_{leg.name}_instrument_id").alias("instrument_id"),
                         pl.col(f"leg_{leg.name}_symbol").alias("symbol"),
@@ -119,7 +138,7 @@ class PnLCalculator:
                         pl.col(f"leg_{leg.name}_theta").alias("entry_theta"),
                         pl.col(f"leg_{leg.name}_vega").alias("entry_vega"),
                         pl.col(f"leg_{leg.name}_dte").cast(pl.Int32).alias("entry_dte"),
-                    ])
+                    ]
                 )
                 legs_list.append(leg_df)
 

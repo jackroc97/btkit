@@ -36,10 +36,10 @@ import numpy as np
 import polars as pl
 from numba import njit
 
-
 # ---------------------------------------------------------------------------
 # numba-compiled Black-76 kernels
 # ---------------------------------------------------------------------------
+
 
 @njit(cache=True)
 def _norm_cdf(x: float) -> float:
@@ -121,14 +121,14 @@ def _greeks(
     delta = np.empty(n, dtype=np.float64)
     gamma = np.empty(n, dtype=np.float64)
     theta = np.empty(n, dtype=np.float64)
-    vega  = np.empty(n, dtype=np.float64)
+    vega = np.empty(n, dtype=np.float64)
 
     for i in range(n):
         if sigma[i] != sigma[i] or T[i] <= 0.0 or F[i] <= 0.0 or sigma[i] <= 0.0:
             delta[i] = np.nan
             gamma[i] = np.nan
             theta[i] = np.nan
-            vega[i]  = np.nan
+            vega[i] = np.nan
             continue
 
         sqrtT = math.sqrt(T[i])
@@ -155,7 +155,7 @@ def _greeks(
 
         gamma[i] = df * npd1 / (F[i] * sigma[i] * sqrtT)
         theta[i] = theta_raw / 365.0
-        vega[i]  = df * F[i] * npd1 * sqrtT
+        vega[i] = df * F[i] * npd1 * sqrtT
 
     return delta, gamma, theta, vega
 
@@ -163,6 +163,7 @@ def _greeks(
 # ---------------------------------------------------------------------------
 # GreeksCalculator
 # ---------------------------------------------------------------------------
+
 
 class GreeksCalculator:
     def __init__(
@@ -245,11 +246,15 @@ class GreeksCalculator:
         # Treat expiration as 20:00 UTC (≈ 16:00 ET) on the expiration date.
         expiry_dt = (
             df["expiration"]
-            .cast(pl.Datetime("us"))        # Date → midnight naive datetime
-            .dt.replace_time_zone("UTC")    # mark as UTC
-            + timedelta(hours=20)           # → 20:00 UTC on expiration date
+            .cast(pl.Datetime("us"))  # Date → midnight naive datetime
+            .dt.replace_time_zone("UTC")  # mark as UTC
+            + timedelta(hours=20)  # → 20:00 UTC on expiration date
         )
-        T_sec = (expiry_dt - df["ts_event"].dt.convert_time_zone("UTC")).dt.total_seconds().cast(pl.Float64)
+        T_sec = (
+            (expiry_dt - df["ts_event"].dt.convert_time_zone("UTC"))
+            .dt.total_seconds()
+            .cast(pl.Float64)
+        )
         T = (T_sec / (365.25 * 24 * 3600)).clip(lower_bound=0.0)
 
         is_call = (df["right"] == "C").cast(pl.Int8).to_numpy().astype(np.int64)
@@ -262,15 +267,17 @@ class GreeksCalculator:
         iv = _implied_vol(F, K, T_np, r_np, price, is_call)
         delta_arr, gamma_arr, theta_arr, vega_arr = _greeks(F, K, T_np, r_np, iv, is_call)
 
-        return pl.DataFrame({
-            "ts_event":      df["ts_event"],
-            "instrument_id": df["instrument_id"],
-            "underlying_id": df["underlying_id"],
-            "dte":           dte,
-            "T":             T,
-            "iv":            pl.Series(iv).cast(pl.Float64),
-            "delta":         pl.Series(delta_arr).cast(pl.Float64),
-            "gamma":         pl.Series(gamma_arr).cast(pl.Float64),
-            "theta":         pl.Series(theta_arr).cast(pl.Float64),
-            "vega":          pl.Series(vega_arr).cast(pl.Float64),
-        })
+        return pl.DataFrame(
+            {
+                "ts_event": df["ts_event"],
+                "instrument_id": df["instrument_id"],
+                "underlying_id": df["underlying_id"],
+                "dte": dte,
+                "T": T,
+                "iv": pl.Series(iv).cast(pl.Float64),
+                "delta": pl.Series(delta_arr).cast(pl.Float64),
+                "gamma": pl.Series(gamma_arr).cast(pl.Float64),
+                "theta": pl.Series(theta_arr).cast(pl.Float64),
+                "vega": pl.Series(vega_arr).cast(pl.Float64),
+            }
+        )

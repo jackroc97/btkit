@@ -16,7 +16,6 @@ those modules are installed in the active environment.
 from __future__ import annotations
 
 import importlib.util
-import json
 from pathlib import Path
 from types import ModuleType
 
@@ -118,11 +117,13 @@ class IndicatorRunner:
         indicator_id: int,
     ) -> None:
         """Melt one indicator column to tall format and insert into indicator_bars."""
-        tall = df.select([
-            pl.col("ts_event"),
-            pl.lit(indicator_id).cast(pl.Int64).alias("indicator_id"),
-            pl.col(col_name).cast(pl.Float64).alias("value"),
-        ]).filter(pl.col("value").is_not_null())
+        tall = df.select(
+            [
+                pl.col("ts_event"),
+                pl.lit(indicator_id).cast(pl.Int64).alias("indicator_id"),
+                pl.col(col_name).cast(pl.Float64).alias("value"),
+            ]
+        ).filter(pl.col("value").is_not_null())
 
         if tall.is_empty():
             return
@@ -133,9 +134,7 @@ class IndicatorRunner:
 
     def _load_module(self) -> ModuleType:
         """Dynamically load the script as a Python module."""
-        spec = importlib.util.spec_from_file_location(
-            self.script_path.stem, self.script_path
-        )
+        spec = importlib.util.spec_from_file_location(self.script_path.stem, self.script_path)
         if spec is None or spec.loader is None:
             raise ImportError(f"Cannot load indicator script: {self.script_path}")
         module = importlib.util.module_from_spec(spec)

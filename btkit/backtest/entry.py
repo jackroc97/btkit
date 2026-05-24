@@ -32,7 +32,7 @@ BacktestEngine._enforce_one_at_a_time() after Pass 2 using real exit times.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 import polars as pl
@@ -74,17 +74,24 @@ class EntryScanner:
                        leg_{name}_symbol, leg_{name}_close
         """
         root_symbol = self.trade.instrument.root_symbol
-        roll_days   = self.trade.instrument.roll_days_before_expiry
+        roll_days = self.trade.instrument.roll_days_before_expiry
 
         universe = self.strategy.universe
         start_dt = datetime(
-            universe.start_date.year, universe.start_date.month, universe.start_date.day,
+            universe.start_date.year,
+            universe.start_date.month,
+            universe.start_date.day,
             tzinfo=self._tz,
-        ).astimezone(timezone.utc)
+        ).astimezone(UTC)
         end_dt = datetime(
-            universe.end_date.year, universe.end_date.month, universe.end_date.day,
-            23, 59, 59, tzinfo=self._tz,
-        ).astimezone(timezone.utc)
+            universe.end_date.year,
+            universe.end_date.month,
+            universe.end_date.day,
+            23,
+            59,
+            59,
+            tzinfo=self._tz,
+        ).astimezone(UTC)
 
         # Build a roll schedule: date → underlying_id for the active front-month
         # futures contract.  This covers the full universe window so every
@@ -102,8 +109,7 @@ class EntryScanner:
             return _empty_entries_df()
 
         bars = (
-            all_bars
-            .with_columns(pl.col("ts_event").dt.date().alias("_date"))
+            all_bars.with_columns(pl.col("ts_event").dt.date().alias("_date"))
             .join(schedule, left_on="_date", right_on="date", how="left")
             .filter(pl.col("instrument_id") == pl.col("underlying_id"))
             .drop(["_date", "underlying_id"])
@@ -112,9 +118,7 @@ class EntryScanner:
             return _empty_entries_df()
 
         # Indicators: use the front-month at the start of the universe.
-        start_underlying_id = self.db.front_future_id(
-            root_symbol, universe.start_date, roll_days
-        )
+        start_underlying_id = self.db.front_future_id(root_symbol, universe.start_date, roll_days)
         indicators = self._get_indicators(start_underlying_id, start_dt, end_dt)
 
         candidates = self._apply_window_filters(bars)
@@ -124,8 +128,7 @@ class EntryScanner:
         # Attach the active underlying_id to each candidate bar so _select_legs
         # can pass per-bar underlying IDs to the greeks queries.
         candidates = (
-            candidates
-            .with_columns(pl.col("ts_event").dt.date().alias("_date"))
+            candidates.with_columns(pl.col("ts_event").dt.date().alias("_date"))
             .join(schedule, left_on="_date", right_on="date", how="left")
             .drop("_date")
         )
@@ -140,10 +143,8 @@ class EntryScanner:
         if candidates.is_empty():
             return _empty_entries_df()
 
-        return (
-            candidates
-            .with_row_index("entry_id", offset=entry_id_offset)
-            .with_columns(pl.lit(self.trade.name).alias("trade_name"))
+        return candidates.with_row_index("entry_id", offset=entry_id_offset).with_columns(
+            pl.lit(self.trade.name).alias("trade_name")
         )
 
     # ------------------------------------------------------------------
@@ -160,25 +161,19 @@ class EntryScanner:
         window = self.trade.entry.window
         tz_str = session.timezone
 
-        bars = bars.with_columns(
-            pl.col("ts_event")
-            .dt.convert_time_zone(tz_str)
-            .alias("_ts_local")
-        )
+        bars = bars.with_columns(pl.col("ts_event").dt.convert_time_zone(tz_str).alias("_ts_local"))
 
         if session.weekdays_only:
             bars = bars.filter(pl.col("_ts_local").dt.weekday() < 5)
 
         if session.skip_dates:
             bars = bars.filter(
-                ~pl.col("_ts_local").dt.date().is_in(
-                    [d for d in session.skip_dates]
-                )
+                ~pl.col("_ts_local").dt.date().is_in([d for d in session.skip_dates])
             )
 
         # Cast to Int32 before multiplication to prevent i8 overflow (3600 * 23 > 127).
         start_sec = window.start.hour * 3600 + window.start.minute * 60
-        end_sec   = window.end.hour   * 3600 + window.end.minute   * 60
+        end_sec = window.end.hour * 3600 + window.end.minute * 60
         _sec = (
             pl.col("_ts_local").dt.hour().cast(pl.Int32) * 3600
             + pl.col("_ts_local").dt.minute().cast(pl.Int32) * 60
@@ -212,11 +207,11 @@ class EntryScanner:
 
         Timestamps where any leg has no match are dropped via inner join.
         """
-        ts_events      = candidates["ts_event"].to_list()
+        ts_events = candidates["ts_event"].to_list()
         underlying_ids = candidates["underlying_id"].to_list()
-        ts_event_underlying = list(zip(ts_events, underlying_ids))
+        ts_event_underlying = list(zip(ts_events, underlying_ids, strict=False))
 
-        delta_legs  = [leg for leg in self.trade.legs if leg.strike_offset is None]
+        delta_legs = [leg for leg in self.trade.legs if leg.strike_offset is None]
         offset_legs = [leg for leg in self.trade.legs if leg.strike_offset is not None]
 
         result = candidates.select(["ts_event", "underlying_id"])
@@ -227,12 +222,12 @@ class EntryScanner:
         if delta_legs:
             leg_specs = [
                 {
-                    "name":            leg.name,
-                    "right":           "C" if leg.right == "call" else "P",
-                    "target_delta":    float(leg.delta),
-                    "target_dte":      int(leg.dte),
+                    "name": leg.name,
+                    "right": "C" if leg.right == "call" else "P",
+                    "target_delta": float(leg.delta),
+                    "target_dte": int(leg.dte),
                     "delta_tolerance": float(leg.delta_tolerance),
-                    "dte_tolerance":   int(leg.dte_tolerance),
+                    "dte_tolerance": int(leg.dte_tolerance),
                 }
                 for leg in delta_legs
             ]
@@ -258,24 +253,21 @@ class EntryScanner:
                     return pl.DataFrame()
 
                 best = (
-                    leg_df
-                    .with_columns(
-                        (pl.col("delta") - target_delta).abs().alias("_delta_diff")
-                    )
+                    leg_df.with_columns((pl.col("delta") - target_delta).abs().alias("_delta_diff"))
                     .sort(["ts_event", "_delta_diff"])
                     .unique(subset=["ts_event"], keep="first")
                     .drop(["_delta_diff", "leg_name"])
                 )
 
                 rename_map = {
-                    col: f"leg_{leg.name}_{col}"
-                    for col in best.columns
-                    if col != "ts_event"
+                    col: f"leg_{leg.name}_{col}" for col in best.columns if col != "ts_event"
                 }
-                best = best.rename(rename_map).with_columns([
-                    pl.lit(leg.action).alias(f"leg_{leg.name}_action"),
-                    pl.lit(leg.quantity).alias(f"leg_{leg.name}_quantity"),
-                ])
+                best = best.rename(rename_map).with_columns(
+                    [
+                        pl.lit(leg.action).alias(f"leg_{leg.name}_action"),
+                        pl.lit(leg.quantity).alias(f"leg_{leg.name}_quantity"),
+                    ]
+                )
 
                 result = result.join(best, on="ts_event", how="inner")
 
@@ -287,17 +279,21 @@ class EntryScanner:
             if ref_strike_col not in result.columns:
                 return pl.DataFrame()
 
-            right_char     = "C" if leg.right == "call" else "P"
+            right_char = "C" if leg.right == "call" else "P"
             ref_expiry_col = f"leg_{leg.reference_leg}_expiration"
 
-            strike_targets = result.select([
-                "ts_event",
-                "underlying_id",
-                pl.lit(leg.name).alias("leg_name"),
-                pl.lit(right_char).alias("right"),
-                (pl.col(ref_strike_col) + pl.lit(float(leg.strike_offset))).alias("target_strike"),
-                pl.col(ref_expiry_col).alias("reference_expiration"),
-            ])
+            strike_targets = result.select(
+                [
+                    "ts_event",
+                    "underlying_id",
+                    pl.lit(leg.name).alias("leg_name"),
+                    pl.lit(right_char).alias("right"),
+                    (pl.col(ref_strike_col) + pl.lit(float(leg.strike_offset))).alias(
+                        "target_strike"
+                    ),
+                    pl.col(ref_expiry_col).alias("reference_expiration"),
+                ]
+            )
 
             offset_candidates = self.db.greeks_for_strike_legs(
                 strike_targets=strike_targets,
@@ -308,8 +304,7 @@ class EntryScanner:
 
             target_strikes = strike_targets.select(["ts_event", "target_strike"])
             best = (
-                offset_candidates
-                .join(target_strikes, on="ts_event", how="left")
+                offset_candidates.join(target_strikes, on="ts_event", how="left")
                 .with_columns(
                     (pl.col("strike_price") - pl.col("target_strike")).abs().alias("_strike_diff")
                 )
@@ -318,15 +313,13 @@ class EntryScanner:
                 .drop(["_strike_diff", "leg_name", "underlying_id", "target_strike"])
             )
 
-            rename_map = {
-                col: f"leg_{leg.name}_{col}"
-                for col in best.columns
-                if col != "ts_event"
-            }
-            best = best.rename(rename_map).with_columns([
-                pl.lit(leg.action).alias(f"leg_{leg.name}_action"),
-                pl.lit(leg.quantity).alias(f"leg_{leg.name}_quantity"),
-            ])
+            rename_map = {col: f"leg_{leg.name}_{col}" for col in best.columns if col != "ts_event"}
+            best = best.rename(rename_map).with_columns(
+                [
+                    pl.lit(leg.action).alias(f"leg_{leg.name}_action"),
+                    pl.lit(leg.quantity).alias(f"leg_{leg.name}_quantity"),
+                ]
+            )
 
             result = result.join(best, on="ts_event", how="inner")
 
@@ -350,19 +343,19 @@ class EntryScanner:
 
         if exit_cfg.take_profit_pct is not None:
             # tp_price = open_mark × (1 - pct): exit when mark falls to this fraction
-            tp_expr = (
-                pl.col("open_mark") * pl.lit(1.0 - float(exit_cfg.take_profit_pct))
-            ).alias("tp_price")
+            tp_expr = (pl.col("open_mark") * pl.lit(1.0 - float(exit_cfg.take_profit_pct))).alias(
+                "tp_price"
+            )
         else:
-            tp_expr = (
-                pl.col("open_mark") - pl.lit(float(exit_cfg.take_profit))
-            ).alias("tp_price")
+            tp_expr = (pl.col("open_mark") - pl.lit(float(exit_cfg.take_profit))).alias("tp_price")
 
-        entries = entries.with_columns([
-            tp_expr,
-            (pl.col("open_mark") + pl.lit(float(exit_cfg.stop_loss))).alias("sl_price"),
-            pl.lit(exit_cfg.dte_exit).cast(pl.Int32).alias("dte_exit"),
-        ])
+        entries = entries.with_columns(
+            [
+                tp_expr,
+                (pl.col("open_mark") + pl.lit(float(exit_cfg.stop_loss))).alias("sl_price"),
+                pl.lit(exit_cfg.dte_exit).cast(pl.Int32).alias("dte_exit"),
+            ]
+        )
 
         return entries.rename({"ts_event": "entry_time"})
 
@@ -389,24 +382,22 @@ class EntryScanner:
             try:
                 entries = entries.filter(expr)
             except Exception as e:
-                self.warnings.append({
-                    "phase": "entry",
-                    "trade": self.trade.name,
-                    "type": "condition_error",
-                    "condition": cond_str,
-                    "error": str(e),
-                })
+                self.warnings.append(
+                    {
+                        "phase": "entry",
+                        "trade": self.trade.name,
+                        "type": "condition_error",
+                        "condition": cond_str,
+                        "error": str(e),
+                    }
+                )
                 return entries.clear()
 
         if entry_cfg.min_credit is not None:
-            entries = entries.filter(
-                pl.col("open_mark") >= float(entry_cfg.min_credit)
-            )
+            entries = entries.filter(pl.col("open_mark") >= float(entry_cfg.min_credit))
 
         if entry_cfg.max_debit is not None:
-            entries = entries.filter(
-                pl.col("open_mark") <= float(entry_cfg.max_debit)
-            )
+            entries = entries.filter(pl.col("open_mark") <= float(entry_cfg.max_debit))
 
         return entries
 
@@ -441,13 +432,16 @@ class EntryScanner:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _empty_entries_df() -> pl.DataFrame:
-    return pl.DataFrame({
-        "entry_id":   pl.Series([], dtype=pl.UInt32),
-        "trade_name": pl.Series([], dtype=pl.Utf8),
-        "entry_time": pl.Series([], dtype=pl.Datetime("us", "UTC")),
-        "open_mark":  pl.Series([], dtype=pl.Float64),
-        "tp_price":   pl.Series([], dtype=pl.Float64),
-        "sl_price":   pl.Series([], dtype=pl.Float64),
-        "dte_exit":   pl.Series([], dtype=pl.Int32),
-    })
+    return pl.DataFrame(
+        {
+            "entry_id": pl.Series([], dtype=pl.UInt32),
+            "trade_name": pl.Series([], dtype=pl.Utf8),
+            "entry_time": pl.Series([], dtype=pl.Datetime("us", "UTC")),
+            "open_mark": pl.Series([], dtype=pl.Float64),
+            "tp_price": pl.Series([], dtype=pl.Float64),
+            "sl_price": pl.Series([], dtype=pl.Float64),
+            "dte_exit": pl.Series([], dtype=pl.Int32),
+        }
+    )

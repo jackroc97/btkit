@@ -249,21 +249,29 @@ class InputDatabase:
         Returns one DataFrame for all legs tagged with a leg_name column; caller
         partitions by leg_name and picks the best match per ts_event.
         """
-        ts_events      = [t for t, _ in ts_event_underlying]
+        ts_events = [t for t, _ in ts_event_underlying]
         underlying_ids = [u for _, u in ts_event_underlying]
 
-        ts_df = pl.DataFrame({
-            "ts_event":      pl.Series(ts_events,      dtype=pl.Datetime("us", "UTC")),
-            "underlying_id": pl.Series(underlying_ids, dtype=pl.Int64),
-        })
-        params_df = pl.DataFrame({
-            "leg_name":  [s["name"]  for s in leg_specs],
-            "leg_right": [s["right"] for s in leg_specs],
-            "delta_lo":  [float(s["target_delta"]) - float(s["delta_tolerance"]) for s in leg_specs],
-            "delta_hi":  [float(s["target_delta"]) + float(s["delta_tolerance"]) for s in leg_specs],
-            "dte_lo":    [int(s["target_dte"]) - int(s["dte_tolerance"]) for s in leg_specs],
-            "dte_hi":    [int(s["target_dte"]) + int(s["dte_tolerance"]) for s in leg_specs],
-        })
+        ts_df = pl.DataFrame(
+            {
+                "ts_event": pl.Series(ts_events, dtype=pl.Datetime("us", "UTC")),
+                "underlying_id": pl.Series(underlying_ids, dtype=pl.Int64),
+            }
+        )
+        params_df = pl.DataFrame(
+            {
+                "leg_name": [s["name"] for s in leg_specs],
+                "leg_right": [s["right"] for s in leg_specs],
+                "delta_lo": [
+                    float(s["target_delta"]) - float(s["delta_tolerance"]) for s in leg_specs
+                ],
+                "delta_hi": [
+                    float(s["target_delta"]) + float(s["delta_tolerance"]) for s in leg_specs
+                ],
+                "dte_lo": [int(s["target_dte"]) - int(s["dte_tolerance"]) for s in leg_specs],
+                "dte_hi": [int(s["target_dte"]) + int(s["dte_tolerance"]) for s in leg_specs],
+            }
+        )
         self._con.register("_entry_ts", ts_df)
         self._con.register("_leg_params", params_df)
         ts_min = min(ts_events)
@@ -423,18 +431,25 @@ class InputDatabase:
                 [f"{root_symbol}%"],
             ).fetchone()
             if row is None:
-                return pl.DataFrame({"date": pl.Series([], dtype=pl.Date),
-                                     "underlying_id": pl.Series([], dtype=pl.Int64)})
+                return pl.DataFrame(
+                    {
+                        "date": pl.Series([], dtype=pl.Date),
+                        "underlying_id": pl.Series([], dtype=pl.Int64),
+                    }
+                )
             uid = int(row[0])
-            dates = [start_date + timedelta(days=i)
-                     for i in range((end_date - start_date).days + 1)]
-            return pl.DataFrame({"date": dates,
-                                 "underlying_id": [uid] * len(dates)})
+            dates = [
+                start_date + timedelta(days=i) for i in range((end_date - start_date).days + 1)
+            ]
+            return pl.DataFrame({"date": dates, "underlying_id": [uid] * len(dates)})
 
-        expirations = list(zip(
-            futures_df["instrument_id"].to_list(),
-            futures_df["expiration"].to_list(),
-        ))
+        expirations = list(
+            zip(
+                futures_df["instrument_id"].to_list(),
+                futures_df["expiration"].to_list(),
+                strict=False,
+            )
+        )
 
         dates: list[date] = []
         underlying_ids: list[int] = []
@@ -454,10 +469,12 @@ class InputDatabase:
             underlying_ids.append(front_id)
             d += timedelta(days=1)
 
-        return pl.DataFrame({
-            "date":          pl.Series(dates,           dtype=pl.Date),
-            "underlying_id": pl.Series(underlying_ids,  dtype=pl.Int64),
-        })
+        return pl.DataFrame(
+            {
+                "date": pl.Series(dates, dtype=pl.Date),
+                "underlying_id": pl.Series(underlying_ids, dtype=pl.Int64),
+            }
+        )
 
     def front_future_id(
         self,

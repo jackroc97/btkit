@@ -26,7 +26,9 @@ viz = [
 ]
 dev = [
     "pytest>=8.0",
+    "pytest-cov>=5.0",
     "ruff>=0.4",
+    "mypy>=1.10",
 ]
 
 [project.scripts]
@@ -36,9 +38,25 @@ btkit = "btkit.cli:app"
 where = ["."]
 include = ["btkit*"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I"]
+select = ["E", "F", "I", "N", "UP", "B", "W"]
+ignore = [
+    "B008",   # function call in default argument (Typer pattern)
+    "N803",   # argument name should be lowercase (numba kernels use F, K, T)
+    "N806",   # variable in function should be lowercase (same)
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+ignore_missing_imports = true
+warn_return_any = true
+warn_unused_ignores = true

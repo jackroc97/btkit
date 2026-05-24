@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import math
+from datetime import UTC
 from pathlib import Path
 
 import dash_ag_grid as dag
@@ -36,16 +37,16 @@ from btkit.db.output_db import OutputDatabase
 # Colour palette
 # ---------------------------------------------------------------------------
 
-_BLUE   = "#2563EB"
-_GREEN  = "#16A34A"
-_RED    = "#DC2626"
-_AMBER  = "#D97706"
-_GRAY   = "#6B7280"
-_BG     = "#F3F4F6"
-_CARD   = "#FFFFFF"
+_BLUE = "#2563EB"
+_GREEN = "#16A34A"
+_RED = "#DC2626"
+_AMBER = "#D97706"
+_GRAY = "#6B7280"
+_BG = "#F3F4F6"
+_CARD = "#FFFFFF"
 _BORDER = "#E5E7EB"
-_TEXT   = "#111827"
-_MUTED  = "#6B7280"
+_TEXT = "#111827"
+_MUTED = "#6B7280"
 _HEADER = "#111827"
 
 _ASSETS = str(Path(__file__).parent / "assets")
@@ -265,6 +266,7 @@ window.addEventListener('resize', () => {{
 # Layout helpers
 # ---------------------------------------------------------------------------
 
+
 def _card(children, style: dict | None = None, className: str = "") -> html.Div:
     base: dict = {
         "backgroundColor": _CARD,
@@ -279,32 +281,48 @@ def _card(children, style: dict | None = None, className: str = "") -> html.Div:
 
 
 def _section_label(text: str) -> html.P:
-    return html.P(text, style={
-        "fontSize": "11px", "fontWeight": "600",
-        "letterSpacing": "0.08em", "textTransform": "uppercase",
-        "color": _MUTED, "margin": "0 0 12px 0",
-    })
+    return html.P(
+        text,
+        style={
+            "fontSize": "11px",
+            "fontWeight": "600",
+            "letterSpacing": "0.08em",
+            "textTransform": "uppercase",
+            "color": _MUTED,
+            "margin": "0 0 12px 0",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
 # 1. Equity curve
 # ---------------------------------------------------------------------------
 
+
 def _build_equity_chart(equity_df: pl.DataFrame, initial_equity: float) -> go.Figure:
     if equity_df.is_empty():
         fig = go.Figure()
         fig.update_layout(
-            annotations=[dict(text="No trade data", xref="paper", yref="paper",
-                              x=0.5, y=0.5, showarrow=False,
-                              font=dict(size=14, color=_MUTED))],
-            paper_bgcolor="white", plot_bgcolor="white",
+            annotations=[
+                dict(
+                    text="No trade data",
+                    xref="paper",
+                    yref="paper",
+                    x=0.5,
+                    y=0.5,
+                    showarrow=False,
+                    font=dict(size=14, color=_MUTED),
+                )
+            ],
+            paper_bgcolor="white",
+            plot_bgcolor="white",
         )
         return fig
 
-    times    = equity_df["exit_time"].to_list()
+    times = equity_df["exit_time"].to_list()
     equities = equity_df["equity"].to_list()
-    times    = [times[0]] + times
-    pnls     = [e - initial_equity for e in [initial_equity] + equities]
+    times = [times[0]] + times
+    pnls = [e - initial_equity for e in [initial_equity] + equities]
 
     pnl_min = min(pnls)
     pnl_max = max(pnls)
@@ -319,44 +337,64 @@ def _build_equity_chart(equity_df: pl.DataFrame, initial_equity: float) -> go.Fi
         for i in range(1, len(ts)):
             t0, v0, t1, v1 = ts[i - 1], vs[i - 1], ts[i], vs[i]
             if v0 * v1 < 0:  # sign change — interpolate crossing point
-                alpha   = v0 / (v0 - v1)
+                alpha = v0 / (v0 - v1)
                 t_cross = t0 + (t1 - t0) * alpha
-                seg_t.append(t_cross); seg_v.append(0.0)
+                seg_t.append(t_cross)
+                seg_v.append(0.0)
                 segs.append((list(seg_t), list(seg_v)))
                 seg_t, seg_v = [t_cross, t1], [0.0, v1]
             else:
-                seg_t.append(t1); seg_v.append(v1)
+                seg_t.append(t1)
+                seg_v.append(v1)
         segs.append((seg_t, seg_v))
         return segs
 
     fig = go.Figure()
     first = True
     for seg_t, seg_v in _zero_segments(times, pnls):
-        is_pos   = any(v > 0 for v in seg_v)
-        clr      = _GREEN if is_pos else _RED
-        r, g, b  = int(clr[1:3], 16), int(clr[3:5], 16), int(clr[5:7], 16)
-        fig.add_trace(go.Scatter(
-            x=seg_t, y=seg_v,
-            mode="lines",
-            line=dict(color=clr, width=2),
-            fill="tozeroy",
-            fillcolor=f"rgba({r},{g},{b},0.12)",
-            hovertemplate="%{x|%Y-%m-%d %H:%M}<br><b>$%{y:+,.2f}</b><extra></extra>"
-                          if first else None,
-            showlegend=False,
-        ))
+        is_pos = any(v > 0 for v in seg_v)
+        clr = _GREEN if is_pos else _RED
+        r, g, b = int(clr[1:3], 16), int(clr[3:5], 16), int(clr[5:7], 16)
+        fig.add_trace(
+            go.Scatter(
+                x=seg_t,
+                y=seg_v,
+                mode="lines",
+                line=dict(color=clr, width=2),
+                fill="tozeroy",
+                fillcolor=f"rgba({r},{g},{b},0.12)",
+                hovertemplate="%{x|%Y-%m-%d %H:%M}<br><b>$%{y:+,.2f}</b><extra></extra>"
+                if first
+                else None,
+                showlegend=False,
+            )
+        )
         first = False
 
     fig.add_hline(y=0, line_dash="dot", line_color=_GRAY, line_width=1)
     fig.update_layout(
         margin=dict(l=8, r=8, t=8, b=8),
-        paper_bgcolor="white", plot_bgcolor="white",
-        xaxis=dict(showgrid=True, gridcolor="#F3F4F6",
-                   tickformat="%b %d", tickfont=dict(size=11), title=None, zeroline=False),
-        yaxis=dict(showgrid=True, gridcolor="#F3F4F6",
-                   tickformat="$+,.0f", tickfont=dict(size=11), title=None, zeroline=False,
-                   range=[pnl_min - padding, pnl_max + padding]),
-        showlegend=False, hovermode="x unified",
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        xaxis=dict(
+            showgrid=True,
+            gridcolor="#F3F4F6",
+            tickformat="%b %d",
+            tickfont=dict(size=11),
+            title=None,
+            zeroline=False,
+        ),
+        yaxis=dict(
+            showgrid=True,
+            gridcolor="#F3F4F6",
+            tickformat="$+,.0f",
+            tickfont=dict(size=11),
+            title=None,
+            zeroline=False,
+            range=[pnl_min - padding, pnl_max + padding],
+        ),
+        showlegend=False,
+        hovermode="x unified",
         font=dict(family="Inter, system-ui, sans-serif"),
     )
     return fig
@@ -365,6 +403,7 @@ def _build_equity_chart(equity_df: pl.DataFrame, initial_equity: float) -> go.Fi
 # ---------------------------------------------------------------------------
 # 2. Bootstrap equity curve fan
 # ---------------------------------------------------------------------------
+
 
 def _build_bootstrap_fig(
     net_pnls: list[float],
@@ -378,61 +417,90 @@ def _build_bootstrap_fig(
         return fig
 
     arr = np.array(net_pnls, dtype=float)
-    x   = list(range(n + 1))
+    x = list(range(n + 1))
 
-    rng     = np.random.default_rng(42)
+    rng = np.random.default_rng(42)
     samples = rng.choice(arr, size=(n_iter, n), replace=True)
-    cum     = np.hstack([np.zeros((n_iter, 1)), np.cumsum(samples, axis=1)])
+    cum = np.hstack([np.zeros((n_iter, 1)), np.cumsum(samples, axis=1)])
 
-    p5,  p10 = np.percentile(cum, 5,  axis=0), np.percentile(cum, 10, axis=0)
+    p5, p10 = np.percentile(cum, 5, axis=0), np.percentile(cum, 10, axis=0)
     p25, p50 = np.percentile(cum, 25, axis=0), np.percentile(cum, 50, axis=0)
     p75, p90 = np.percentile(cum, 75, axis=0), np.percentile(cum, 90, axis=0)
-    p95      = np.percentile(cum, 95, axis=0)
+    p95 = np.percentile(cum, 95, axis=0)
 
-    actual   = np.concatenate([[0], np.cumsum(arr)])
+    actual = np.concatenate([[0], np.cumsum(arr)])
     line_clr = _GREEN if actual[-1] >= 0 else _RED
 
     fig = go.Figure()
 
     def _band(lo, hi, fill_alpha, name):
-        fig.add_trace(go.Scatter(
-            x=x + x[::-1], y=list(hi) + list(lo[::-1]),
-            fill="toself", fillcolor=f"rgba(37,99,235,{fill_alpha})",
-            line=dict(width=0), name=name, showlegend=True, hoverinfo="none",
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=x + x[::-1],
+                y=list(hi) + list(lo[::-1]),
+                fill="toself",
+                fillcolor=f"rgba(37,99,235,{fill_alpha})",
+                line=dict(width=0),
+                name=name,
+                showlegend=True,
+                hoverinfo="none",
+            )
+        )
 
-    _band(p5,  p95, 0.06, "5th–95th %ile")
+    _band(p5, p95, 0.06, "5th–95th %ile")
     _band(p10, p90, 0.08, "10th–90th %ile")
     _band(p25, p75, 0.12, "25th–75th %ile")
 
-    fig.add_trace(go.Scatter(
-        x=x, y=list(p50),
-        mode="lines", line=dict(color=_BLUE, width=1.5, dash="dash"),
-        name="Median", showlegend=True, hoverinfo="none",
-    ))
-    fig.add_trace(go.Scatter(
-        x=x, y=list(actual),
-        mode="lines", line=dict(color=line_clr, width=2.5),
-        name="Actual", showlegend=True,
-        hovertemplate="Trade %{x}<br><b>$%{y:+,.2f}</b><extra></extra>",
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=list(p50),
+            mode="lines",
+            line=dict(color=_BLUE, width=1.5, dash="dash"),
+            name="Median",
+            showlegend=True,
+            hoverinfo="none",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=list(actual),
+            mode="lines",
+            line=dict(color=line_clr, width=2.5),
+            name="Actual",
+            showlegend=True,
+            hovertemplate="Trade %{x}<br><b>$%{y:+,.2f}</b><extra></extra>",
+        )
+    )
     fig.add_hline(y=0, line_dash="dot", line_color=_GRAY, line_width=1)
 
     all_vals = list(p5) + list(p95) + list(actual)
     y_min, y_max = min(all_vals), max(all_vals)
-    y_rng   = y_max - y_min
+    y_rng = y_max - y_min
     padding = max(y_rng * 0.1, abs(y_rng) * 0.05 + 1)
 
     fig.update_layout(
         margin=dict(l=8, r=8, t=8, b=8),
-        paper_bgcolor="white", plot_bgcolor="white",
-        xaxis=dict(showgrid=True, gridcolor="#F3F4F6",
-                   title=dict(text="Trade #", font=dict(size=11)), tickfont=dict(size=11)),
-        yaxis=dict(showgrid=True, gridcolor="#F3F4F6",
-                   tickformat="$+,.0f", tickfont=dict(size=11), title=None,
-                   range=[y_min - padding, y_max + padding]),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                    xanchor="left", x=0, font=dict(size=10)),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        xaxis=dict(
+            showgrid=True,
+            gridcolor="#F3F4F6",
+            title=dict(text="Trade #", font=dict(size=11)),
+            tickfont=dict(size=11),
+        ),
+        yaxis=dict(
+            showgrid=True,
+            gridcolor="#F3F4F6",
+            tickformat="$+,.0f",
+            tickfont=dict(size=11),
+            title=None,
+            range=[y_min - padding, y_max + padding],
+        ),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font=dict(size=10)
+        ),
         hovermode="x unified",
         font=dict(family="Inter, system-ui, sans-serif"),
     )
@@ -442,6 +510,7 @@ def _build_bootstrap_fig(
 # ---------------------------------------------------------------------------
 # 3. P&L histogram
 # ---------------------------------------------------------------------------
+
 
 def _build_pnl_histogram(net_pnls: list[float], mode: str) -> go.Figure:
     fig = go.Figure()
@@ -456,22 +525,36 @@ def _build_pnl_histogram(net_pnls: list[float], mode: str) -> go.Figure:
         data, color, name = net_pnls, _BLUE, "All Trades"
 
     if data:
-        fig.add_trace(go.Histogram(
-            x=data, nbinsx=20,
-            marker_color=color, opacity=0.85, name=name,
-        ))
+        fig.add_trace(
+            go.Histogram(
+                x=data,
+                nbinsx=20,
+                marker_color=color,
+                opacity=0.85,
+                name=name,
+            )
+        )
 
     fig.add_vline(x=0, line_dash="dot", line_color=_GRAY, line_width=1)
     fig.update_layout(
         margin=dict(l=8, r=8, t=8, b=8),
-        paper_bgcolor="white", plot_bgcolor="white",
-        xaxis=dict(showgrid=True, gridcolor="#F3F4F6",
-                   tickformat="$,.0f", tickfont=dict(size=11), title=None,
-                   autorange=True),
-        yaxis=dict(showgrid=True, gridcolor="#F3F4F6",
-                   tickfont=dict(size=11),
-                   title=dict(text="Count", font=dict(size=11)),
-                   autorange=True),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        xaxis=dict(
+            showgrid=True,
+            gridcolor="#F3F4F6",
+            tickformat="$,.0f",
+            tickfont=dict(size=11),
+            title=None,
+            autorange=True,
+        ),
+        yaxis=dict(
+            showgrid=True,
+            gridcolor="#F3F4F6",
+            tickfont=dict(size=11),
+            title=dict(text="Count", font=dict(size=11)),
+            autorange=True,
+        ),
         showlegend=False,
         font=dict(family="Inter, system-ui, sans-serif"),
     )
@@ -481,6 +564,7 @@ def _build_pnl_histogram(net_pnls: list[float], mode: str) -> go.Figure:
 # ---------------------------------------------------------------------------
 # 4. Metrics table
 # ---------------------------------------------------------------------------
+
 
 def _fmt(value: float, kind: str) -> str:
     if not math.isfinite(value):
@@ -498,47 +582,108 @@ def _fmt(value: float, kind: str) -> str:
 
 def _build_metrics_table(m: dict) -> dag.AgGrid:
     rows = [
-        {"_g": "trade",   "metric": "Net Profit",      "value": _fmt(m["net_profit"],          "$"), "_pnl": m["net_profit"]},
-        {"_g": "trade",   "metric": "Total Trades",    "value": _fmt(m["total_trades"],         "n"), "_pnl": None},
-        {"_g": "trade",   "metric": "Win Rate",        "value": _fmt(m["percent_profitable"],   "%"), "_pnl": None},
-        {"_g": "trade",   "metric": "Profit Factor",   "value": _fmt(m["profit_factor"],        "x"), "_pnl": None},
-        {"_g": "trade",   "metric": "Avg Win",         "value": _fmt(m["avg_win"],              "$"), "_pnl": None},
-        {"_g": "trade",   "metric": "Avg Loss",        "value": _fmt(m["avg_loss"],             "$"), "_pnl": None},
-        {"_g": "trade",   "metric": "Median P&L",      "value": _fmt(m["median_pnl"],          "$"), "_pnl": None},
-        {"_g": "risk",    "metric": "Max Drawdown",    "value": _fmt(m["max_drawdown"],         "$"), "_pnl": None},
-        {"_g": "risk",    "metric": "Max Drawdown %",  "value": _fmt(m["max_drawdown_pct"],     "%"), "_pnl": None},
-        {"_g": "risk",    "metric": "CAGR",            "value": _fmt(m["cagr"],                 "%"), "_pnl": None},
-        {"_g": "risk",    "metric": "Sharpe Ratio",    "value": _fmt(m["sharpe_ratio"],         "x"), "_pnl": None},
-        {"_g": "risk",    "metric": "Sortino Ratio",   "value": _fmt(m["sortino_ratio"],        "x"), "_pnl": None},
-        {"_g": "risk",    "metric": "Calmar Ratio",    "value": _fmt(m["calmar_ratio"],         "x"), "_pnl": None},
-        {"_g": "quality", "metric": "Premium Capture", "value": _fmt(m["premium_capture_rate"], "%"), "_pnl": None},
-        {"_g": "quality", "metric": "Avg MAE",         "value": _fmt(m["avg_mae"],              "$"), "_pnl": None},
-        {"_g": "quality", "metric": "Worst MAE",       "value": _fmt(m["worst_mae"],            "$"), "_pnl": None},
+        {
+            "_g": "trade",
+            "metric": "Net Profit",
+            "value": _fmt(m["net_profit"], "$"),
+            "_pnl": m["net_profit"],
+        },
+        {
+            "_g": "trade",
+            "metric": "Total Trades",
+            "value": _fmt(m["total_trades"], "n"),
+            "_pnl": None,
+        },
+        {
+            "_g": "trade",
+            "metric": "Win Rate",
+            "value": _fmt(m["percent_profitable"], "%"),
+            "_pnl": None,
+        },
+        {
+            "_g": "trade",
+            "metric": "Profit Factor",
+            "value": _fmt(m["profit_factor"], "x"),
+            "_pnl": None,
+        },
+        {"_g": "trade", "metric": "Avg Win", "value": _fmt(m["avg_win"], "$"), "_pnl": None},
+        {"_g": "trade", "metric": "Avg Loss", "value": _fmt(m["avg_loss"], "$"), "_pnl": None},
+        {"_g": "trade", "metric": "Median P&L", "value": _fmt(m["median_pnl"], "$"), "_pnl": None},
+        {
+            "_g": "risk",
+            "metric": "Max Drawdown",
+            "value": _fmt(m["max_drawdown"], "$"),
+            "_pnl": None,
+        },
+        {
+            "_g": "risk",
+            "metric": "Max Drawdown %",
+            "value": _fmt(m["max_drawdown_pct"], "%"),
+            "_pnl": None,
+        },
+        {"_g": "risk", "metric": "CAGR", "value": _fmt(m["cagr"], "%"), "_pnl": None},
+        {
+            "_g": "risk",
+            "metric": "Sharpe Ratio",
+            "value": _fmt(m["sharpe_ratio"], "x"),
+            "_pnl": None,
+        },
+        {
+            "_g": "risk",
+            "metric": "Sortino Ratio",
+            "value": _fmt(m["sortino_ratio"], "x"),
+            "_pnl": None,
+        },
+        {
+            "_g": "risk",
+            "metric": "Calmar Ratio",
+            "value": _fmt(m["calmar_ratio"], "x"),
+            "_pnl": None,
+        },
+        {
+            "_g": "quality",
+            "metric": "Premium Capture",
+            "value": _fmt(m["premium_capture_rate"], "%"),
+            "_pnl": None,
+        },
+        {"_g": "quality", "metric": "Avg MAE", "value": _fmt(m["avg_mae"], "$"), "_pnl": None},
+        {"_g": "quality", "metric": "Worst MAE", "value": _fmt(m["worst_mae"], "$"), "_pnl": None},
     ]
 
     return dag.AgGrid(
         rowData=rows,
         columnDefs=[
             {
-                "field": "metric", "headerName": "", "flex": 1,
+                "field": "metric",
+                "headerName": "",
+                "flex": 1,
                 "cellStyle": {"color": _MUTED, "fontSize": "13px"},
             },
             {
-                "field": "value", "headerName": "", "width": 110,
+                "field": "value",
+                "headerName": "",
+                "width": 110,
                 "cellStyle": {
-                    "textAlign": "right", "fontWeight": "600", "fontSize": "13px",
+                    "textAlign": "right",
+                    "fontWeight": "600",
+                    "fontSize": "13px",
                     "styleConditions": [
-                        {"condition": "params.data._pnl !== null && params.data._pnl >= 0",
-                         "style": {"color": _GREEN}},
-                        {"condition": "params.data._pnl !== null && params.data._pnl < 0",
-                         "style": {"color": _RED}},
+                        {
+                            "condition": "params.data._pnl !== null && params.data._pnl >= 0",
+                            "style": {"color": _GREEN},
+                        },
+                        {
+                            "condition": "params.data._pnl !== null && params.data._pnl < 0",
+                            "style": {"color": _RED},
+                        },
                     ],
                 },
             },
         ],
         defaultColDef={"sortable": False, "filter": False, "resizable": False},
         dashGridOptions={
-            "headerHeight": 0, "rowHeight": 28,
+            "headerHeight": 0,
+            "rowHeight": 28,
             "suppressMovableColumns": True,
         },
         style={"height": f"{len(rows) * 28 + 2}px"},
@@ -548,6 +693,7 @@ def _build_metrics_table(m: dict) -> dag.AgGrid:
 # ---------------------------------------------------------------------------
 # 5. Trade list
 # ---------------------------------------------------------------------------
+
 
 def _build_trade_table(
     positions: pl.DataFrame,
@@ -563,83 +709,125 @@ def _build_trade_table(
     def _ts(dt) -> str:
         return dt.strftime("%m-%d %H:%M") if dt else "—"
 
-    leg_strings        = leg_strings or {}
+    leg_strings = leg_strings or {}
     underlying_symbols = underlying_symbols or {}
     rows = []
     for i, r in enumerate(positions.to_dicts(), 1):
-        ot, et   = r.get("open_time"), r.get("exit_time")
-        dur_min  = (et - ot).total_seconds() / 60 if ot and et else None
-        pnl      = r.get("net_pnl") or 0.0
-        reason   = r.get("exit_reason", "")
-        pid      = r["id"]
-        rows.append({
-            "position_id": pid,
-            "#":           i,
-            "trade":       r.get("trade_name", ""),
-            "underlying":  underlying_symbols.get(pid, ""),
-            "contracts":   leg_strings.get(pid, ""),
-            "open":        _ts(ot),
-            "exit":        _ts(et),
-            "duration":    _dur(dur_min),
-            "reason":      reason,
-            "open_pt":     round(r.get("open_mark", 0.0), 2),
-            "exit_pt":     round(r.get("exit_mark",  0.0), 2),
-            "pnl":         round(pnl, 2),
-            "_reason":     reason,
-        })
+        ot, et = r.get("open_time"), r.get("exit_time")
+        dur_min = (et - ot).total_seconds() / 60 if ot and et else None
+        pnl = r.get("net_pnl") or 0.0
+        reason = r.get("exit_reason", "")
+        pid = r["id"]
+        rows.append(
+            {
+                "position_id": pid,
+                "#": i,
+                "trade": r.get("trade_name", ""),
+                "underlying": underlying_symbols.get(pid, ""),
+                "contracts": leg_strings.get(pid, ""),
+                "open": _ts(ot),
+                "exit": _ts(et),
+                "duration": _dur(dur_min),
+                "reason": reason,
+                "open_pt": round(r.get("open_mark", 0.0), 2),
+                "exit_pt": round(r.get("exit_mark", 0.0), 2),
+                "pnl": round(pnl, 2),
+                "_reason": reason,
+            }
+        )
 
     reason_style = {
         "styleConditions": [
             {"condition": 'params.value === "take_profit"', "style": {"color": _GREEN}},
-            {"condition": 'params.value === "stop_loss"',   "style": {"color": _RED}},
-            {"condition": 'params.value === "expiry"',      "style": {"color": _AMBER}},
+            {"condition": 'params.value === "stop_loss"', "style": {"color": _RED}},
+            {"condition": 'params.value === "expiry"', "style": {"color": _AMBER}},
         ]
     }
     pnl_style = {
         "textAlign": "right",
         "styleConditions": [
             {"condition": "params.value > 0", "style": {"color": _GREEN, "fontWeight": "600"}},
-            {"condition": "params.value < 0", "style": {"color": _RED,   "fontWeight": "600"}},
+            {"condition": "params.value < 0", "style": {"color": _RED, "fontWeight": "600"}},
         ],
     }
 
     return dag.AgGrid(
         rowData=rows,
         columnDefs=[
-            {"field": "position_id", "headerName": "", "width": 46,
-             "cellRenderer": "ChartLink", "sortable": False, "filter": False,
-             "pinned": "left", "suppressSizeToFit": True},
-            {"field": "#",         "headerName": "#",         "width": 52,
-             "cellStyle": {"color": _MUTED, "textAlign": "center"},
-             "suppressSizeToFit": True},
-            {"field": "trade",      "headerName": "Trade",      "minWidth": 90},
-            {"field": "underlying", "headerName": "Underlying", "minWidth": 80,
-             "cellStyle": {"fontFamily": "monospace", "fontSize": "12px"}},
-            {"field": "contracts", "headerName": "Contracts", "minWidth": 200,
-             "cellStyle": {"fontFamily": "monospace", "fontSize": "12px",
-                           "color": _MUTED, "letterSpacing": "0.02em"}},
-            {"field": "open",      "headerName": "Open",      "minWidth": 105},
-            {"field": "exit",      "headerName": "Exit",      "minWidth": 105},
-            {"field": "duration",  "headerName": "Dur.",      "minWidth": 70,
-             "cellStyle": {"textAlign": "center"}},
-            {"field": "reason",    "headerName": "Reason",    "minWidth": 100,
-             "cellStyle": reason_style},
-            {"field": "open_pt",   "headerName": "Open Pt",   "minWidth": 80,
-             "cellStyle": {"textAlign": "right"},
-             "valueFormatter": {"function": "d3.format(',.2f')(params.value)"}},
-            {"field": "exit_pt",   "headerName": "Exit Pt",   "minWidth": 80,
-             "cellStyle": {"textAlign": "right"},
-             "valueFormatter": {"function": "d3.format(',.2f')(params.value)"}},
-            {"field": "pnl",       "headerName": "Net P&L",   "minWidth": 95,
-             "cellStyle": pnl_style,
-             "valueFormatter": {"function": "d3.format('$,.2f')(params.value)"},
-             "sort": "asc"},
+            {
+                "field": "position_id",
+                "headerName": "",
+                "width": 46,
+                "cellRenderer": "ChartLink",
+                "sortable": False,
+                "filter": False,
+                "pinned": "left",
+                "suppressSizeToFit": True,
+            },
+            {
+                "field": "#",
+                "headerName": "#",
+                "width": 52,
+                "cellStyle": {"color": _MUTED, "textAlign": "center"},
+                "suppressSizeToFit": True,
+            },
+            {"field": "trade", "headerName": "Trade", "minWidth": 90},
+            {
+                "field": "underlying",
+                "headerName": "Underlying",
+                "minWidth": 80,
+                "cellStyle": {"fontFamily": "monospace", "fontSize": "12px"},
+            },
+            {
+                "field": "contracts",
+                "headerName": "Contracts",
+                "minWidth": 200,
+                "cellStyle": {
+                    "fontFamily": "monospace",
+                    "fontSize": "12px",
+                    "color": _MUTED,
+                    "letterSpacing": "0.02em",
+                },
+            },
+            {"field": "open", "headerName": "Open", "minWidth": 105},
+            {"field": "exit", "headerName": "Exit", "minWidth": 105},
+            {
+                "field": "duration",
+                "headerName": "Dur.",
+                "minWidth": 70,
+                "cellStyle": {"textAlign": "center"},
+            },
+            {"field": "reason", "headerName": "Reason", "minWidth": 100, "cellStyle": reason_style},
+            {
+                "field": "open_pt",
+                "headerName": "Open Pt",
+                "minWidth": 80,
+                "cellStyle": {"textAlign": "right"},
+                "valueFormatter": {"function": "d3.format(',.2f')(params.value)"},
+            },
+            {
+                "field": "exit_pt",
+                "headerName": "Exit Pt",
+                "minWidth": 80,
+                "cellStyle": {"textAlign": "right"},
+                "valueFormatter": {"function": "d3.format(',.2f')(params.value)"},
+            },
+            {
+                "field": "pnl",
+                "headerName": "Net P&L",
+                "minWidth": 95,
+                "cellStyle": pnl_style,
+                "valueFormatter": {"function": "d3.format('$,.2f')(params.value)"},
+                "sort": "asc",
+            },
         ],
         defaultColDef={"sortable": True, "filter": True, "resizable": True, "flex": 1},
         dashGridOptions={
-            "rowHeight": 32, "headerHeight": 36,
+            "rowHeight": 32,
+            "headerHeight": 36,
             "animateRows": True,
-            "pagination": True, "paginationPageSize": 20,
+            "pagination": True,
+            "paginationPageSize": 20,
             "suppressCellFocus": True,
         },
         style={"height": "520px"},
@@ -651,12 +839,12 @@ def _build_trade_table(
 # Trade chart page (Lightweight Charts JS, served via Flask route)
 # ---------------------------------------------------------------------------
 
+
 def _build_chart_html(
     position_id: int,
     output_db_path: str,
     input_db_path: str | None,
 ) -> str:
-    from datetime import timezone
     from itertools import groupby as _groupby
 
     with OutputDatabase(output_db_path) as odb:
@@ -683,6 +871,7 @@ def _build_chart_html(
 
     # Parse strategy TP/SL params
     import json as _json
+
     tp_pct: float | None = None
     tp_abs: float | None = None
     sl_pts: float | None = None
@@ -698,28 +887,31 @@ def _build_chart_html(
         except Exception:
             pass
 
-    open_str  = open_time.strftime("%m-%d %H:%M") if open_time  else "—"
-    exit_str  = exit_time.strftime("%m-%d %H:%M") if exit_time  else "—"
+    open_str = open_time.strftime("%m-%d %H:%M") if open_time else "—"
+    exit_str = exit_time.strftime("%m-%d %H:%M") if exit_time else "—"
     pnl_color = _GREEN if (net_pnl or 0) >= 0 else _RED
-    pnl_str   = f"${net_pnl:+,.2f}" if net_pnl is not None else "—"
+    pnl_str = f"${net_pnl:+,.2f}" if net_pnl is not None else "—"
 
-    candle_json       = "[]"
-    volume_json       = "[]"
-    markers_json      = "[]"
-    be_lines_json     = "[]"
-    pnl_json          = "[]"
-    after_exit_json   = "[]"
-    tp_sl_json        = "[]"
+    candle_json = "[]"
+    volume_json = "[]"
+    markers_json = "[]"
+    be_lines_json = "[]"
+    pnl_json = "[]"
+    after_exit_json = "[]"
+    tp_sl_json = "[]"
     strike_lines_json = "[]"
-    open_ts        = int(open_time.timestamp()) if open_time else 0
-    exit_ts        = int(exit_time.timestamp()) if exit_time else 0
+    open_ts = int(open_time.timestamp()) if open_time else 0
+    exit_ts = int(exit_time.timestamp()) if exit_time else 0
 
     if input_db_path and open_time and exit_time:
         import duckdb
-        day_start = open_time.replace(hour=0, minute=0, second=0, microsecond=0,
-                                      tzinfo=timezone.utc)
-        day_end   = exit_time.replace(hour=23, minute=59, second=59, microsecond=0,
-                                      tzinfo=timezone.utc)
+
+        day_start = open_time.replace(
+            hour=0, minute=0, second=0, microsecond=0, tzinfo=UTC
+        )
+        day_end = exit_time.replace(
+            hour=23, minute=59, second=59, microsecond=0, tzinfo=UTC
+        )
 
         con = duckdb.connect(input_db_path, read_only=True)
         try:
@@ -746,27 +938,36 @@ def _build_chart_html(
                 ub_rows = []
 
             if ub_rows:
-                candle_json = json.dumps([
-                    {"time": int(r[0].timestamp()),
-                     "open": r[1], "high": r[2], "low": r[3], "close": r[4]}
-                    for r in ub_rows
-                ])
-                volume_json = json.dumps([
-                    {"time": int(r[0].timestamp()),
-                     "value": r[5] or 0,
-                     "color": "#16A34A50" if r[4] >= r[1] else "#DC262650"}
-                    for r in ub_rows
-                ])
+                candle_json = json.dumps(
+                    [
+                        {
+                            "time": int(r[0].timestamp()),
+                            "open": r[1],
+                            "high": r[2],
+                            "low": r[3],
+                            "close": r[4],
+                        }
+                        for r in ub_rows
+                    ]
+                )
+                volume_json = json.dumps(
+                    [
+                        {
+                            "time": int(r[0].timestamp()),
+                            "value": r[5] or 0,
+                            "color": "#16A34A50" if r[4] >= r[1] else "#DC262650",
+                        }
+                        for r in ub_rows
+                    ]
+                )
 
             # Breakeven price lines — use actual leg credit sum (not open_mark,
             # which may only reflect one sub-spread for combined positions)
             if legs:
-                leg_credit = sum(
-                    (l[4] if l[1][0] == "S" else -l[4]) for l in legs
-                )
-                credit       = abs(leg_credit)
-                call_strikes = [l[6] for l in legs if l[5] == "C" and l[6] is not None]
-                put_strikes  = [l[6] for l in legs if l[5] == "P" and l[6] is not None]
+                leg_credit = sum((lg[4] if lg[1][0] == "S" else -lg[4]) for lg in legs)
+                credit = abs(leg_credit)
+                call_strikes = [lg[6] for lg in legs if lg[5] == "C" and lg[6] is not None]
+                put_strikes = [lg[6] for lg in legs if lg[5] == "P" and lg[6] is not None]
 
                 def _sfmt(v: float) -> str:
                     return str(int(v)) if v == int(v) else f"{v:.1f}"
@@ -774,20 +975,22 @@ def _build_chart_html(
                 be_lines = []
                 if call_strikes:
                     c_str = min(call_strikes)
-                    c_be  = round(c_str + credit, 2)
-                    be_lines.append({"price": c_be,
-                                     "label": f"C-BE {_sfmt(c_str)}+{credit:.1f}={_sfmt(c_be)}"})
+                    c_be = round(c_str + credit, 2)
+                    be_lines.append(
+                        {"price": c_be, "label": f"C-BE {_sfmt(c_str)}+{credit:.1f}={_sfmt(c_be)}"}
+                    )
                 if put_strikes:
                     p_str = max(put_strikes)
-                    p_be  = round(p_str - credit, 2)
-                    be_lines.append({"price": p_be,
-                                     "label": f"P-BE {_sfmt(p_str)}-{credit:.1f}={_sfmt(p_be)}"})
+                    p_be = round(p_str - credit, 2)
+                    be_lines.append(
+                        {"price": p_be, "label": f"P-BE {_sfmt(p_str)}-{credit:.1f}={_sfmt(p_be)}"}
+                    )
                 be_lines_json = json.dumps(be_lines)
 
                 # Individual strike price reference lines (one per leg)
                 sl_items = []
-                for l in legs:
-                    rv, sk, act = l[5], l[6], l[1]
+                for lg in legs:
+                    rv, sk, act = lg[5], lg[6], lg[1]
                     if sk is None or rv is None:
                         continue
                     pfx = "S" if act and act[0] == "S" else "L"
@@ -795,27 +998,24 @@ def _build_chart_html(
                 strike_lines_json = json.dumps(sl_items)
 
                 # TP/SL dollar levels for the running P&L pane
-                first_qty  = legs[0][2]
+                first_qty = legs[0][2]
                 first_mult = legs[0][3]
-                notional   = first_qty * first_mult
+                notional = first_qty * first_mult
                 tp_sl = []
                 if tp_pct is not None:
                     tp_dollars = leg_credit * float(tp_pct) * notional
-                    tp_sl.append({"value": round(tp_dollars, 2), "label": "TP",
-                                  "color": _GREEN})
+                    tp_sl.append({"value": round(tp_dollars, 2), "label": "TP", "color": _GREEN})
                 elif tp_abs is not None:
                     tp_dollars = float(tp_abs) * notional
-                    tp_sl.append({"value": round(tp_dollars, 2), "label": "TP",
-                                  "color": _GREEN})
+                    tp_sl.append({"value": round(tp_dollars, 2), "label": "TP", "color": _GREEN})
                 if sl_pts is not None:
                     sl_dollars = -float(sl_pts) * notional
-                    tp_sl.append({"value": round(sl_dollars, 2), "label": "SL",
-                                  "color": _RED})
+                    tp_sl.append({"value": round(sl_dollars, 2), "label": "SL", "color": _RED})
                 tp_sl_json = json.dumps(tp_sl)
 
             # Running P&L from option bars (forward-fill prices across legs)
             if legs and open_time and exit_time:
-                leg_ids = [l[0] for l in legs]
+                leg_ids = [lg[0] for lg in legs]
                 ph = ", ".join(["?" for _ in leg_ids])
                 opt_rows = con.execute(
                     f"SELECT ts_event, instrument_id, close FROM option_bars "
@@ -826,11 +1026,11 @@ def _build_chart_html(
                 ).fetchall()
 
                 # inst_id -> (action_prefix, quantity, multiplier, open_price)
-                leg_map = {l[0]: (l[1][0], l[2], l[3], l[4]) for l in legs}
+                leg_map = {lg[0]: (lg[1][0], lg[2], lg[3], lg[4]) for lg in legs}
 
                 current_prices: dict = {}
-                last_ts   = int(open_time.timestamp())
-                pnl_pts   = [{"time": last_ts, "value": 0.0}]
+                last_ts = int(open_time.timestamp())
+                pnl_pts = [{"time": last_ts, "value": 0.0}]
 
                 for ts, grp in _groupby(opt_rows, key=lambda x: x[0]):
                     for _, inst_id, close in grp:
@@ -889,12 +1089,20 @@ def _build_chart_html(
         reason_colors = {"take_profit": _GREEN, "stop_loss": _RED}
         m_color = reason_colors.get(exit_reason or "", _AMBER)
         markers = [
-            {"time": int(open_time.timestamp()), "position": "belowBar",
-             "color": _GREEN, "shape": "arrowUp",
-             "text": f"Entry {open_mark:.2f}"},
-            {"time": int(exit_time.timestamp()), "position": "aboveBar",
-             "color": m_color, "shape": "arrowDown",
-             "text": f"Exit {exit_mark:.2f} – {exit_reason}"},
+            {
+                "time": int(open_time.timestamp()),
+                "position": "belowBar",
+                "color": _GREEN,
+                "shape": "arrowUp",
+                "text": f"Entry {open_mark:.2f}",
+            },
+            {
+                "time": int(exit_time.timestamp()),
+                "position": "aboveBar",
+                "color": m_color,
+                "shape": "arrowDown",
+                "text": f"Exit {exit_mark:.2f} – {exit_reason}",
+            },
         ]
         markers_json = json.dumps(markers)
 
@@ -922,6 +1130,7 @@ def _build_chart_html(
 # Public API
 # ---------------------------------------------------------------------------
 
+
 def create_app(
     output_db_path: str,
     input_db_path: str | None = None,
@@ -929,12 +1138,12 @@ def create_app(
 ) -> Dash:
     """Build and return the Dash app. All data loaded once at startup."""
     with OutputDatabase(output_db_path) as odb:
-        pp             = PostProcessor(odb, backtest_id=backtest_id)
-        bid            = pp._resolve_backtest_id()
-        m              = pp.metrics()
-        equity_df      = pp.equity_curve()
+        pp = PostProcessor(odb, backtest_id=backtest_id)
+        bid = pp._resolve_backtest_id()
+        m = pp.metrics()
+        equity_df = pp.equity_curve()
         initial_equity = pp._load_initial_equity()
-        net_pnls       = pp._load_positions()["net_pnl"].to_list()
+        net_pnls = pp._load_positions()["net_pnl"].to_list()
 
         # Load positions with DB id for chart links
         positions = odb._con.execute(
@@ -956,6 +1165,7 @@ def create_app(
 
         # Group into {position_id: "P6940 4/22 · P6890 4/22 · C7050 4/22 · ..."}
         from collections import defaultdict as _dd
+
         leg_strings: dict[int, str] = {}
         grouped: dict[int, list] = _dd(list)
         for pid, right, strike, expiry, action in leg_rows:
@@ -973,7 +1183,7 @@ def create_app(
             "SELECT strategy_name, created_at FROM backtest WHERE id = ?", [bid]
         ).fetchone()
         strategy_name = meta[0] if meta else "—"
-        created_at    = meta[1].strftime("%Y-%m-%d %H:%M UTC") if (meta and meta[1]) else ""
+        created_at = meta[1].strftime("%Y-%m-%d %H:%M UTC") if (meta and meta[1]) else ""
 
         # Collect position_id → instrument_id pairs for underlying lookup
         pos_leg_map = odb._con.execute(
@@ -987,6 +1197,7 @@ def create_app(
     underlying_symbols: dict[int, str] = {}
     if input_db_path and pos_leg_map:
         import duckdb as _ddb
+
         inst_ids = list({r[1] for r in pos_leg_map})
         _icon = _ddb.connect(input_db_path, read_only=True)
         try:
@@ -1005,10 +1216,10 @@ def create_app(
             if iid in iid_to_sym and pid not in underlying_symbols:
                 underlying_symbols[pid] = iid_to_sym[iid]
 
-    equity_fig   = _build_equity_chart(equity_df, initial_equity)
-    boot_fig     = _build_bootstrap_fig(net_pnls, initial_equity)
-    metrics_tbl  = _build_metrics_table(m)
-    trade_tbl    = _build_trade_table(positions, leg_strings, underlying_symbols)
+    equity_fig = _build_equity_chart(equity_df, initial_equity)
+    boot_fig = _build_bootstrap_fig(net_pnls, initial_equity)
+    metrics_tbl = _build_metrics_table(m)
+    trade_tbl = _build_trade_table(positions, leg_strings, underlying_symbols)
 
     app = Dash(
         __name__,
@@ -1026,111 +1237,149 @@ def create_app(
 
     # ── Layout ───────────────────────────────────────────────────────────
     app.layout = html.Div(
-        style={"fontFamily": "Inter, system-ui, sans-serif",
-               "backgroundColor": _BG, "minHeight": "100vh"},
+        style={
+            "fontFamily": "Inter, system-ui, sans-serif",
+            "backgroundColor": _BG,
+            "minHeight": "100vh",
+        },
         children=[
             # Header
             html.Div(
                 className="btkit-header",
-                style={"backgroundColor": _HEADER, "color": "white",
-                       "padding": "13px 24px", "display": "flex",
-                       "alignItems": "center", "gap": "12px"},
+                style={
+                    "backgroundColor": _HEADER,
+                    "color": "white",
+                    "padding": "13px 24px",
+                    "display": "flex",
+                    "alignItems": "center",
+                    "gap": "12px",
+                },
                 children=[
-                    html.Span("btkit", style={"fontWeight": "700",
-                              "fontSize": "17px", "letterSpacing": "0.04em"}),
+                    html.Span(
+                        "btkit",
+                        style={"fontWeight": "700", "fontSize": "17px", "letterSpacing": "0.04em"},
+                    ),
                     html.Span("·", style={"color": "#4B5563", "fontSize": "18px"}),
                     html.Span(strategy_name, style={"fontSize": "14px", "color": "#D1D5DB"}),
                     html.Div(
                         className="btkit-header-meta",
                         style={"marginLeft": "auto", "display": "flex", "gap": "16px"},
                         children=[
-                            html.Span(f"run #{bid}",  style={"fontSize": "12px", "color": "#9CA3AF"}),
-                            html.Span(created_at,     style={"fontSize": "12px", "color": "#9CA3AF"}),
+                            html.Span(
+                                f"run #{bid}", style={"fontSize": "12px", "color": "#9CA3AF"}
+                            ),
+                            html.Span(created_at, style={"fontSize": "12px", "color": "#9CA3AF"}),
                         ],
                     ),
                 ],
             ),
-
             # Body
             html.Div(
                 className="btkit-body",
                 style={"padding": "20px", "maxWidth": "1600px", "margin": "0 auto"},
                 children=[
-
                     # Row 1: Equity curve + Bootstrap fan
                     html.Div(
                         className="btkit-row",
                         style={"display": "flex", "gap": "16px", "marginBottom": "16px"},
                         children=[
-                            _card([
-                                _section_label("Equity Curve"),
-                                dcc.Graph(figure=equity_fig,
-                                          config={"displayModeBar": False},
-                                          className="btkit-chart-equity",
-                                          style={"height": "280px"}),
-                            ], style={"flex": "1"}),
-
-                            _card([
-                                _section_label(
-                                    f"Bootstrap Equity Fan  ·  1 000 resamples  ·  "
-                                    f"{len(net_pnls)} trades"
-                                ),
-                                dcc.Graph(figure=boot_fig,
-                                          config={"displayModeBar": False},
-                                          className="btkit-chart-bootstrap",
-                                          style={"height": "280px"}),
-                            ], style={"flex": "1"}),
+                            _card(
+                                [
+                                    _section_label("Equity Curve"),
+                                    dcc.Graph(
+                                        figure=equity_fig,
+                                        config={"displayModeBar": False},
+                                        className="btkit-chart-equity",
+                                        style={"height": "280px"},
+                                    ),
+                                ],
+                                style={"flex": "1"},
+                            ),
+                            _card(
+                                [
+                                    _section_label(
+                                        f"Bootstrap Equity Fan  ·  1 000 resamples  ·  "
+                                        f"{len(net_pnls)} trades"
+                                    ),
+                                    dcc.Graph(
+                                        figure=boot_fig,
+                                        config={"displayModeBar": False},
+                                        className="btkit-chart-bootstrap",
+                                        style={"height": "280px"},
+                                    ),
+                                ],
+                                style={"flex": "1"},
+                            ),
                         ],
                     ),
-
                     # Row 2: P&L Histogram (full width)
-                    _card([
-                        html.Div(
-                            className="btkit-hist-controls",
-                            style={"display": "flex", "alignItems": "center",
-                                   "marginBottom": "12px"},
-                            children=[
-                                _section_label("P&L Distribution"),
-                                dcc.RadioItems(
-                                    id="hist-mode",
-                                    options=[
-                                        {"label": " All Trades", "value": "all"},
-                                        {"label": " Winners",    "value": "winners"},
-                                        {"label": " Losers",     "value": "losers"},
-                                    ],
-                                    value="all",
-                                    inline=True,
-                                    style={"marginLeft": "auto", "fontSize": "12px",
-                                           "color": _MUTED, "gap": "14px"},
-                                    inputStyle={"marginRight": "4px"},
-                                ),
-                            ],
-                        ),
-                        dcc.Graph(id="pnl-hist", config={"displayModeBar": False},
-                                  className="btkit-chart-histogram",
-                                  style={"height": "220px"}),
-                    ], style={"marginBottom": "16px"}),
-
+                    _card(
+                        [
+                            html.Div(
+                                className="btkit-hist-controls",
+                                style={
+                                    "display": "flex",
+                                    "alignItems": "center",
+                                    "marginBottom": "12px",
+                                },
+                                children=[
+                                    _section_label("P&L Distribution"),
+                                    dcc.RadioItems(
+                                        id="hist-mode",
+                                        options=[
+                                            {"label": " All Trades", "value": "all"},
+                                            {"label": " Winners", "value": "winners"},
+                                            {"label": " Losers", "value": "losers"},
+                                        ],
+                                        value="all",
+                                        inline=True,
+                                        style={
+                                            "marginLeft": "auto",
+                                            "fontSize": "12px",
+                                            "color": _MUTED,
+                                            "gap": "14px",
+                                        },
+                                        inputStyle={"marginRight": "4px"},
+                                    ),
+                                ],
+                            ),
+                            dcc.Graph(
+                                id="pnl-hist",
+                                config={"displayModeBar": False},
+                                className="btkit-chart-histogram",
+                                style={"height": "220px"},
+                            ),
+                        ],
+                        style={"marginBottom": "16px"},
+                    ),
                     # Row 3: Metrics + Trade list
                     html.Div(
                         className="btkit-row",
-                        style={"display": "flex", "gap": "16px",
-                               "alignItems": "flex-start"},
+                        style={"display": "flex", "gap": "16px", "alignItems": "flex-start"},
                         children=[
-                            _card([
-                                _section_label("Strategy Metrics"),
-                                metrics_tbl,
-                            ], style={"width": "290px", "flexShrink": "0"},
-                               className="btkit-metrics-grid"),
-
-                            _card([
-                                _section_label(
-                                    f"All Trades  ·  {m['total_trades']} positions"
-                                    + ("  ·  📈 click row chart icon to open trade chart" if input_db_path else "")
-                                ),
-                                trade_tbl,
-                            ], style={"flex": "1", "minWidth": "0"},
-                               className="btkit-trade-grid"),
+                            _card(
+                                [
+                                    _section_label("Strategy Metrics"),
+                                    metrics_tbl,
+                                ],
+                                style={"width": "290px", "flexShrink": "0"},
+                                className="btkit-metrics-grid",
+                            ),
+                            _card(
+                                [
+                                    _section_label(
+                                        f"All Trades  ·  {m['total_trades']} positions"
+                                        + (
+                                            "  ·  📈 click row chart icon to open trade chart"
+                                            if input_db_path
+                                            else ""
+                                        )
+                                    ),
+                                    trade_tbl,
+                                ],
+                                style={"flex": "1", "minWidth": "0"},
+                                className="btkit-trade-grid",
+                            ),
                         ],
                     ),
                 ],
@@ -1154,7 +1403,6 @@ def run_dashboard(
     debug: bool = False,
 ) -> None:
     """Build the Dash app and start the development server."""
-    app = create_app(output_db_path, input_db_path=input_db_path,
-                     backtest_id=backtest_id)
+    app = create_app(output_db_path, input_db_path=input_db_path, backtest_id=backtest_id)
     print(f"  Dashboard: http://localhost:{port}")
     app.run(port=port, debug=debug)

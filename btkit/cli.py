@@ -23,12 +23,12 @@ from pathlib import Path
 
 import typer
 
+from btkit.analysis.metrics import PostProcessor
 from btkit.backtest.engine import BacktestEngine
 from btkit.db.input_db import InputDatabase
 from btkit.db.output_db import OutputDatabase
 from btkit.pipeline.builder import DatabaseBuilder
 from btkit.strategy.loader import load_strategy
-from btkit.analysis.metrics import PostProcessor
 
 app = typer.Typer(
     name="btkit",
@@ -87,7 +87,9 @@ def run(
 @app.command()
 def analyze(
     output_db: str = typer.Option(..., help="Path to the output database."),
-    backtest_id: int = typer.Option(default=None, help="Analyse a specific backtest run (defaults to most recent)."),
+    backtest_id: int = typer.Option(
+        default=None, help="Analyse a specific backtest run (defaults to most recent)."
+    ),
     matrix_id: int = typer.Option(default=None, help="Analyse all runs from a matrix expansion."),
 ) -> None:
     """Compute metrics and print results to terminal."""
@@ -156,23 +158,28 @@ def pipeline(
 @app.command()
 def serve(
     output_db: str = typer.Option(..., help="Path to the output database."),
-    input_db: str = typer.Option(default=None, help="Path to the input database (enables per-trade candle charts)."),
-    backtest_id: int = typer.Option(default=None, help="Backtest run to display (defaults to most recent)."),
+    input_db: str = typer.Option(
+        default=None, help="Path to the input database (enables per-trade candle charts)."
+    ),
+    backtest_id: int = typer.Option(
+        default=None, help="Backtest run to display (defaults to most recent)."
+    ),
     port: int = typer.Option(default=8050, help="Port for the dashboard server."),
     debug: bool = typer.Option(default=False, help="Run Dash in debug mode (enables hot-reload)."),
 ) -> None:
     """Launch the interactive dashboard for a backtest run."""
     try:
         from btkit.analysis.dashboard import run_dashboard
-    except ImportError:
+    except ImportError as exc:
         typer.echo(
             "Dashboard dependencies not installed. Run: pip install btkit[viz]",
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from exc
 
-    run_dashboard(output_db, input_db_path=input_db,
-                  backtest_id=backtest_id, port=port, debug=debug)
+    run_dashboard(
+        output_db, input_db_path=input_db, backtest_id=backtest_id, port=port, debug=debug
+    )
 
 
 if __name__ == "__main__":

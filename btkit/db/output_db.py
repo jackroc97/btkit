@@ -9,7 +9,7 @@ on first use via create_schema().
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import duckdb
 import polars as pl
@@ -103,7 +103,7 @@ class OutputDatabase:
                 metadata["initial_equity"],
                 metadata["slippage_pct"],
                 metadata["fee_per_contract"],
-                metadata.get("created_at", datetime.now(timezone.utc)),
+                metadata.get("created_at", datetime.now(UTC)),
             ],
         )
         return next_id
@@ -171,15 +171,25 @@ class OutputDatabase:
         )
 
         # Build entry_id → position_id map for legs.
-        id_map = dict(zip(positions["entry_id"].to_list(), pos_ids))
+        id_map = dict(zip(positions["entry_id"].to_list(), pos_ids, strict=False))
 
         # Write positions.
-        pos_rows = positions.select([
-            "id", "backtest_id", "trade_name",
-            "open_time", "exit_time", "exit_reason",
-            "open_mark", "exit_mark", "worst_mark",
-            "slippage_cost", "fee_cost", "net_pnl",
-        ])
+        pos_rows = positions.select(
+            [
+                "id",
+                "backtest_id",
+                "trade_name",
+                "open_time",
+                "exit_time",
+                "exit_reason",
+                "open_mark",
+                "exit_mark",
+                "worst_mark",
+                "slippage_cost",
+                "fee_cost",
+                "net_pnl",
+            ]
+        )
         self._con.register("_positions", pos_rows)
         self._con.execute("INSERT INTO position SELECT * FROM _positions")
         self._con.unregister("_positions")
@@ -193,13 +203,28 @@ class OutputDatabase:
                 pl.Series("id", leg_ids),
                 pl.Series("position_id", position_ids),
             )
-            leg_rows = legs.select([
-                "id", "position_id", "instrument_id", "symbol",
-                "expiration", "strike_price", "right", "action",
-                "quantity", "multiplier", "open_price", "exit_price",
-                "entry_delta", "entry_iv", "entry_gamma", "entry_theta",
-                "entry_vega", "entry_dte",
-            ])
+            leg_rows = legs.select(
+                [
+                    "id",
+                    "position_id",
+                    "instrument_id",
+                    "symbol",
+                    "expiration",
+                    "strike_price",
+                    "right",
+                    "action",
+                    "quantity",
+                    "multiplier",
+                    "open_price",
+                    "exit_price",
+                    "entry_delta",
+                    "entry_iv",
+                    "entry_gamma",
+                    "entry_theta",
+                    "entry_vega",
+                    "entry_dte",
+                ]
+            )
             self._con.register("_legs", leg_rows)
             self._con.execute("INSERT INTO position_leg SELECT * FROM _legs")
             self._con.unregister("_legs")

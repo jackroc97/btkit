@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import time
 import traceback
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -136,19 +136,22 @@ class BacktestEngine:
             return pl.DataFrame()
         tz = ZoneInfo(universe.session.timezone)
         start_dt = datetime(
-            universe.start_date.year, universe.start_date.month, universe.start_date.day,
+            universe.start_date.year,
+            universe.start_date.month,
+            universe.start_date.day,
             tzinfo=tz,
-        ).astimezone(timezone.utc)
+        ).astimezone(UTC)
 
-        max_dte = max(
-            int(leg.dte)
-            for trade in self.strategy.trades
-            for leg in trade.legs
-        )
+        max_dte = max(int(leg.dte) for trade in self.strategy.trades for leg in trade.legs)
         base_end = datetime(
-            universe.end_date.year, universe.end_date.month, universe.end_date.day,
-            23, 59, 59, tzinfo=tz,
-        ).astimezone(timezone.utc)
+            universe.end_date.year,
+            universe.end_date.month,
+            universe.end_date.day,
+            23,
+            59,
+            59,
+            tzinfo=tz,
+        ).astimezone(UTC)
         end_dt = base_end + timedelta(days=max_dte + 10)
 
         return self.input_db.indicators(underlying_id, start_dt, end_dt)
@@ -182,8 +185,8 @@ class BacktestEngine:
         # numpy NaT comparisons always return False, which would incorrectly
         # block all subsequent entries after an unexited position.
         entry_times = combined["entry_time"].cast(pl.Int64).to_numpy()
-        exit_times  = combined["exit_time"].cast(pl.Int64).fill_null(0).to_numpy()
-        entry_ids   = combined["entry_id"].to_numpy()
+        exit_times = combined["exit_time"].cast(pl.Int64).fill_null(0).to_numpy()
+        entry_ids = combined["entry_id"].to_numpy()
 
         keep = np.zeros(len(entry_times), dtype=bool)
         last_exit = None
@@ -201,12 +204,14 @@ class BacktestEngine:
         )
 
     def _write_backtest_record(self) -> int:
-        return self.output_db.write_backtest({
-            "strategy_name":    self.strategy.name,
-            "strategy_version": self.strategy.version,
-            "strategy_params":  json.loads(self.strategy.model_dump_json()),
-            "initial_equity":   self.initial_equity,
-            "slippage_pct":     self.strategy.costs.slippage_pct,
-            "fee_per_contract": self.strategy.costs.fee_per_contract,
-            "created_at":       datetime.now(timezone.utc),
-        })
+        return self.output_db.write_backtest(
+            {
+                "strategy_name": self.strategy.name,
+                "strategy_version": self.strategy.version,
+                "strategy_params": json.loads(self.strategy.model_dump_json()),
+                "initial_equity": self.initial_equity,
+                "slippage_pct": self.strategy.costs.slippage_pct,
+                "fee_per_contract": self.strategy.costs.fee_per_contract,
+                "created_at": datetime.now(UTC),
+            }
+        )

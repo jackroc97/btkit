@@ -19,8 +19,8 @@ Called from cli.build() and cli.pipeline().
 from __future__ import annotations
 
 import zipfile
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 import duckdb
 import polars as pl
@@ -39,14 +39,23 @@ except ImportError as exc:  # pragma: no cover
 # Internal instrument map record
 # ---------------------------------------------------------------------------
 
+
 class _InstrumentInfo:
-    __slots__ = ("instrument_class", "raw_symbol", "expiration", "strike_price", "right", "multiplier", "underlying_id")
+    __slots__ = (
+        "instrument_class",
+        "raw_symbol",
+        "expiration",
+        "strike_price",
+        "right",
+        "multiplier",
+        "underlying_id",
+    )
 
     def __init__(
         self,
         instrument_class: str,
         raw_symbol: str,
-        expiration,        # datetime.date or None
+        expiration,  # datetime.date or None
         strike_price: float | None,
         right: str | None,  # 'C', 'P', or None for futures
         multiplier: int,
@@ -64,6 +73,7 @@ class _InstrumentInfo:
 # ---------------------------------------------------------------------------
 # DatabaseBuilder
 # ---------------------------------------------------------------------------
+
 
 class DatabaseBuilder:
     def __init__(
@@ -146,7 +156,8 @@ class DatabaseBuilder:
                 )
                 processed += 1
 
-        print(f"[ingest] Loaded {processed} instruments from definitions ({len(self._instrument_map)} unique)")
+        n_unique = len(self._instrument_map)
+        print(f"[ingest] Loaded {processed} instruments from definitions ({n_unique} unique)")
 
     # ------------------------------------------------------------------
     # Step 2: OHLCV
@@ -178,12 +189,10 @@ class DatabaseBuilder:
 
         # Build lookup DataFrames from instrument_map for fast joining.
         underlying_ids = {
-            iid for iid, info in self._instrument_map.items()
-            if info.instrument_class == "F"
+            iid for iid, info in self._instrument_map.items() if info.instrument_class == "F"
         }
         option_ids = {
-            iid for iid, info in self._instrument_map.items()
-            if info.instrument_class in ("C", "P")
+            iid for iid, info in self._instrument_map.items() if info.instrument_class in ("C", "P")
         }
 
         # ── Underlying bars ──────────────────────────────────────────────────
@@ -197,14 +206,31 @@ class DatabaseBuilder:
             ],
             schema={"instrument_id": pl.Int64, "expiration": pl.Date},
         )
-        ub_raw = ohlcv.filter(pl.col("instrument_id").is_in(underlying_ids)).select([
-            "ts_event", "instrument_id", "symbol",
-            "open", "high", "low", "close", "volume",
-        ])
-        ub = ub_raw.join(futures_meta, on="instrument_id", how="left").select([
-            "ts_event", "instrument_id", "symbol", "expiration",
-            "open", "high", "low", "close", "volume",
-        ])
+        ub_raw = ohlcv.filter(pl.col("instrument_id").is_in(underlying_ids)).select(
+            [
+                "ts_event",
+                "instrument_id",
+                "symbol",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+            ]
+        )
+        ub = ub_raw.join(futures_meta, on="instrument_id", how="left").select(
+            [
+                "ts_event",
+                "instrument_id",
+                "symbol",
+                "expiration",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+            ]
+        )
 
         # ── Option bars ──────────────────────────────────────────────────────
         # Join definition metadata (expiration, strike_price, right, multiplier,
@@ -225,43 +251,57 @@ class DatabaseBuilder:
                 for iid, info in self._instrument_map.items()
                 if info.instrument_class in ("C", "P")
             ]
-            meta_df = pl.DataFrame(meta_rows, schema={
-                "instrument_id": pl.Int64,
-                "underlying_id": pl.Int64,
-                "expiration": pl.Date,
-                "strike_price": pl.Float64,
-                "right": pl.Utf8,
-                "multiplier": pl.Int64,
-            })
-            ob = opt_raw.join(meta_df, on="instrument_id", how="left").select([
-                "ts_event", "instrument_id", "underlying_id", "symbol",
-                "expiration", "strike_price", "right", "multiplier",
-                "open", "high", "low", "close", "volume",
-            ])
+            meta_df = pl.DataFrame(
+                meta_rows,
+                schema={
+                    "instrument_id": pl.Int64,
+                    "underlying_id": pl.Int64,
+                    "expiration": pl.Date,
+                    "strike_price": pl.Float64,
+                    "right": pl.Utf8,
+                    "multiplier": pl.Int64,
+                },
+            )
+            ob = opt_raw.join(meta_df, on="instrument_id", how="left").select(
+                [
+                    "ts_event",
+                    "instrument_id",
+                    "underlying_id",
+                    "symbol",
+                    "expiration",
+                    "strike_price",
+                    "right",
+                    "multiplier",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                ]
+            )
         else:
-            ob = pl.DataFrame(schema={
-                "ts_event": pl.Datetime("us", "UTC"),
-                "instrument_id": pl.Int64,
-                "underlying_id": pl.Int64,
-                "symbol": pl.Utf8,
-                "expiration": pl.Date,
-                "strike_price": pl.Float64,
-                "right": pl.Utf8,
-                "multiplier": pl.Int64,
-                "open": pl.Float64,
-                "high": pl.Float64,
-                "low": pl.Float64,
-                "close": pl.Float64,
-                "volume": pl.Int64,
-            })
+            ob = pl.DataFrame(
+                schema={
+                    "ts_event": pl.Datetime("us", "UTC"),
+                    "instrument_id": pl.Int64,
+                    "underlying_id": pl.Int64,
+                    "symbol": pl.Utf8,
+                    "expiration": pl.Date,
+                    "strike_price": pl.Float64,
+                    "right": pl.Utf8,
+                    "multiplier": pl.Int64,
+                    "open": pl.Float64,
+                    "high": pl.Float64,
+                    "low": pl.Float64,
+                    "close": pl.Float64,
+                    "volume": pl.Int64,
+                }
+            )
 
         _write_df(self._con, "underlying_bars", ub)
         _write_df(self._con, "option_bars", ob)
 
-        print(
-            f"[ingest] Wrote {len(ub):,} underlying bars, "
-            f"{len(ob):,} option bars"
-        )
+        print(f"[ingest] Wrote {len(ub):,} underlying bars, {len(ob):,} option bars")
 
     # ------------------------------------------------------------------
     # Step 3: Greeks
@@ -330,15 +370,24 @@ class DatabaseBuilder:
 # Module-level helpers
 # ---------------------------------------------------------------------------
 
+
 def _dbn_to_polars(store) -> pl.DataFrame:
     """Convert a DBNStore to a Polars DataFrame with a ts_event column."""
     pdf = store.to_df()
     # ts_event is the pandas index — reset it to a regular column
     pdf = pdf.reset_index()
-    return pl.from_pandas(pdf).select([
-        "ts_event", "instrument_id", "symbol",
-        "open", "high", "low", "close", "volume",
-    ])
+    return pl.from_pandas(pdf).select(
+        [
+            "ts_event",
+            "instrument_id",
+            "symbol",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ]
+    )
 
 
 def _write_df(con: duckdb.DuckDBPyConnection, table: str, df: pl.DataFrame) -> None:
