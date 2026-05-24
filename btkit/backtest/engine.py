@@ -70,6 +70,7 @@ class BacktestEngine:
                 )
                 entries = entry_scanner.scan(entry_id_offset)
                 warnings.extend(entry_scanner.warnings)
+                n_scanned = len(entries)  # capture before enforcement drops rows
 
                 exit_scanner = ExitScanner(
                     self.input_db, self.strategy, trade, indicators=indicators
@@ -80,7 +81,9 @@ class BacktestEngine:
                 entries, exits = self._enforce_one_at_a_time(entries, exits)
                 all_entries[trade.name] = entries
                 all_exits[trade.name] = exits
-                entry_id_offset += len(entries)
+                # Advance by pre-enforcement count so surviving entry_ids from this
+                # trade never overlap with IDs assigned to the next trade.
+                entry_id_offset += n_scanned
 
             positions = PnLCalculator(self.strategy).compute(all_entries, all_exits)
             self.output_db.write_results(backtest_id, positions.positions, positions.legs)
@@ -122,14 +125,15 @@ class BacktestEngine:
         if not needs_indicators:
             return pl.DataFrame()
 
+        universe = self.strategy.universe
         trade0 = self.strategy.trades[0]
-        underlying_id = self.input_db.instrument_id_for_symbol(
-            trade0.instrument.root_symbol
+        underlying_id = self.input_db.front_future_id(
+            trade0.instrument.root_symbol,
+            universe.start_date,
+            trade0.instrument.roll_days_before_expiry,
         )
         if underlying_id is None:
             return pl.DataFrame()
-
-        universe = self.strategy.universe
         tz = ZoneInfo(universe.session.timezone)
         start_dt = datetime(
             universe.start_date.year, universe.start_date.month, universe.start_date.day,

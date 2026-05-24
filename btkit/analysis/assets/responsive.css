@@ -1,0 +1,64 @@
+/* ── Mobile-responsive overrides ─────────────────────────────────────── */
+
+/* Stack side-by-side rows vertically on small screens */
+@media (max-width: 860px) {
+
+  /* Body padding */
+  .btkit-body {
+    padding: 10px !important;
+  }
+
+  /* Header: wrap and shrink */
+  .btkit-header {
+    flex-wrap: wrap;
+    gap: 6px !important;
+    padding: 10px 14px !important;
+  }
+  .btkit-header-meta {
+    flex-basis: 100%;
+    gap: 10px !important;
+  }
+
+  /* All flex rows go vertical */
+  .btkit-row {
+    flex-direction: column !important;
+  }
+
+  /* Cards go full width */
+  .btkit-row > div {
+    width: 100% !important;
+    flex-shrink: unset !important;
+  }
+
+  /* Reduce card padding */
+  .btkit-card {
+    padding: 12px 12px !important;
+  }
+
+  /* Shrink chart heights so both fit without excessive scrolling */
+  .btkit-chart-equity,
+  .btkit-chart-bootstrap {
+    height: 220px !important;
+  }
+
+  .btkit-chart-histogram {
+    height: 180px !important;
+  }
+
+  /* Trade grid: allow horizontal scroll and reduce row height */
+  .btkit-trade-grid .ag-root-wrapper {
+    overflow-x: auto;
+  }
+
+  /* Metrics grid: full width */
+  .btkit-metrics-grid {
+    width: 100% !important;
+  }
+
+  /* Histogram radio items: stack vertically */
+  .btkit-hist-controls {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 6px !important;
+  }
+}

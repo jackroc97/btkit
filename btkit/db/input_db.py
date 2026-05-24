@@ -10,7 +10,7 @@ the file read-only — it cannot modify the database.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import duckdb
 import polars as pl
@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS underlying_bars (
     ts_event        TIMESTAMPTZ     NOT NULL,
     instrument_id   INTEGER         NOT NULL,
     symbol          VARCHAR         NOT NULL,
+    expiration      DATE,
     open            DOUBLE          NOT NULL,
     high            DOUBLE          NOT NULL,
     low             DOUBLE          NOT NULL,
@@ -29,6 +30,8 @@ CREATE TABLE IF NOT EXISTS underlying_bars (
 );
 CREATE INDEX IF NOT EXISTS idx_underlying_bars
     ON underlying_bars (instrument_id, ts_event);
+CREATE INDEX IF NOT EXISTS idx_underlying_bars_expiry
+    ON underlying_bars (symbol, expiration);
 
 CREATE TABLE IF NOT EXISTS option_bars (
     ts_event        TIMESTAMPTZ     NOT NULL,
@@ -229,34 +232,37 @@ class InputDatabase:
 
     def greeks_for_all_legs(
         self,
-        underlying_id: int,
-        ts_events: list,
+        ts_event_underlying: list[tuple],
         leg_specs: list[dict],
-        *,
-        delta_tolerance: float = 0.10,
-        dte_tolerance: int = 5,
     ) -> pl.DataFrame:
         """
-        Batched replacement for calling greeks_for_entry() once per leg.
+        Batched greeks lookup for all legs across all candidate timestamps.
+
+        ts_event_underlying is a list of (ts_event, underlying_id) pairs — each
+        candidate bar carries its own front-month underlying_id, so the query
+        correctly filters options by the active futures contract at each point in
+        time rather than using a single contract for the whole backtest.
 
         leg_specs is a list of dicts with keys: name, right (C/P), target_delta,
-        target_dte. Returns one DataFrame for all legs tagged with a leg_name
-        column; caller partitions by leg_name and picks the best match per
-        ts_event.
-
-        Improvements over per-leg greeks_for_entry():
-          - Single DB roundtrip regardless of leg count.
-          - ts_event BETWEEN min/max filter lets the (underlying_id, ts_event, dte)
-            index prune the scan before the join with _entry_ts.
+        target_dte, delta_tolerance, dte_tolerance. The tolerance values are
+        per-leg, sourced from LegConfig.delta_tolerance / LegConfig.dte_tolerance.
+        Returns one DataFrame for all legs tagged with a leg_name column; caller
+        partitions by leg_name and picks the best match per ts_event.
         """
-        ts_df = pl.DataFrame({"ts_event": pl.Series(ts_events, dtype=pl.Datetime("us", "UTC"))})
+        ts_events      = [t for t, _ in ts_event_underlying]
+        underlying_ids = [u for _, u in ts_event_underlying]
+
+        ts_df = pl.DataFrame({
+            "ts_event":      pl.Series(ts_events,      dtype=pl.Datetime("us", "UTC")),
+            "underlying_id": pl.Series(underlying_ids, dtype=pl.Int64),
+        })
         params_df = pl.DataFrame({
             "leg_name":  [s["name"]  for s in leg_specs],
             "leg_right": [s["right"] for s in leg_specs],
-            "delta_lo":  [float(s["target_delta"]) - delta_tolerance for s in leg_specs],
-            "delta_hi":  [float(s["target_delta"]) + delta_tolerance for s in leg_specs],
-            "dte_lo":    [int(s["target_dte"]) - dte_tolerance for s in leg_specs],
-            "dte_hi":    [int(s["target_dte"]) + dte_tolerance for s in leg_specs],
+            "delta_lo":  [float(s["target_delta"]) - float(s["delta_tolerance"]) for s in leg_specs],
+            "delta_hi":  [float(s["target_delta"]) + float(s["delta_tolerance"]) for s in leg_specs],
+            "dte_lo":    [int(s["target_dte"]) - int(s["dte_tolerance"]) for s in leg_specs],
+            "dte_hi":    [int(s["target_dte"]) + int(s["dte_tolerance"]) for s in leg_specs],
         })
         self._con.register("_entry_ts", ts_df)
         self._con.register("_leg_params", params_df)
@@ -273,16 +279,17 @@ class InputDatabase:
                 JOIN option_bars ob
                   ON og.instrument_id = ob.instrument_id
                  AND og.ts_event      = ob.ts_event
-                JOIN _entry_ts et ON og.ts_event = et.ts_event
+                JOIN _entry_ts et
+                  ON og.ts_event      = et.ts_event
+                 AND og.underlying_id = et.underlying_id
                 JOIN _leg_params lp
                   ON ob."right"  = lp.leg_right
                  AND og.dte     BETWEEN lp.dte_lo   AND lp.dte_hi
                  AND og.delta   BETWEEN lp.delta_lo AND lp.delta_hi
-                WHERE og.underlying_id = ?
-                  AND og.ts_event BETWEEN ? AND ?
+                WHERE og.ts_event BETWEEN ? AND ?
                   AND ob.close IS NOT NULL
                 """,
-                [underlying_id, ts_min, ts_max],
+                [ts_min, ts_max],
             ).pl()
         finally:
             self._con.unregister("_entry_ts")
@@ -290,22 +297,20 @@ class InputDatabase:
 
     def greeks_for_strike_legs(
         self,
-        underlying_id: int,
         strike_targets: pl.DataFrame,
         *,
         strike_tolerance: float = 1.0,
     ) -> pl.DataFrame:
         """
         For each (ts_event, leg_name) in strike_targets, find the option whose
-        strike_price is within strike_tolerance of target_strike and whose DTE
-        falls in [dte_lo, dte_hi].
+        strike_price is within strike_tolerance of target_strike and whose
+        expiration matches the reference leg's exact expiration date.
 
-        strike_targets columns: ts_event, leg_name, right (C/P), target_strike,
-        dte_lo, dte_hi.
+        strike_targets columns: ts_event, underlying_id, leg_name, right (C/P),
+        target_strike, reference_expiration (DATE).  The underlying_id column
+        scopes the search to the correct front-month futures contract at each bar.
 
-        Returns the same column set as greeks_for_all_legs() so that
-        EntryScanner._select_legs() can apply identical post-processing.
-        Caller picks the closest-strike match per (ts_event, leg_name) in Polars.
+        Returns the same column set as greeks_for_all_legs().
         """
         ts_min = strike_targets["ts_event"].min()
         ts_max = strike_targets["ts_event"].max()
@@ -323,14 +328,14 @@ class InputDatabase:
                  AND og.ts_event      = ob.ts_event
                 JOIN _strike_targets st
                   ON og.ts_event               = st.ts_event
+                 AND og.underlying_id           = st.underlying_id
                  AND ob."right"                = st.right
-                 AND og.dte                    BETWEEN st.dte_lo AND st.dte_hi
+                 AND ob.expiration             = st.reference_expiration
                  AND abs(ob.strike_price - st.target_strike) <= ?
-                WHERE og.underlying_id = ?
-                  AND og.ts_event BETWEEN ? AND ?
+                WHERE og.ts_event BETWEEN ? AND ?
                   AND ob.close IS NOT NULL
                 """,
-                [strike_tolerance, underlying_id, ts_min, ts_max],
+                [strike_tolerance, ts_min, ts_max],
             ).pl()
         finally:
             self._con.unregister("_strike_targets")
@@ -378,19 +383,120 @@ class InputDatabase:
         return tall.pivot(on="name", index="ts_event", values="value", aggregate_function="first")
 
     # ------------------------------------------------------------------
-    # Instrument lookup
+    # Futures roll schedule
     # ------------------------------------------------------------------
 
-    def instrument_id_for_symbol(self, root_symbol: str) -> int | None:
+    def front_future_schedule(
+        self,
+        root_symbol: str,
+        start_date: date,
+        end_date: date,
+        roll_days: int = 7,
+    ) -> pl.DataFrame:
         """
-        Returns the instrument_id for the given root_symbol from underlying_bars,
-        or None if not found.
+        Return a DataFrame mapping every calendar date in [start_date, end_date]
+        to the instrument_id of the front-month futures contract for root_symbol.
+
+        Roll logic: on any date D, the active contract is the one with the
+        minimum expiration >= D + roll_days.  This rolls to the next contract
+        `roll_days` before the front month expires, matching typical CME practice.
+
+        Requires underlying_bars to have an expiration column (populated at ingest).
+        Falls back to a single arbitrary contract if expiration data is absent.
+
+        Returns columns: date (pl.Date), underlying_id (pl.Int64).
         """
-        row = self._con.execute(
-            "SELECT instrument_id FROM underlying_bars WHERE symbol LIKE ? LIMIT 1",
+        futures_df = self._con.execute(
+            """
+            SELECT DISTINCT instrument_id, expiration
+            FROM underlying_bars
+            WHERE symbol LIKE ? AND expiration IS NOT NULL
+            ORDER BY expiration
+            """,
             [f"{root_symbol}%"],
-        ).fetchone()
-        return row[0] if row else None
+        ).pl()
+
+        if futures_df.is_empty():
+            # No expiration data — fall back to first match (legacy behaviour)
+            row = self._con.execute(
+                "SELECT instrument_id FROM underlying_bars WHERE symbol LIKE ? LIMIT 1",
+                [f"{root_symbol}%"],
+            ).fetchone()
+            if row is None:
+                return pl.DataFrame({"date": pl.Series([], dtype=pl.Date),
+                                     "underlying_id": pl.Series([], dtype=pl.Int64)})
+            uid = int(row[0])
+            dates = [start_date + timedelta(days=i)
+                     for i in range((end_date - start_date).days + 1)]
+            return pl.DataFrame({"date": dates,
+                                 "underlying_id": [uid] * len(dates)})
+
+        expirations = list(zip(
+            futures_df["instrument_id"].to_list(),
+            futures_df["expiration"].to_list(),
+        ))
+
+        dates: list[date] = []
+        underlying_ids: list[int] = []
+        d = start_date
+        while d <= end_date:
+            roll_cutoff = d + timedelta(days=roll_days)
+            # Front month: earliest expiration that hasn't yet hit its roll date
+            front_id = None
+            for iid, exp in expirations:
+                if exp >= roll_cutoff:
+                    front_id = iid
+                    break
+            if front_id is None:
+                # All contracts have rolled past — use the last one
+                front_id = expirations[-1][0]
+            dates.append(d)
+            underlying_ids.append(front_id)
+            d += timedelta(days=1)
+
+        return pl.DataFrame({
+            "date":          pl.Series(dates,           dtype=pl.Date),
+            "underlying_id": pl.Series(underlying_ids,  dtype=pl.Int64),
+        })
+
+    def front_future_id(
+        self,
+        root_symbol: str,
+        as_of: date,
+        roll_days: int = 7,
+    ) -> int | None:
+        """
+        Return the instrument_id of the front-month futures contract for
+        root_symbol as of a single date.  Convenience wrapper around
+        front_future_schedule() used by engine and exit scanner for indicator
+        lookups where a single underlying_id is sufficient.
+        """
+        schedule = self.front_future_schedule(root_symbol, as_of, as_of, roll_days)
+        if schedule.is_empty():
+            return None
+        return int(schedule["underlying_id"][0])
+
+    def underlying_bars_for_root(
+        self,
+        root_symbol: str,
+        start: datetime,
+        end: datetime,
+    ) -> pl.DataFrame:
+        """
+        Load 1-minute bars from ALL futures contracts matching root_symbol over
+        [start, end].  The returned DataFrame includes instrument_id so callers
+        can filter to the front-month contract using a roll schedule.
+        """
+        return self._con.execute(
+            """
+            SELECT ts_event, instrument_id, symbol, open, high, low, close, volume
+            FROM underlying_bars
+            WHERE symbol LIKE ?
+              AND ts_event >= ? AND ts_event <= ?
+            ORDER BY instrument_id, ts_event
+            """,
+            [f"{root_symbol}%", start, end],
+        ).pl()
 
     # ------------------------------------------------------------------
     # Lifecycle

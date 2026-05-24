@@ -187,8 +187,22 @@ class DatabaseBuilder:
         }
 
         # ── Underlying bars ──────────────────────────────────────────────────
-        ub = ohlcv.filter(pl.col("instrument_id").is_in(underlying_ids)).select([
+        # Join futures expiration from the instrument_map so InputDatabase can
+        # compute roll schedules without decoding contract month codes.
+        futures_meta = pl.DataFrame(
+            [
+                {"instrument_id": iid, "expiration": info.expiration}
+                for iid, info in self._instrument_map.items()
+                if info.instrument_class == "F"
+            ],
+            schema={"instrument_id": pl.Int64, "expiration": pl.Date},
+        )
+        ub_raw = ohlcv.filter(pl.col("instrument_id").is_in(underlying_ids)).select([
             "ts_event", "instrument_id", "symbol",
+            "open", "high", "low", "close", "volume",
+        ])
+        ub = ub_raw.join(futures_meta, on="instrument_id", how="left").select([
+            "ts_event", "instrument_id", "symbol", "expiration",
             "open", "high", "low", "close", "volume",
         ])
 

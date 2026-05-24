@@ -18,8 +18,6 @@ Performance notes:
       the join, dramatically reducing scan width at multi-year scale.
     - indicators may be pre-loaded by the engine and passed in to avoid a second
       DB fetch; if None and conditions reference indicators, they are fetched here.
-    - Per-leg greek columns (iv, gamma, theta, vega, dte, delta) are dropped after
-      condition evaluation — they are not needed by ExitScanner or PnLCalculator.
 
 Sign convention (consistent with docs/strategy.md):
     STO (sell_to_open): signed_qty = +1  (you receive premium)
@@ -42,10 +40,6 @@ import polars as pl
 from btkit.db.input_db import InputDatabase
 from btkit.strategy.definition import StrategyDefinition, TradeDefinition
 from btkit.strategy.loader import parse_condition
-
-# Leg-level greek columns that are safe to drop after conditions are evaluated.
-# ExitScanner and PnLCalculator do not use these.
-_LEG_GREEK_SUFFIXES = ("iv", "gamma", "theta", "vega", "dte", "delta")
 
 
 class EntryScanner:
@@ -79,11 +73,8 @@ class EntryScanner:
                        leg_{name}_action, leg_{name}_quantity,
                        leg_{name}_symbol, leg_{name}_close
         """
-        underlying_id = self.db.instrument_id_for_symbol(
-            self.trade.instrument.root_symbol
-        )
-        if underlying_id is None:
-            return _empty_entries_df()
+        root_symbol = self.trade.instrument.root_symbol
+        roll_days   = self.trade.instrument.roll_days_before_expiry
 
         universe = self.strategy.universe
         start_dt = datetime(
@@ -95,18 +86,51 @@ class EntryScanner:
             23, 59, 59, tzinfo=self._tz,
         ).astimezone(timezone.utc)
 
-        bars = self.db.underlying_bars(underlying_id, start_dt, end_dt)
+        # Build a roll schedule: date → underlying_id for the active front-month
+        # futures contract.  This covers the full universe window so every
+        # candidate bar gets the correct underlying regardless of roll events.
+        schedule = self.db.front_future_schedule(
+            root_symbol, universe.start_date, universe.end_date, roll_days
+        )
+        if schedule.is_empty():
+            return _empty_entries_df()
+
+        # Load bars from ALL matching futures contracts then keep only the
+        # front-month bars for each date based on the roll schedule.
+        all_bars = self.db.underlying_bars_for_root(root_symbol, start_dt, end_dt)
+        if all_bars.is_empty():
+            return _empty_entries_df()
+
+        bars = (
+            all_bars
+            .with_columns(pl.col("ts_event").dt.date().alias("_date"))
+            .join(schedule, left_on="_date", right_on="date", how="left")
+            .filter(pl.col("instrument_id") == pl.col("underlying_id"))
+            .drop(["_date", "underlying_id"])
+        )
         if bars.is_empty():
             return _empty_entries_df()
 
-        # Use pre-loaded indicators when available; fetch only if conditions need them.
-        indicators = self._get_indicators(underlying_id, start_dt, end_dt)
+        # Indicators: use the front-month at the start of the universe.
+        start_underlying_id = self.db.front_future_id(
+            root_symbol, universe.start_date, roll_days
+        )
+        indicators = self._get_indicators(start_underlying_id, start_dt, end_dt)
 
         candidates = self._apply_window_filters(bars)
         if candidates.is_empty():
             return _empty_entries_df()
 
-        candidates = self._select_legs(candidates, underlying_id)
+        # Attach the active underlying_id to each candidate bar so _select_legs
+        # can pass per-bar underlying IDs to the greeks queries.
+        candidates = (
+            candidates
+            .with_columns(pl.col("ts_event").dt.date().alias("_date"))
+            .join(schedule, left_on="_date", right_on="date", how="left")
+            .drop("_date")
+        )
+
+        candidates = self._select_legs(candidates)
         if candidates.is_empty():
             return _empty_entries_df()
 
@@ -115,16 +139,6 @@ class EntryScanner:
 
         if candidates.is_empty():
             return _empty_entries_df()
-
-        # Drop per-leg greek columns — not needed by ExitScanner or PnLCalculator.
-        cols_to_drop = [
-            f"leg_{leg.name}_{suffix}"
-            for leg in self.trade.legs
-            for suffix in _LEG_GREEK_SUFFIXES
-            if f"leg_{leg.name}_{suffix}" in candidates.columns
-        ]
-        if cols_to_drop:
-            candidates = candidates.drop(cols_to_drop)
 
         return (
             candidates
@@ -180,11 +194,14 @@ class EntryScanner:
     def _select_legs(
         self,
         candidates: pl.DataFrame,
-        underlying_id: int,
     ) -> pl.DataFrame:
         """
         For each remaining candidate timestamp, find the best-matching option
         for every leg.
+
+        candidates must contain an 'underlying_id' column (added by scan() from
+        the roll schedule) so each bar's greeks query is scoped to the correct
+        front-month futures contract.
 
         Legs are processed in two passes:
           Pass 1 — delta-selected legs: one batched greeks_for_all_legs() call,
@@ -195,11 +212,14 @@ class EntryScanner:
 
         Timestamps where any leg has no match are dropped via inner join.
         """
-        ts_events = candidates["ts_event"].to_list()
+        ts_events      = candidates["ts_event"].to_list()
+        underlying_ids = candidates["underlying_id"].to_list()
+        ts_event_underlying = list(zip(ts_events, underlying_ids))
+
         delta_legs  = [leg for leg in self.trade.legs if leg.strike_offset is None]
         offset_legs = [leg for leg in self.trade.legs if leg.strike_offset is not None]
 
-        result = candidates.select("ts_event")
+        result = candidates.select(["ts_event", "underlying_id"])
 
         # ------------------------------------------------------------------
         # Pass 1: delta-selected legs (single batched DB query)
@@ -207,20 +227,19 @@ class EntryScanner:
         if delta_legs:
             leg_specs = [
                 {
-                    "name":         leg.name,
-                    "right":        "C" if leg.right == "call" else "P",
-                    "target_delta": float(leg.delta),
-                    "target_dte":   int(leg.dte),
+                    "name":            leg.name,
+                    "right":           "C" if leg.right == "call" else "P",
+                    "target_delta":    float(leg.delta),
+                    "target_dte":      int(leg.dte),
+                    "delta_tolerance": float(leg.delta_tolerance),
+                    "dte_tolerance":   int(leg.dte_tolerance),
                 }
                 for leg in delta_legs
             ]
 
             all_candidates = self.db.greeks_for_all_legs(
-                underlying_id=underlying_id,
-                ts_events=ts_events,
+                ts_event_underlying=ts_event_underlying,
                 leg_specs=leg_specs,
-                delta_tolerance=0.10,
-                dte_tolerance=5,
             )
 
             if all_candidates.is_empty():
@@ -268,21 +287,19 @@ class EntryScanner:
             if ref_strike_col not in result.columns:
                 return pl.DataFrame()
 
-            right_char = "C" if leg.right == "call" else "P"
-            dte_lo = int(leg.dte) - 5
-            dte_hi = int(leg.dte) + 5
+            right_char     = "C" if leg.right == "call" else "P"
+            ref_expiry_col = f"leg_{leg.reference_leg}_expiration"
 
             strike_targets = result.select([
                 "ts_event",
+                "underlying_id",
                 pl.lit(leg.name).alias("leg_name"),
                 pl.lit(right_char).alias("right"),
                 (pl.col(ref_strike_col) + pl.lit(float(leg.strike_offset))).alias("target_strike"),
-                pl.lit(dte_lo).cast(pl.Int32).alias("dte_lo"),
-                pl.lit(dte_hi).cast(pl.Int32).alias("dte_hi"),
+                pl.col(ref_expiry_col).alias("reference_expiration"),
             ])
 
             offset_candidates = self.db.greeks_for_strike_legs(
-                underlying_id=underlying_id,
                 strike_targets=strike_targets,
             )
 
@@ -298,7 +315,7 @@ class EntryScanner:
                 )
                 .sort(["ts_event", "_strike_diff"])
                 .unique(subset=["ts_event"], keep="first")
-                .drop(["_strike_diff", "leg_name", "target_strike"])
+                .drop(["_strike_diff", "leg_name", "underlying_id", "target_strike"])
             )
 
             rename_map = {
@@ -314,7 +331,7 @@ class EntryScanner:
             result = result.join(best, on="ts_event", how="inner")
 
         bar_cols = candidates.select(["ts_event", "open", "high", "low", "close", "volume"])
-        result = result.join(bar_cols, on="ts_event", how="left")
+        result = result.drop("underlying_id").join(bar_cols, on="ts_event", how="left")
 
         return result
 
@@ -399,7 +416,7 @@ class EntryScanner:
 
     def _get_indicators(
         self,
-        underlying_id: int,
+        underlying_id: int | None,
         start_dt: datetime,
         end_dt: datetime,
     ) -> pl.DataFrame:
@@ -409,12 +426,12 @@ class EntryScanner:
         If the engine pre-loaded indicators, use those. Otherwise, fetch from DB
         only when the trade actually has entry conditions that might reference
         indicator columns. Returns an empty DataFrame when indicators are
-        definitely not needed.
+        definitely not needed or underlying_id is unknown.
         """
         if self._preloaded_indicators is not None:
             return self._preloaded_indicators
 
-        if not self.trade.entry.conditions:
+        if not self.trade.entry.conditions or underlying_id is None:
             return pl.DataFrame()
 
         return self.db.indicators(underlying_id, start_dt, end_dt)

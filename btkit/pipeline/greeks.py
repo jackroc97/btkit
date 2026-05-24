@@ -29,6 +29,7 @@ Greeks (annualised inputs, theta in per-day):
 from __future__ import annotations
 
 import math
+from datetime import timedelta
 
 import duckdb
 import numpy as np
@@ -238,7 +239,18 @@ class GreeksCalculator:
         """
         today = df["ts_event"].dt.date()
         dte = (df["expiration"] - today).dt.total_days().cast(pl.Int32)
-        T = (dte.cast(pl.Float64) / 365.0).clip(lower_bound=0.0)
+
+        # Use actual fractional time-to-expiry so 0DTE options get T > 0.
+        # Integer-day DTE gives T=0 for same-day expiry, which produces NaN IV/greeks.
+        # Treat expiration as 20:00 UTC (≈ 16:00 ET) on the expiration date.
+        expiry_dt = (
+            df["expiration"]
+            .cast(pl.Datetime("us"))        # Date → midnight naive datetime
+            .dt.replace_time_zone("UTC")    # mark as UTC
+            + timedelta(hours=20)           # → 20:00 UTC on expiration date
+        )
+        T_sec = (expiry_dt - df["ts_event"].dt.convert_time_zone("UTC")).dt.total_seconds().cast(pl.Float64)
+        T = (T_sec / (365.25 * 24 * 3600)).clip(lower_bound=0.0)
 
         is_call = (df["right"] == "C").cast(pl.Int8).to_numpy().astype(np.int64)
         F = df["underlying_close"].to_numpy()

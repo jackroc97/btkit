@@ -69,7 +69,13 @@ class OutputDatabase:
                 quantity        INTEGER         NOT NULL,
                 multiplier      INTEGER         NOT NULL,
                 open_price      DOUBLE          NOT NULL,
-                exit_price      DOUBLE
+                exit_price      DOUBLE,
+                entry_delta     DOUBLE,
+                entry_iv        DOUBLE,
+                entry_gamma     DOUBLE,
+                entry_theta     DOUBLE,
+                entry_vega      DOUBLE,
+                entry_dte       INTEGER
             )
         """)
 
@@ -191,6 +197,8 @@ class OutputDatabase:
                 "id", "position_id", "instrument_id", "symbol",
                 "expiration", "strike_price", "right", "action",
                 "quantity", "multiplier", "open_price", "exit_price",
+                "entry_delta", "entry_iv", "entry_gamma", "entry_theta",
+                "entry_vega", "entry_dte",
             ])
             self._con.register("_legs", leg_rows)
             self._con.execute("INSERT INTO position_leg SELECT * FROM _legs")

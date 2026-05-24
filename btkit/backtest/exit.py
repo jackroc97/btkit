@@ -266,16 +266,39 @@ class ExitScanner:
         if not indicators.is_empty() and len(indicators.columns) > 1:
             m = m.join(indicators, on="ts_event", how="left")
 
+        # Use session-timezone date for DTE so overnight bars (e.g. 8 PM EDT =
+        # UTC midnight next day) don't show a DTE one lower than their NY date.
+        tz_str = self.strategy.universe.session.timezone
         m = m.with_columns(
-            (pl.col("trade_expiration").cast(pl.Date) - pl.col("ts_event").dt.date())
+            (pl.col("trade_expiration").cast(pl.Date)
+             - pl.col("ts_event").dt.convert_time_zone(tz_str).dt.date())
             .dt.total_days().cast(pl.Int32).alias("_dte_now")
         )
 
+        # Session mask: only allow price-triggered exits (SL/TP/gap) during
+        # configured session hours so illiquid after-hours option prices don't
+        # fire stops. DTE and expiry exits are intentionally unconstrained.
+        session = self.strategy.universe.session
+        if session.start_time is not None and session.end_time is not None:
+            sess_start_sec = session.start_time.hour * 3600 + session.start_time.minute * 60
+            sess_end_sec   = session.end_time.hour   * 3600 + session.end_time.minute   * 60
+            _local_sec = (
+                pl.col("ts_event").dt.convert_time_zone(tz_str).dt.hour().cast(pl.Int32) * 3600
+                + pl.col("ts_event").dt.convert_time_zone(tz_str).dt.minute().cast(pl.Int32) * 60
+            )
+            _in_session = (_local_sec >= pl.lit(sess_start_sec)) & (_local_sec <= pl.lit(sess_end_sec))
+            if session.weekdays_only:
+                _in_session = _in_session & (
+                    pl.col("ts_event").dt.convert_time_zone(tz_str).dt.weekday() < 5
+                )
+        else:
+            _in_session = pl.lit(True)
+
         m = m.with_columns([
-            (pl.col("spread_open_mark") >= pl.col("sl_price")).alias("_gap_sl"),
-            (pl.col("spread_open_mark") <= pl.col("tp_price")).alias("_gap_tp"),
-            (pl.col("position_mark")    >= pl.col("sl_price")).alias("_sl"),
-            (pl.col("position_mark")    <= pl.col("tp_price")).alias("_tp"),
+            ((pl.col("spread_open_mark") >= pl.col("sl_price")) & _in_session).alias("_gap_sl"),
+            ((pl.col("spread_open_mark") <= pl.col("tp_price")) & _in_session).alias("_gap_tp"),
+            ((pl.col("position_mark")    >= pl.col("sl_price")) & _in_session).alias("_sl"),
+            ((pl.col("position_mark")    <= pl.col("tp_price")) & _in_session).alias("_tp"),
         ])
 
         cond_expr = pl.lit(False)
@@ -309,7 +332,7 @@ class ExitScanner:
             m = m.with_columns(pl.lit(False).alias("_dte_exit"))
 
         if exit_cfg.expiry_exit:
-            expiry_expr = pl.col("ts_event").dt.date() >= pl.col("trade_expiration")
+            expiry_expr = pl.col("ts_event").dt.convert_time_zone(tz_str).dt.date() >= pl.col("trade_expiration")
             close_time = self.trade.instrument.expiry_close_time
             if close_time is not None:
                 tz_str = self.strategy.universe.session.timezone
@@ -402,7 +425,11 @@ class ExitScanner:
         if not self.trade.exit.conditions:
             return pl.DataFrame()
 
-        underlying_id = self.db.instrument_id_for_symbol(self.trade.instrument.root_symbol)
+        underlying_id = self.db.front_future_id(
+            self.trade.instrument.root_symbol,
+            min_entry.date(),
+            self.trade.instrument.roll_days_before_expiry,
+        )
         if underlying_id is None:
             return pl.DataFrame()
 

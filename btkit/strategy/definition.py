@@ -67,6 +67,7 @@ class InstrumentConfig(BaseModel):
     root_symbol: str
     asset_class: Literal["future", "equity", "etf"]
     expiry_close_time: time | None = None  # local time after which expiry_exit triggers on expiration day
+    roll_days_before_expiry: int = 7       # futures only: roll to next contract this many days before front-month expiry
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +104,11 @@ class LegConfig(BaseModel):
     quantity: int = 1
     # Selection mode A: delta-targeted (standard)
     delta: NumericSweep | None = None
+    delta_tolerance: float = 0.10  # ±band around target_delta for candidate search
+    dte_tolerance: int = 5         # ±band around target_dte for candidate search
     # Selection mode B: fixed strike offset from a reference leg
+    # When strike_offset is set, dte is ignored — the expiration is inherited
+    # from the reference leg to guarantee all legs share the same expiry.
     strike_offset: float | None = None   # positive = above ref strike, negative = below
     reference_leg: str | None = None     # name of the leg whose strike is the origin
 

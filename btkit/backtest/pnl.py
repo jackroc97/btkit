@@ -113,6 +113,12 @@ class PnLCalculator:
                         pl.col(f"leg_{leg.name}_multiplier").alias("multiplier"),
                         pl.col(f"leg_{leg.name}_close").alias("open_price"),
                         pl.lit(None).cast(pl.Float64).alias("exit_price"),
+                        pl.col(f"leg_{leg.name}_delta").alias("entry_delta"),
+                        pl.col(f"leg_{leg.name}_iv").alias("entry_iv"),
+                        pl.col(f"leg_{leg.name}_gamma").alias("entry_gamma"),
+                        pl.col(f"leg_{leg.name}_theta").alias("entry_theta"),
+                        pl.col(f"leg_{leg.name}_vega").alias("entry_vega"),
+                        pl.col(f"leg_{leg.name}_dte").cast(pl.Int32).alias("entry_dte"),
                     ])
                 )
                 legs_list.append(leg_df)
