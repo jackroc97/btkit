@@ -363,6 +363,24 @@ results for all parameter combinations within that matrix).
 
 ---
 
+### `study`
+
+One row per study run. Written by `btkit study run` before workers start; `finished_at`
+is set after the merge completes.
+
+```sql
+CREATE TABLE study (
+    id                  INTEGER PRIMARY KEY,
+    name                VARCHAR         NOT NULL,
+    strategy_yaml       VARCHAR         NOT NULL,   -- raw YAML text of the study file
+    total_combinations  INTEGER         NOT NULL,
+    created_at          TIMESTAMPTZ     NOT NULL,
+    finished_at         TIMESTAMPTZ                 -- NULL until all combinations complete
+);
+```
+
+---
+
 ### `backtest`
 
 One row per backtest run. Strategy parameters are stored as JSON so the output database
@@ -371,31 +389,38 @@ is self-describing — results can be interpreted without the original YAML file
 ```sql
 CREATE TABLE backtest (
     id                  INTEGER PRIMARY KEY,
-    matrix_id           INTEGER,                -- NULL for single runs;
-                                                -- groups all runs from one matrix expansion
+    study_id            INTEGER,                -- NULL for single runs; FK to study.id
     combination_id      INTEGER,                -- NULL for single runs;
-                                                -- 1-indexed position within the matrix
+                                                -- 1-indexed position within the study
     strategy_name       VARCHAR         NOT NULL,
     strategy_version    VARCHAR,
     strategy_params     JSON            NOT NULL,
     initial_equity      DOUBLE          NOT NULL,   -- account equity at backtest start
     slippage_pct        DOUBLE          NOT NULL,
     fee_per_contract    DOUBLE          NOT NULL,
-    created_at          TIMESTAMPTZ     NOT NULL
+    created_at          TIMESTAMPTZ     NOT NULL,
+    status              VARCHAR,                -- 'completed' | 'failed'
+    duration_s          DOUBLE,
+    warnings            JSON,
+    error_message       VARCHAR,
+    error_traceback     VARCHAR
 );
 ```
 
 **Design notes:**
 
-- `matrix_id` is assigned by `MatrixRunner` and shared across all backtests from the same
-  matrix expansion. It allows `PostProcessor` to load and compare the full set of
-  combinations from a single matrix run.
-- `combination_id` is the 1-indexed position of this run within the expanded matrix,
-  corresponding to the row index in `StrategyMatrix.params_df`. Together with
-  `strategy_params` (which stores the scalar parameter values for this specific run),
+- `study_id` references the `study` table and groups all backtests from one study run.
+  It is `NULL` for single-combination runs launched via `btkit run`.
+- `combination_id` is the 1-indexed position of this run within the study's expanded
+  combination list, corresponding to the row index in `StudyExpander.params_df`. Together
+  with `strategy_params` (which stores the scalar values for this specific combination),
   it allows any individual combination to be identified and re-run in isolation.
-- Both columns are NULL for single-combination backtests, which never pass through
-  `MatrixRunner`.
+- Both columns are `NULL` for single-combination backtests that do not pass through
+  `StudyRunner`.
+- Legacy databases that contain a `matrix_id` column are auto-migrated to `study_id`
+  on first open via `OutputDatabase._maybe_migrate()`.
+
+See [study.md](study.md) for full documentation on the study feature.
 
 ---
 

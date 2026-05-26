@@ -91,6 +91,7 @@ re-engineering of the project where necessary.
 | [database.md](database.md) | Input and output database schemas (DuckDB) |
 | [classes.md](classes.md) | Package structure and class signatures for the logic layer |
 | [strategy.md](strategy.md) | Strategy YAML schema, Pydantic models, condition expressions, exit priority |
+| [study.md](study.md) | Study YAML format, sweep expansion, parallel execution, result analysis |
 | [fill_price_and_costs.md](fill_price_and_costs.md) | Fill price rules, slippage model, fee model |
 | [constraints.md](constraints.md) | Known constraints, limitations, and reach goals |
 | [mvp.md](mvp.md) | MVP success criteria, in-scope components, and deferred features |
