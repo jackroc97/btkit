@@ -3,7 +3,7 @@ strategy:
   version: "1.0"
 
   universe:
-    start_date: "2026-04-22"
+    start_date: "2026-05-04"
     end_date:   "2026-05-21"
     session:
       timezone:      "America/New_York"
@@ -14,7 +14,7 @@ strategy:
 
   costs:
     slippage_pct:     0.01
-    fee_per_contract: 0.65
+    fee_per_contract: 0.85
 
   trades:
     - name: put_spread

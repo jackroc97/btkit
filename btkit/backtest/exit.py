@@ -34,7 +34,12 @@ from datetime import UTC, datetime
 import polars as pl
 
 from btkit.db.input_db import InputDatabase
-from btkit.strategy.definition import StrategyDefinition, TradeDefinition
+from btkit.strategy.definition import (
+    StopLossConfig,
+    StrategyDefinition,
+    TakeProfitConfig,
+    TradeDefinition,
+)
 from btkit.strategy.loader import parse_condition
 
 
@@ -231,6 +236,25 @@ class ExitScanner:
     # Step 3: Find first exit hit per entry
     # ------------------------------------------------------------------
 
+    def _parse_trigger_condition(self, condition: str | None, trigger: str) -> pl.Expr:
+        """Parse an AND-gate condition for stop_loss or take_profit. Returns lit(True) when absent."""
+        if condition is None:
+            return pl.lit(True)
+        try:
+            return parse_condition(condition)
+        except Exception as e:
+            self.warnings.append(
+                {
+                    "phase": "exit",
+                    "trade": self.trade.name,
+                    "type": "condition_error",
+                    "trigger": trigger,
+                    "condition": condition,
+                    "error": str(e),
+                }
+            )
+            return pl.lit(True)
+
     def _find_first_hit(
         self,
         position_marks: pl.DataFrame,
@@ -313,12 +337,24 @@ class ExitScanner:
         else:
             _in_session = pl.lit(True)
 
+        sl_cond = self._parse_trigger_condition(
+            exit_cfg.stop_loss.condition
+            if isinstance(exit_cfg.stop_loss, StopLossConfig)
+            else None,
+            "stop_loss",
+        )
+        tp_src = exit_cfg.take_profit
+        tp_cond = self._parse_trigger_condition(
+            tp_src.condition if isinstance(tp_src, TakeProfitConfig) else None,
+            "take_profit",
+        )
+
         m = m.with_columns(
             [
-                ((pl.col("spread_open_mark") >= pl.col("sl_price")) & _in_session).alias("_gap_sl"),
-                ((pl.col("spread_open_mark") <= pl.col("tp_price")) & _in_session).alias("_gap_tp"),
-                ((pl.col("position_mark") >= pl.col("sl_price")) & _in_session).alias("_sl"),
-                ((pl.col("position_mark") <= pl.col("tp_price")) & _in_session).alias("_tp"),
+                ((pl.col("spread_open_mark") >= pl.col("sl_price")) & _in_session & sl_cond).alias("_gap_sl"),
+                ((pl.col("spread_open_mark") <= pl.col("tp_price")) & _in_session & tp_cond).alias("_gap_tp"),
+                ((pl.col("position_mark") >= pl.col("sl_price")) & _in_session & sl_cond).alias("_sl"),
+                ((pl.col("position_mark") <= pl.col("tp_price")) & _in_session & tp_cond).alias("_tp"),
             ]
         )
 

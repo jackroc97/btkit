@@ -74,9 +74,12 @@ re-engineering of the project where necessary.
 5. **Simple pipeline.** One command (`btkit pipeline`) to go from raw data to visualized
    output. Individual sub-commands are also available for incremental use:
    - **`btkit build`** — Ingest raw data, compute Greeks, run indicator scripts, write
-     input database.
+     input database. Use `--append` to extend an existing database with new date ranges
+     or new symbols without rebuilding from scratch. See
+     [Incremental Builds](database.md#incremental-builds---append) for details.
    - **`btkit run`** — Load strategy YAML, run vectorized backtest (single or matrix),
-     write output database.
+     write output database. Automatically checks for stale indicators and rebuilds them
+     if the underlying bar data has been extended since the last build.
    - **`btkit analyze`** — Compute metrics, open results dashboard.
 
 ---

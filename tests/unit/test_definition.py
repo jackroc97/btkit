@@ -19,8 +19,10 @@ from btkit.strategy.definition import (
     ExitConfig,
     InstrumentConfig,
     LegConfig,
+    StopLossConfig,
     StrategyDefinition,
     SweepRange,
+    TakeProfitConfig,
     TradeDefinition,
     UniverseConfig,
 )
@@ -106,9 +108,16 @@ class TestEntryWindowConfig:
 
 
 class TestExitConfig:
-    def test_take_profit_required(self):
-        with pytest.raises(ValidationError, match="take_profit"):
-            ExitConfig(stop_loss=2.0)
+    def test_all_optional(self):
+        cfg = ExitConfig()
+        assert cfg.stop_loss is None
+        assert cfg.take_profit is None
+        assert cfg.take_profit_pct is None
+
+    def test_stop_loss_only(self):
+        cfg = ExitConfig(stop_loss=2.0)
+        assert cfg.stop_loss == 2.0
+        assert cfg.take_profit is None
 
     def test_take_profit_and_pct_mutually_exclusive(self):
         with pytest.raises(ValidationError, match="mutually exclusive"):
@@ -123,6 +132,54 @@ class TestExitConfig:
         cfg = ExitConfig(stop_loss=2.0, take_profit=1.0)
         assert cfg.take_profit == 1.0
         assert cfg.take_profit_pct is None
+
+    # --- Object form ---
+
+    def test_stop_loss_object_form(self):
+        cfg = ExitConfig(
+            stop_loss=StopLossConfig(price=2.0, condition="close < vwap"),
+            take_profit=1.0,
+        )
+        assert isinstance(cfg.stop_loss, StopLossConfig)
+        assert cfg.stop_loss.price == 2.0
+        assert cfg.stop_loss.condition == "close < vwap"
+
+    def test_stop_loss_object_no_condition(self):
+        cfg = ExitConfig(stop_loss=StopLossConfig(price=2.0), take_profit=1.0)
+        assert cfg.stop_loss.condition is None
+
+    def test_take_profit_object_price(self):
+        cfg = ExitConfig(
+            stop_loss=2.0,
+            take_profit=TakeProfitConfig(price=1.0, condition="close > vwap"),
+        )
+        assert isinstance(cfg.take_profit, TakeProfitConfig)
+        assert cfg.take_profit.price == 1.0
+        assert cfg.take_profit.condition == "close > vwap"
+
+    def test_take_profit_object_pct(self):
+        cfg = ExitConfig(
+            stop_loss=2.0,
+            take_profit=TakeProfitConfig(pct=0.70, condition="close > vwap"),
+        )
+        assert cfg.take_profit.pct == 0.70
+        assert cfg.take_profit.price is None
+
+    def test_take_profit_object_requires_price_or_pct(self):
+        with pytest.raises(ValidationError, match="one of price or pct"):
+            ExitConfig(stop_loss=2.0, take_profit=TakeProfitConfig())
+
+    def test_take_profit_object_price_and_pct_mutually_exclusive(self):
+        with pytest.raises(ValidationError, match="mutually exclusive"):
+            ExitConfig(stop_loss=2.0, take_profit=TakeProfitConfig(price=1.0, pct=0.5))
+
+    def test_both_object_forms(self):
+        cfg = ExitConfig(
+            stop_loss=StopLossConfig(price=5.0, condition="close < vwap_1d"),
+            take_profit=TakeProfitConfig(pct=0.70, condition="close > vwap_1u"),
+        )
+        assert isinstance(cfg.stop_loss, StopLossConfig)
+        assert isinstance(cfg.take_profit, TakeProfitConfig)
 
 
 # ---------------------------------------------------------------------------

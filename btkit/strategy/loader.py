@@ -60,7 +60,8 @@ def parse_condition(expr: str) -> pl.Expr:
         Simple comparisons:  "rsi_14 < 40"
         Boolean operators:   "rsi_14 < 40 and vix_close < 30"
         Not:                 "not rsi_14 > 60"
-        Leg properties:      "short_put.delta > -0.30"  → pl.col("short_put_delta")
+        Leg properties:      "short_put.delta > -0.30"  → pl.col("leg_short_put_delta")
+                             "short_put.strike < 5800"  → pl.col("leg_short_put_strike_price")
 
     Identifiers are resolved to column names. Dotted names (leg.field) are
     converted to underscore form (leg_field) for use in the wide joined DataFrame.
@@ -129,9 +130,11 @@ def _ast_to_polars(node, source: str) -> pl.Expr:
         return pl.col(node.id)
 
     if isinstance(node, _ast.Attribute):
-        # short_put.delta → col("short_put_delta")
+        # short_put.delta → col("leg_short_put_delta")
+        # short_put.strike → col("leg_short_put_strike_price")  (alias)
         if isinstance(node.value, _ast.Name):
-            return pl.col(f"{node.value.id}_{node.attr}")
+            attr = "strike_price" if node.attr == "strike" else node.attr
+            return pl.col(f"leg_{node.value.id}_{attr}")
         raise ValueError(f"Nested attribute access not supported: {source!r}")
 
     if isinstance(node, _ast.Constant):

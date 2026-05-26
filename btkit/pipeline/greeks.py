@@ -176,46 +176,77 @@ class GreeksCalculator:
         self.risk_free_rate = risk_free_rate
         self.batch_size = batch_size
 
-    def run(self) -> None:
+    def run(self, skip_existing: bool = False) -> None:
         """
-        Process all rows in option_bars in batches of batch_size.
-        For each batch: join with underlying_bars for the underlying close,
-        call _compute_batch(), write results to option_greeks.
+        Process all rows in option_bars one trading day at a time.
+
+        Strategy:
+          1. Materialize all pending rows (not yet in option_greeks when
+             skip_existing=True) into a TEMP TABLE in a single pass — one
+             NOT EXISTS scan instead of one per batch.
+          2. Collect the distinct trading dates from that table.
+          3. For each date, fetch rows with a simple equality filter,
+             compute Greeks, and INSERT. O(n) total vs the previous O(n²)
+             OFFSET approach.
+
+        When skip_existing=False every option_bars row is processed.
         """
-        # Load options joined with underlying close in one query, ordered for
-        # deterministic batching. underlying_bars and option_bars share ts_event.
-        total = self.con.execute("SELECT COUNT(*) FROM option_bars").fetchone()[0]
+        new_only_filter = """
+            AND NOT EXISTS (
+                SELECT 1 FROM option_greeks og
+                WHERE og.ts_event = ob.ts_event AND og.instrument_id = ob.instrument_id
+            )
+        """ if skip_existing else ""
+
+        # Step 1: Materialise pending rows once (expensive NOT EXISTS runs here,
+        # not once per batch).
+        self.con.execute("DROP TABLE IF EXISTS _greek_pending")
+        self.con.execute(
+            f"""
+            CREATE TEMP TABLE _greek_pending AS
+            SELECT
+                ob.ts_event,
+                ob.instrument_id,
+                ob.underlying_id,
+                ob.expiration,
+                ob.strike_price,
+                ob."right",
+                ob.close        AS option_close,
+                ub.close        AS underlying_close
+            FROM option_bars ob
+            JOIN underlying_bars ub
+              ON ub.instrument_id = ob.underlying_id
+             AND ub.ts_event     = ob.ts_event
+            WHERE ob.close IS NOT NULL
+            {new_only_filter}
+            ORDER BY ob.ts_event, ob.instrument_id
+            """
+        )
+
+        total = self.con.execute("SELECT COUNT(*) FROM _greek_pending").fetchone()[0]
         if total == 0:
+            self.con.execute("DROP TABLE IF EXISTS _greek_pending")
             return
 
-        print(f"[greeks] Computing Greeks for {total:,} option bars...")
+        # Step 2: Distinct trading dates — drives per-day streaming.
+        dates = [
+            r[0]
+            for r in self.con.execute(
+                "SELECT DISTINCT DATE(ts_event) FROM _greek_pending ORDER BY 1"
+            ).fetchall()
+        ]
 
-        offset = 0
+        print(f"[greeks] Computing Greeks for {total:,} option bars across {len(dates)} days...")
+
         written = 0
-        while offset < total:
+        for i, date in enumerate(dates, 1):
             batch_df = self.con.execute(
-                """
-                SELECT
-                    ob.ts_event,
-                    ob.instrument_id,
-                    ob.underlying_id,
-                    ob.expiration,
-                    ob.strike_price,
-                    ob."right",
-                    ob.close        AS option_close,
-                    ub.close        AS underlying_close
-                FROM option_bars ob
-                JOIN underlying_bars ub
-                  ON ub.instrument_id = ob.underlying_id
-                 AND ub.ts_event     = ob.ts_event
-                ORDER BY ob.instrument_id, ob.ts_event
-                LIMIT ? OFFSET ?
-                """,
-                [self.batch_size, offset],
+                "SELECT * FROM _greek_pending WHERE DATE(ts_event) = ? ORDER BY instrument_id, ts_event",
+                [date],
             ).pl()
 
             if batch_df.is_empty():
-                break
+                continue
 
             result = self._compute_batch(batch_df)
             if not result.is_empty():
@@ -224,9 +255,10 @@ class GreeksCalculator:
                 self.con.unregister("_greeks_batch")
                 written += len(result)
 
-            offset += self.batch_size
+            print(f"\r[greeks] {date}  {i}/{len(dates)} days  rows={written:,}", end="", flush=True)
 
-        print(f"[greeks] Wrote {written:,} option_greeks rows")
+        self.con.execute("DROP TABLE IF EXISTS _greek_pending")
+        print(f"\n[greeks] Wrote {written:,} option_greeks rows")
 
     def _compute_batch(self, df: pl.DataFrame) -> pl.DataFrame:
         """

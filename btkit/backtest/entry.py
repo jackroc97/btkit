@@ -38,7 +38,12 @@ from zoneinfo import ZoneInfo
 import polars as pl
 
 from btkit.db.input_db import InputDatabase
-from btkit.strategy.definition import StrategyDefinition, TradeDefinition
+from btkit.strategy.definition import (
+    StopLossConfig,
+    StrategyDefinition,
+    TakeProfitConfig,
+    TradeDefinition,
+)
 from btkit.strategy.loader import parse_condition
 
 
@@ -341,18 +346,39 @@ class EntryScanner:
         exit_cfg = self.trade.exit
         entries = entries.with_columns([mark_expr.alias("open_mark")])
 
-        if exit_cfg.take_profit_pct is not None:
+        if isinstance(exit_cfg.take_profit, TakeProfitConfig):
+            if exit_cfg.take_profit.pct is not None:
+                tp_expr = (
+                    pl.col("open_mark") * pl.lit(1.0 - float(exit_cfg.take_profit.pct))
+                ).alias("tp_price")
+            else:
+                tp_expr = (
+                    pl.col("open_mark") - pl.lit(float(exit_cfg.take_profit.price))
+                ).alias("tp_price")
+        elif exit_cfg.take_profit_pct is not None:
             # tp_price = open_mark × (1 - pct): exit when mark falls to this fraction
-            tp_expr = (pl.col("open_mark") * pl.lit(1.0 - float(exit_cfg.take_profit_pct))).alias(
-                "tp_price"
-            )
-        else:
+            tp_expr = (
+                pl.col("open_mark") * pl.lit(1.0 - float(exit_cfg.take_profit_pct))
+            ).alias("tp_price")
+        elif exit_cfg.take_profit is not None:
             tp_expr = (pl.col("open_mark") - pl.lit(float(exit_cfg.take_profit))).alias("tp_price")
+        else:
+            tp_expr = pl.lit(None).cast(pl.Float64).alias("tp_price")
+
+        if exit_cfg.stop_loss is None:
+            sl_expr = pl.lit(None).cast(pl.Float64).alias("sl_price")
+        else:
+            sl_price = (
+                float(exit_cfg.stop_loss.price)
+                if isinstance(exit_cfg.stop_loss, StopLossConfig)
+                else float(exit_cfg.stop_loss)
+            )
+            sl_expr = (pl.col("open_mark") + pl.lit(sl_price)).alias("sl_price")
 
         entries = entries.with_columns(
             [
                 tp_expr,
-                (pl.col("open_mark") + pl.lit(float(exit_cfg.stop_loss))).alias("sl_price"),
+                sl_expr,
                 pl.lit(exit_cfg.dte_exit).cast(pl.Int32).alias("dte_exit"),
             ]
         )

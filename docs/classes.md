@@ -165,7 +165,7 @@ only sequential reads from each worker file and a single write pass.
 
 ### `DatabaseBuilder`
 
-Orchestrates the full input database build from raw databento files.
+Orchestrates the full input database build from raw Databento files.
 
 ```python
 class DatabaseBuilder:
@@ -173,39 +173,110 @@ class DatabaseBuilder:
         self,
         raw_data_path: str,
         db_path: str,
-        indicator_scripts: list[str] = None
+        indicator_scripts: list[str] = None,
+        append: bool = False,
     ): ...
 
     def build(self) -> None:
-        """Full build: ingest → greeks → indicators."""
+        """
+        Full build in five steps. Prints per-stage timing on completion.
+
+        Step 0 — pre-scan: _collect_ohlcv_instrument_ids() reads all OHLCV
+        files once to collect the exact set of instrument_ids that appear in
+        price data. This drives step 1.
+
+        Step 1 — definitions: _ingest_definitions(required_ids) reads daily
+        definition snapshots in chronological order, stopping as soon as every
+        id from step 0 is resolved. Stops early rather than reading all
+        snapshots. See design note below.
+
+        Steps 2–4 — ohlcv, greeks, indicators: unchanged.
+        """
         ...
 
-    def _ingest_definitions(self) -> None:
+    def _collect_ohlcv_instrument_ids(self) -> set[int]:
         """
-        Reads .dbn definition files. Builds an internal instrument map
-        used when joining metadata into option_bars at ingest time.
+        Lightweight pre-scan of all OHLCV files. Returns the complete set of
+        instrument_ids that appear in price data.
+
+        Used to bound definition file reads to the minimum needed — we read
+        definition snapshots only until this set is fully resolved in the
+        instrument map. Adds one extra read pass over the OHLCV files, which
+        is cheap due to OS page caching when _ingest_ohlcv reads them again.
+        """
+        ...
+
+    def _ingest_definitions(self, required_ids: set[int]) -> None:
+        """
+        Reads *.definition.dbn.zst files in chronological order and builds
+        the internal instrument map (instrument_id → _InstrumentInfo).
+
+        Stops as soon as every id in required_ids is resolved. Remaining daily
+        snapshots are not read — they contain the same static metadata for
+        instruments already mapped.
+
+        Only instrument_class F (future), C (call), and P (put) are kept.
+        Emits a warning if any required_id has no definition record.
         """
         ...
 
     def _ingest_ohlcv(self) -> None:
         """
-        Reads .dbn OHLCV files. Splits into underlying_bars and option_bars,
-        pre-joining definition metadata into option_bars at write time so
-        no joins are required at backtest runtime.
+        Reads .dbn OHLCV files one zip at a time. Splits rows into
+        underlying_bars and option_bars, pre-joining definition metadata into
+        option_bars at write time so no joins are required at backtest runtime.
+
+        On append builds, rows with ts_event after the existing table maximum
+        are inserted directly (no NOT EXISTS check). Rows within the overlap
+        window — the boundary between old and new data — use NOT EXISTS to
+        avoid duplicates. This makes appending new date ranges fast while
+        remaining safe for re-downloads that overlap existing data.
         """
         ...
 
     def _compute_greeks(self) -> None:
-        """Instantiates GreeksCalculator and processes option_bars in batches."""
+        """
+        Materialises all pending option_bars rows (those not yet in
+        option_greeks) into a temp table in one pass, then processes
+        one trading day at a time. Avoids the O(n²) cost of OFFSET-based
+        pagination against a NOT EXISTS subquery.
+        """
         ...
 
     def _run_indicators(self) -> None:
         """
         Instantiates one IndicatorRunner per script path and runs each
-        against the underlying_bars for the configured underlying.
+        against the underlying_bars for every underlying in the database.
         """
         ...
 ```
+
+**Design note — why pre-scan OHLCV before reading definitions:**
+
+Databento includes one definition snapshot per trading day. For a 4-month dataset
+that is ~121 files; for a multi-year dataset it is 500+. Each snapshot is a
+complete picture of all listed instruments, and because instrument metadata
+(strike, expiry, multiplier) is static, consecutive daily snapshots are largely
+identical. Reading all of them wastes most of the time re-parsing rows already in
+the map.
+
+The correct fix is to read definition files only until every instrument that
+appears in OHLCV data is resolved. The pre-scan collects that set in a single
+lightweight pass over the OHLCV files. Definition reading then stops as soon as
+the set is empty. This is correct across all dataset sizes and futures roll cycles:
+
+- **Quarterly futures rolls** are captured because the first OHLCV bar for a new
+  contract forces its instrument_id into the required set, which then drives
+  reading the definition file from the period when it was listed.
+- **New intra-period strikes** are captured for the same reason — any strike that
+  traded has an OHLCV bar, and that bar's instrument_id is in the required set.
+- **Instruments that never traded** (out-of-the-money strikes, expired contracts
+  with no volume) are correctly ignored — they contribute no bars and are not
+  needed by any downstream step.
+
+A simpler earlier approach — reading only the first definition file per zip —
+was rejected because it breaks for datasets spanning multiple futures roll cycles,
+where new contracts and their options are listed mid-period.
 
 ---
 

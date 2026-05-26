@@ -136,21 +136,38 @@ class LegConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class StopLossConfig(BaseModel):
+    price: NumericSweep
+    condition: str | None = None  # AND-gated: SL only fires when this expression is also true
+
+
+class TakeProfitConfig(BaseModel):
+    price: NumericSweep | None = None  # fixed per-point offset from open_mark
+    pct: NumericSweep | None = None  # fraction of open_mark to retain (e.g. 0.70 = exit at 70% profit)
+    condition: str | None = None  # AND-gated: TP only fires when this expression is also true
+
+    @model_validator(mode="after")
+    def validate_tp_config(self) -> TakeProfitConfig:
+        if self.price is None and self.pct is None:
+            raise ValueError("one of price or pct is required in take_profit")
+        if self.price is not None and self.pct is not None:
+            raise ValueError("price and pct are mutually exclusive in take_profit")
+        return self
+
+
 class ExitConfig(BaseModel):
-    stop_loss: NumericSweep
-    take_profit: NumericSweep | None = None  # fixed per-point offset from open_mark
-    take_profit_pct: NumericSweep | None = (
-        None  # fraction of open_mark to retain (e.g. 0.70 = exit at 70% profit)
-    )
+    stop_loss: NumericSweep | StopLossConfig | None = None
+    take_profit: NumericSweep | TakeProfitConfig | None = None
+    take_profit_pct: NumericSweep | None = None  # legacy top-level form; use take_profit.pct for new configs
     dte_exit: IntSweep | None = None
     expiry_exit: bool = True
     conditions: list[str] = []  # OR logic — position closes if any condition is true
 
     @model_validator(mode="after")
     def validate_take_profit(self) -> ExitConfig:
-        if self.take_profit is None and self.take_profit_pct is None:
-            raise ValueError("one of take_profit or take_profit_pct is required")
-        if self.take_profit is not None and self.take_profit_pct is not None:
+        has_tp = self.take_profit is not None
+        has_tp_pct = self.take_profit_pct is not None
+        if has_tp and has_tp_pct:
             raise ValueError("take_profit and take_profit_pct are mutually exclusive")
         return self
 
@@ -237,6 +254,7 @@ class StrategyDefinition(BaseModel):
     universe: UniverseConfig
     costs: CostsConfig = CostsConfig()
     matrix: MatrixConfig = MatrixConfig()
+    indicators: list[str] = []  # paths to indicator scripts (relative to CWD or absolute)
     trades: list[TradeDefinition]
     combinations: list[StructuredCombination] | TableCombinations | None = None
 
@@ -273,6 +291,10 @@ class StrategyDefinition(BaseModel):
                     sweep_fields.append(f"trades[{trade.name}].legs[{leg.name}].dte")
             for fname in ("stop_loss", "take_profit", "take_profit_pct", "dte_exit"):
                 v = getattr(trade.exit, fname)
+                if isinstance(v, StopLossConfig):
+                    v = v.price
+                elif isinstance(v, TakeProfitConfig):
+                    v = v.price if v.price is not None else v.pct
                 if v is not None and is_sweep(v):
                     sweep_fields.append(f"trades[{trade.name}].exit.{fname}")
 
@@ -297,6 +319,10 @@ class StrategyDefinition(BaseModel):
                     return True
             for fname in ("stop_loss", "take_profit", "take_profit_pct", "dte_exit"):
                 v = getattr(trade.exit, fname)
+                if isinstance(v, StopLossConfig):
+                    v = v.price
+                elif isinstance(v, TakeProfitConfig):
+                    v = v.price if v.price is not None else v.pct
                 if v is not None and is_sweep(v):
                     return True
         return False

@@ -129,7 +129,16 @@ class IndicatorRunner:
             return
 
         self.con.register("_indicator_batch", tall)
-        self.con.execute("INSERT INTO indicator_bars SELECT * FROM _indicator_batch")
+        self.con.execute(
+            """
+            INSERT INTO indicator_bars
+            SELECT t.* FROM _indicator_batch t
+            WHERE NOT EXISTS (
+                SELECT 1 FROM indicator_bars ib
+                WHERE ib.ts_event = t.ts_event AND ib.indicator_id = t.indicator_id
+            )
+            """
+        )
         self.con.unregister("_indicator_batch")
 
     def _load_module(self) -> ModuleType:

@@ -27,7 +27,7 @@ import dash_ag_grid as dag
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
-from dash import Dash, Input, Output, dcc, html
+from dash import Dash, Input, Output, State, ctx, dcc, html
 from flask import Response
 
 from btkit.analysis.metrics import PostProcessor
@@ -114,13 +114,27 @@ const strikeLines   = {strike_lines_json};
 const openTs        = {open_ts};
 const exitTs        = {exit_ts};
 
+// ── Timezone helpers (America/New_York) ─────────────────────────────────────
+const _etTime = ts => new Date(ts * 1000).toLocaleTimeString('en-US', {{
+  timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false,
+}});
+const _etDate = ts => new Date(ts * 1000).toLocaleDateString('en-US', {{
+  timeZone: 'America/New_York', month: 'short', day: 'numeric',
+}});
+const _etDateTime = ts => `${{_etDate(ts)}} ${{_etTime(ts)}}`;
+const _etTickFmt = (ts, type) => type < 3 ? _etDate(ts) : _etTime(ts);
+
 // ── Main candlestick + volume chart ─────────────────────────────────────────
 const chart = LightweightCharts.createChart(document.getElementById('chart'), {{
   layout: {{ background: {{ color: '#fff' }}, textColor: '#374151' }},
   grid:   {{ vertLines: {{ color: '#F3F4F6' }}, horzLines: {{ color: '#F3F4F6' }} }},
   crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
   rightPriceScale: {{ borderColor: '#E5E7EB' }},
-  timeScale: {{ borderColor: '#E5E7EB', timeVisible: true, secondsVisible: false }},
+  localization: {{ timeFormatter: _etDateTime }},
+  timeScale: {{
+    borderColor: '#E5E7EB', timeVisible: true, secondsVisible: false,
+    tickMarkFormatter: _etTickFmt,
+  }},
   width:  document.getElementById('chart').clientWidth,
   height: document.getElementById('chart').clientHeight,
 }});
@@ -179,7 +193,8 @@ const pnlChart = LightweightCharts.createChart(document.getElementById('pnl-char
   layout: {{ background: {{ color: '#F9FAFB' }}, textColor: '#374151' }},
   grid:   {{ vertLines: {{ color: '#E5E7EB' }}, horzLines: {{ color: '#E5E7EB' }} }},
   crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
-  rightPriceScale: {{ borderColor: '#E5E7EB' }},
+  rightPriceScale: {{ borderColor: '#E5E7EB', autoScale: true }},
+  localization: {{ timeFormatter: _etDateTime }},
   timeScale: {{ borderColor: '#E5E7EB', timeVisible: true, secondsVisible: false, visible: false }},
   handleScroll: false,
   handleScale:  false,
@@ -200,12 +215,19 @@ const pnlSeries = pnlChart.addBaselineSeries({{
 }});
 
 if (pnlData.length > 0) {{
-  // Map every candle timestamp into the P&L series (null where no trade data
-  // exists). This gives the P&L chart the same time domain as the candle chart
-  // so setVisibleRange() is never clamped when scrolling outside the trade window.
+  // Map every candle timestamp into the P&L series. The series must span the full
+  // candle time domain so both charts share the same logical time axis and scroll
+  // 1:1 at any zoom level. Within the trade window forward-fill the last known
+  // value to eliminate gaps from sparse option bar ticks. Outside the trade window
+  // emit null so no line is drawn, but the time domain anchor still exists.
   const pnlMap = {{}};
   pnlData.forEach(d => {{ pnlMap[d.time] = d.value; }});
-  const paddedPnl = candleData.map(c => ({{ time: c.time, value: pnlMap[c.time] ?? null }}));
+  let _lastPnl = null;
+  const paddedPnl = candleData.map(c => {{
+    if (pnlMap[c.time] !== undefined) _lastPnl = pnlMap[c.time];
+    const inTrade = c.time >= openTs && c.time <= exitTs;
+    return {{ time: c.time, value: (inTrade && _lastPnl !== null) ? _lastPnl : null }};
+  }});
   pnlSeries.setData(paddedPnl);
 
   // Gray dashed line: hypothetical P&L if position had been held after exit
@@ -1034,7 +1056,8 @@ def _build_chart_html(
 
                 for ts, grp in _groupby(opt_rows, key=lambda x: x[0]):
                     for _, inst_id, close in grp:
-                        current_prices[inst_id] = close
+                        if close:  # skip None and zero prices (bad/stale ticks)
+                            current_prices[inst_id] = close
                     if len(current_prices) < len(legs):
                         continue
                     ts_int = int(ts.timestamp())
@@ -1127,25 +1150,417 @@ def _build_chart_html(
 
 
 # ---------------------------------------------------------------------------
+# Comparison helpers (equity curve overlay)
+# ---------------------------------------------------------------------------
+
+_PURPLE = "#7C3AED"
+_TEAL = "#0891B2"
+
+
+def _remove_comparison_traces(fig: dict) -> dict:
+    """Strip all traces whose name starts with '⊕ ' from a Plotly figure dict."""
+    import copy
+
+    fig = copy.deepcopy(fig)
+    fig["data"] = [t for t in fig.get("data", []) if not (t.get("name") or "").startswith("⊕ ")]
+    return fig
+
+
+def _fetch_buyhold_trace(
+    ticker: str,
+    start_date,
+    end_date,
+    quantity: float = 1.0,
+) -> tuple:
+    try:
+        import yfinance as yf
+    except ImportError:
+        return None, "yfinance not installed — run: pip install yfinance"
+
+    data = yf.download(
+        ticker.upper(), start=start_date, end=end_date, auto_adjust=True, progress=False
+    )
+    if data.empty:
+        return None, f"No data for {ticker!r}"
+
+    close = data["Close"]
+    if hasattr(close, "squeeze"):
+        close = close.squeeze()
+    close = close.dropna()
+    if close.empty:
+        return None, f"No valid prices for {ticker!r}"
+
+    first_price = float(close.iloc[0])
+    dates = list(close.index)
+    pnls = [(float(p) - first_price) * quantity for p in close.values.flatten()]
+
+    qty_label = f" × {quantity:g}" if quantity != 1 else ""
+    return (
+        go.Scatter(
+            x=dates,
+            y=pnls,
+            mode="lines",
+            name=f"⊕ {ticker.upper()} Buy & Hold{qty_label}",
+            line=dict(color=_AMBER, width=1.5, dash="dot"),
+            hovertemplate="%{x|%Y-%m-%d}<br><b>$%{y:+,.2f}</b><extra></extra>",
+            showlegend=True,
+        ),
+        None,
+    )
+
+
+def _fetch_livetrades_trace(csv_path: str, start_date, end_date) -> tuple:
+    import csv as _csv
+    from datetime import datetime as _dt
+
+    path = Path(csv_path).expanduser()
+    if not path.exists():
+        return None, f"File not found: {csv_path}"
+
+    rows: list[tuple] = []
+    try:
+        with open(path, newline="") as f:
+            reader = _csv.DictReader(f)
+            for row in reader:
+                oc = (row.get("openCloseIndicator") or "").strip()
+                if oc not in ("C", "Ep"):
+                    continue
+                pnl_str = (row.get("fifoPnlRealized") or "0").strip()
+                try:
+                    pnl = float(pnl_str)
+                except ValueError:
+                    continue
+                if pnl == 0.0:
+                    continue
+                dt_str = (row.get("dateTime") or "").strip()
+                try:
+                    dt = _dt.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    continue
+                if start_date is not None and dt.date() < start_date:
+                    continue
+                if end_date is not None and dt.date() > end_date:
+                    continue
+                rows.append((dt, pnl))
+    except Exception as exc:
+        return None, f"Error reading CSV: {exc}"
+
+    if not rows:
+        return None, "No closing trades found in the specified date range"
+
+    rows.sort(key=lambda x: x[0])
+    total = 0.0
+    dates, cumulative = [], []
+    for dt, pnl in rows:
+        total += pnl
+        dates.append(dt)
+        cumulative.append(total)
+
+    return (
+        go.Scatter(
+            x=dates,
+            y=cumulative,
+            mode="lines+markers",
+            name="⊕ Live Trades",
+            line=dict(color=_PURPLE, width=1.5),
+            marker=dict(size=4),
+            hovertemplate="%{x|%Y-%m-%d %H:%M}<br><b>$%{y:+,.2f}</b><extra></extra>",
+            showlegend=True,
+        ),
+        None,
+    )
+
+
+def _fetch_backtest_trace(output_db_path: str, compare_bid: int) -> tuple:
+    try:
+        with OutputDatabase(output_db_path) as odb:
+            pp = PostProcessor(odb, backtest_id=compare_bid)
+            equity_df = pp.equity_curve()
+            initial_equity = pp._load_initial_equity()
+            meta_row = odb._con.execute(
+                "SELECT strategy_name FROM backtest WHERE id = ?", [compare_bid]
+            ).fetchone()
+    except Exception as exc:
+        return None, f"Error loading backtest #{compare_bid}: {exc}"
+
+    if equity_df.is_empty():
+        return None, f"Backtest #{compare_bid} has no trade data"
+
+    times = equity_df["exit_time"].to_list()
+    pnls = [float(e) - initial_equity for e in equity_df["equity"].to_list()]
+    strategy_name = meta_row[0] if meta_row else "unnamed"
+
+    return (
+        go.Scatter(
+            x=times,
+            y=pnls,
+            mode="lines",
+            name=f"⊕ #{compare_bid} {strategy_name}",
+            line=dict(color=_TEAL, width=1.5, dash="dashdot"),
+            hovertemplate="%{x|%Y-%m-%d %H:%M}<br><b>$%{y:+,.2f}</b><extra></extra>",
+            showlegend=True,
+        ),
+        None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Backtest index page
+# ---------------------------------------------------------------------------
+
+
+def _build_index_layout(odb) -> html.Div:
+    """Landing page listing all backtests, most recent first."""
+    rows_raw = odb._con.execute(
+        """
+        SELECT
+            b.id,
+            b.strategy_name,
+            b.created_at,
+            b.initial_equity,
+            COUNT(p.id)                                                                 AS total_trades,
+            COALESCE(SUM(p.net_pnl), 0)                                                AS net_profit,
+            COUNT(CASE WHEN p.net_pnl > 0 THEN 1 END) * 1.0
+                / NULLIF(COUNT(p.id), 0)                                                AS win_rate,
+            SUM(CASE WHEN p.net_pnl > 0 THEN p.net_pnl ELSE 0 END)
+                / NULLIF(SUM(CASE WHEN p.net_pnl < 0 THEN -p.net_pnl ELSE 0 END), 0)  AS profit_factor,
+            SUM(CASE WHEN p.net_pnl < 0 THEN -p.net_pnl ELSE 0 END)
+                / NULLIF(COUNT(CASE WHEN p.net_pnl < 0 THEN 1 END), 0)                 AS avg_loss,
+            MIN(p.open_time)                                                            AS first_trade,
+            MAX(p.exit_time)                                                            AS last_trade
+        FROM backtest b
+        LEFT JOIN position p ON p.backtest_id = b.id
+        GROUP BY b.id, b.strategy_name, b.created_at, b.initial_equity
+        ORDER BY b.created_at DESC, b.id DESC
+        """
+    ).fetchall()
+
+    rows = []
+    for (
+        bid, strategy_name, created_at, initial_equity,
+        total_trades, net_profit, win_rate, profit_factor, avg_loss,
+        first_trade, last_trade,
+    ) in rows_raw:
+        net_profit = float(net_profit or 0)
+        final_equity = float(initial_equity or 0) + net_profit
+
+        if first_trade and last_trade:
+            date_range = (
+                f"{first_trade.strftime('%Y-%m-%d')} – {last_trade.strftime('%Y-%m-%d')}"
+            )
+        elif first_trade:
+            date_range = f"{first_trade.strftime('%Y-%m-%d')} –"
+        else:
+            date_range = "—"
+
+        rows.append(
+            {
+                "id": bid,
+                "run": f"[#{bid}](?backtest_id={bid})",
+                "strategy": strategy_name or "—",
+                "run_date": created_at.strftime("%Y-%m-%d %H:%M") if created_at else "—",
+                "date_range": date_range,
+                "trades": int(total_trades) if total_trades else 0,
+                "net_profit": round(net_profit, 2),
+                "win_rate_pct": round(float(win_rate) * 100, 1) if win_rate is not None else 0.0,
+                "profit_factor": round(float(profit_factor), 2) if profit_factor is not None else None,
+                "avg_loss": round(float(avg_loss), 2) if avg_loss is not None else 0.0,
+                "final_equity": round(final_equity, 2),
+            }
+        )
+
+    grid = dag.AgGrid(
+        rowData=rows,
+        columnDefs=[
+            {
+                "field": "run",
+                "headerName": "Run",
+                "width": 70,
+                "cellRenderer": "markdown",
+                "sortable": False,
+                "filter": False,
+                "pinned": "left",
+                "suppressSizeToFit": True,
+            },
+            {
+                "field": "strategy",
+                "headerName": "Strategy",
+                "flex": 1,
+                "minWidth": 120,
+            },
+            {
+                "field": "run_date",
+                "headerName": "Run Date",
+                "width": 145,
+                "cellStyle": {"color": _MUTED, "fontSize": "12px"},
+            },
+            {
+                "field": "date_range",
+                "headerName": "Date Range",
+                "width": 220,
+                "cellStyle": {"fontFamily": "monospace", "fontSize": "12px"},
+            },
+            {
+                "field": "trades",
+                "headerName": "Trades",
+                "width": 80,
+                "cellStyle": {"textAlign": "right"},
+            },
+            {
+                "field": "net_profit",
+                "headerName": "Net P&L",
+                "width": 115,
+                "cellStyle": {
+                    "textAlign": "right",
+                    "fontWeight": "600",
+                    "styleConditions": [
+                        {"condition": "params.value > 0", "style": {"color": _GREEN}},
+                        {"condition": "params.value < 0", "style": {"color": _RED}},
+                    ],
+                },
+                "valueFormatter": {"function": "d3.format('$,.2f')(params.value)"},
+                "sort": "desc",
+            },
+            {
+                "field": "win_rate_pct",
+                "headerName": "Win Rate",
+                "width": 95,
+                "cellStyle": {"textAlign": "right"},
+                "valueFormatter": {"function": "params.value.toFixed(1) + '%'"},
+            },
+            {
+                "field": "profit_factor",
+                "headerName": "Prof. Factor",
+                "width": 105,
+                "cellStyle": {
+                    "textAlign": "right",
+                    "styleConditions": [
+                        {
+                            "condition": "params.value !== null && params.value >= 1",
+                            "style": {"color": _GREEN},
+                        },
+                        {
+                            "condition": "params.value !== null && params.value < 1",
+                            "style": {"color": _RED},
+                        },
+                    ],
+                },
+                "valueFormatter": {
+                    "function": "params.value !== null ? params.value.toFixed(2) + '×' : '∞'"
+                },
+            },
+            {
+                "field": "avg_loss",
+                "headerName": "Avg Loss",
+                "width": 100,
+                "cellStyle": {"textAlign": "right", "color": _RED},
+                "valueFormatter": {"function": "d3.format('$,.2f')(params.value)"},
+            },
+            {
+                "field": "final_equity",
+                "headerName": "Final Equity",
+                "width": 120,
+                "cellStyle": {"textAlign": "right"},
+                "valueFormatter": {"function": "d3.format('$,.2f')(params.value)"},
+            },
+        ],
+        defaultColDef={"sortable": True, "filter": True, "resizable": True},
+        dashGridOptions={
+            "rowHeight": 38,
+            "headerHeight": 40,
+            "animateRows": True,
+            "suppressCellFocus": True,
+            "domLayout": "autoHeight",
+        },
+        className="ag-theme-alpine",
+        style={"width": "100%"},
+    )
+
+    n = len(rows)
+    return html.Div(
+        style={
+            "fontFamily": "Inter, system-ui, sans-serif",
+            "backgroundColor": _BG,
+            "minHeight": "100vh",
+        },
+        children=[
+            html.Div(
+                className="btkit-header",
+                style={
+                    "backgroundColor": _HEADER,
+                    "color": "white",
+                    "padding": "13px 24px",
+                    "display": "flex",
+                    "alignItems": "center",
+                    "gap": "12px",
+                },
+                children=[
+                    html.Span(
+                        "btkit",
+                        style={
+                            "fontWeight": "700",
+                            "fontSize": "17px",
+                            "letterSpacing": "0.04em",
+                        },
+                    ),
+                    html.Span("·", style={"color": "#4B5563", "fontSize": "18px"}),
+                    html.Span(
+                        "All Runs", style={"fontSize": "14px", "color": "#D1D5DB"}
+                    ),
+                    html.Span(
+                        f"{n} backtest{'s' if n != 1 else ''}",
+                        style={
+                            "marginLeft": "auto",
+                            "fontSize": "12px",
+                            "color": "#9CA3AF",
+                        },
+                    ),
+                ],
+            ),
+            html.Div(
+                style={"padding": "24px", "maxWidth": "1400px", "margin": "0 auto"},
+                children=[
+                    _card(
+                        [
+                            html.P(
+                                "Click a run number to open its full dashboard",
+                                style={
+                                    "fontSize": "11px",
+                                    "fontWeight": "600",
+                                    "letterSpacing": "0.08em",
+                                    "textTransform": "uppercase",
+                                    "color": _MUTED,
+                                    "margin": "0 0 14px 0",
+                                },
+                            ),
+                            grid,
+                        ]
+                    )
+                ],
+            ),
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 
-def create_app(
+def _build_backtest_layout(
+    effective_bid: int,
     output_db_path: str,
-    input_db_path: str | None = None,
-    backtest_id: int | None = None,
-) -> Dash:
-    """Build and return the Dash app. All data loaded once at startup."""
+    input_db_path: str | None,
+) -> html.Div:
+    """Build and return the full Dash layout for a specific backtest run."""
     with OutputDatabase(output_db_path) as odb:
-        pp = PostProcessor(odb, backtest_id=backtest_id)
+        pp = PostProcessor(odb, backtest_id=effective_bid)
         bid = pp._resolve_backtest_id()
         m = pp.metrics()
         equity_df = pp.equity_curve()
         initial_equity = pp._load_initial_equity()
         net_pnls = pp._load_positions()["net_pnl"].to_list()
 
-        # Load positions with DB id for chart links
         positions = odb._con.execute(
             "SELECT id, trade_name, open_time, exit_time, exit_reason, "
             "open_mark, exit_mark, net_pnl, worst_mark "
@@ -1153,7 +1568,6 @@ def create_app(
             [bid],
         ).pl()
 
-        # Load leg details for the contract column (position_id → formatted leg string)
         leg_rows = odb._con.execute(
             'SELECT pl.position_id, pl."right", pl.strike_price, pl.expiration, pl.action '
             "FROM position_leg pl "
@@ -1163,7 +1577,6 @@ def create_app(
             [bid],
         ).fetchall()
 
-        # Group into {position_id: "P6940 4/22 · P6890 4/22 · C7050 4/22 · ..."}
         from collections import defaultdict as _dd
 
         leg_strings: dict[int, str] = {}
@@ -1179,13 +1592,14 @@ def create_app(
                 parts.append(f"{prefix}{right}{strike_str} {exp_str}")
             leg_strings[pid] = "  ".join(parts)
 
-        meta = odb._con.execute(
+        meta_row = odb._con.execute(
             "SELECT strategy_name, created_at FROM backtest WHERE id = ?", [bid]
         ).fetchone()
-        strategy_name = meta[0] if meta else "—"
-        created_at = meta[1].strftime("%Y-%m-%d %H:%M UTC") if (meta and meta[1]) else ""
+        strategy_name = meta_row[0] if meta_row else "—"
+        created_at = (
+            meta_row[1].strftime("%Y-%m-%d %H:%M UTC") if (meta_row and meta_row[1]) else ""
+        )
 
-        # Collect position_id → instrument_id pairs for underlying lookup
         pos_leg_map = odb._con.execute(
             "SELECT DISTINCT pl.position_id, pl.instrument_id FROM position_leg pl "
             "JOIN position p ON pl.position_id = p.id "
@@ -1193,7 +1607,21 @@ def create_app(
             [bid],
         ).fetchall()
 
-    # Resolve underlying futures symbol per position from the input DB
+        other_bt_rows = odb._con.execute(
+            "SELECT id, strategy_name, created_at FROM backtest "
+            "WHERE id != ? ORDER BY created_at DESC",
+            [bid],
+        ).fetchall()
+
+    compare_bt_options = [
+        {
+            "label": f"#{r[0]}  ·  {r[1] or 'unnamed'}  ·  {r[2].strftime('%Y-%m-%d') if r[2] else '—'}",
+            "value": r[0],
+        }
+        for r in other_bt_rows
+    ]
+
+    # ── Underlying symbol lookup ───────────────────────────────────────
     underlying_symbols: dict[int, str] = {}
     if input_db_path and pos_leg_map:
         import duckdb as _ddb
@@ -1201,48 +1629,69 @@ def create_app(
         inst_ids = list({r[1] for r in pos_leg_map})
         _icon = _ddb.connect(input_db_path, read_only=True)
         try:
-            ph = ",".join("?" * len(inst_ids))
-            iid_rows = _icon.execute(
-                f"SELECT DISTINCT ob.instrument_id, ub.symbol "
-                f"FROM option_bars ob "
-                f"JOIN underlying_bars ub ON ub.instrument_id = ob.underlying_id "
-                f"WHERE ob.instrument_id IN ({ph})",
-                inst_ids,
-            ).fetchall()
-            iid_to_sym = dict(iid_rows)
+            # LIMIT 1 per option avoids a full-table scan of the 4M+ row
+            # option_bars table. We only need one row to know underlying_id,
+            # then resolve the symbol from the much smaller underlying_bars.
+            underlying_ids: dict[int, int] = {}
+            for iid in inst_ids:
+                row = _icon.execute(
+                    "SELECT underlying_id FROM option_bars WHERE instrument_id = ? LIMIT 1",
+                    [iid],
+                ).fetchone()
+                if row:
+                    underlying_ids[iid] = row[0]
+
+            iid_to_sym: dict[int, str] = {}
+            if underlying_ids:
+                uid_list = list(set(underlying_ids.values()))
+                ph = ",".join("?" * len(uid_list))
+                sym_rows = _icon.execute(
+                    f"SELECT DISTINCT instrument_id, symbol FROM underlying_bars"
+                    f" WHERE instrument_id IN ({ph})",
+                    uid_list,
+                ).fetchall()
+                uid_to_sym = dict(sym_rows)
+                iid_to_sym = {
+                    iid: uid_to_sym[uid]
+                    for iid, uid in underlying_ids.items()
+                    if uid in uid_to_sym
+                }
         finally:
             _icon.close()
         for pid, iid in pos_leg_map:
             if iid in iid_to_sym and pid not in underlying_symbols:
                 underlying_symbols[pid] = iid_to_sym[iid]
 
+    # ── Build figures ──────────────────────────────────────────────────
     equity_fig = _build_equity_chart(equity_df, initial_equity)
     boot_fig = _build_bootstrap_fig(net_pnls, initial_equity)
     metrics_tbl = _build_metrics_table(m)
     trade_tbl = _build_trade_table(positions, leg_strings, underlying_symbols)
 
-    app = Dash(
-        __name__,
-        assets_folder=_ASSETS,
-        title=f"btkit — {strategy_name}",
+    _open_times = positions["open_time"].drop_nulls()
+    _exit_times = positions["exit_time"].drop_nulls()
+    _meta_store = {
+        "start_date": _open_times.min().date().isoformat() if not _open_times.is_empty() else None,
+        "end_date": _exit_times.max().date().isoformat() if not _exit_times.is_empty() else None,
+        "initial_equity": initial_equity,
+    }
+
+    nav_hint = html.A(
+        "← All Runs",
+        href="/",
+        style={"fontSize": "12px", "color": "#9CA3AF", "textDecoration": "none"},
     )
 
-    # ── Flask route for per-trade Lightweight Charts page ───────────────
-    server = app.server
-
-    @server.route("/chart/<int:position_id>")
-    def trade_chart_page(position_id: int):
-        html_content = _build_chart_html(position_id, output_db_path, input_db_path)
-        return Response(html_content, content_type="text/html; charset=utf-8")
-
-    # ── Layout ───────────────────────────────────────────────────────────
-    app.layout = html.Div(
+    # ── Layout ────────────────────────────────────────────────────────
+    return html.Div(
         style={
             "fontFamily": "Inter, system-ui, sans-serif",
             "backgroundColor": _BG,
             "minHeight": "100vh",
         },
         children=[
+            dcc.Store(id="btkit-meta", data=_meta_store),
+            dcc.Store(id="btkit-net-pnls", data=net_pnls),
             # Header
             html.Div(
                 className="btkit-header",
@@ -1263,8 +1712,9 @@ def create_app(
                     html.Span(strategy_name, style={"fontSize": "14px", "color": "#D1D5DB"}),
                     html.Div(
                         className="btkit-header-meta",
-                        style={"marginLeft": "auto", "display": "flex", "gap": "16px"},
+                        style={"marginLeft": "auto", "display": "flex", "gap": "16px", "alignItems": "center"},
                         children=[
+                            nav_hint,
                             html.Span(
                                 f"run #{bid}", style={"fontSize": "12px", "color": "#9CA3AF"}
                             ),
@@ -1285,12 +1735,239 @@ def create_app(
                         children=[
                             _card(
                                 [
-                                    _section_label("Equity Curve"),
+                                    html.Div(
+                                        style={
+                                            "display": "flex",
+                                            "alignItems": "center",
+                                            "marginBottom": "12px",
+                                        },
+                                        children=[
+                                            html.P(
+                                                "Equity Curve",
+                                                style={
+                                                    "fontSize": "11px",
+                                                    "fontWeight": "600",
+                                                    "letterSpacing": "0.08em",
+                                                    "textTransform": "uppercase",
+                                                    "color": _MUTED,
+                                                    "margin": "0",
+                                                },
+                                            ),
+                                            html.Button(
+                                                "Compare",
+                                                id="compare-btn",
+                                                n_clicks=0,
+                                                style={
+                                                    "marginLeft": "auto",
+                                                    "fontSize": "11px",
+                                                    "fontWeight": "600",
+                                                    "letterSpacing": "0.04em",
+                                                    "color": _BLUE,
+                                                    "background": "none",
+                                                    "border": f"1px solid {_BLUE}",
+                                                    "borderRadius": "4px",
+                                                    "padding": "3px 10px",
+                                                    "cursor": "pointer",
+                                                },
+                                            ),
+                                        ],
+                                    ),
                                     dcc.Graph(
+                                        id="equity-fig",
                                         figure=equity_fig,
                                         config={"displayModeBar": False},
                                         className="btkit-chart-equity",
                                         style={"height": "280px"},
+                                    ),
+                                    html.Div(
+                                        id="compare-panel",
+                                        style={
+                                            "display": "none",
+                                            "marginTop": "12px",
+                                            "padding": "12px 14px",
+                                            "backgroundColor": _BG,
+                                            "borderRadius": "6px",
+                                            "border": f"1px solid {_BORDER}",
+                                        },
+                                        children=[
+                                            dcc.RadioItems(
+                                                id="compare-type",
+                                                options=[
+                                                    {"label": " Buy & Hold", "value": "buyhold"},
+                                                    {"label": " Live Trades (CSV)", "value": "livetrades"},
+                                                    {"label": " Backtest", "value": "backtest"},
+                                                ],
+                                                value="buyhold",
+                                                inline=True,
+                                                style={
+                                                    "fontSize": "12px",
+                                                    "color": _TEXT,
+                                                    "marginBottom": "10px",
+                                                },
+                                                inputStyle={"marginRight": "4px", "marginLeft": "12px"},
+                                            ),
+                                            html.Div(
+                                                id="compare-ticker-div",
+                                                style={
+                                                    "display": "flex",
+                                                    "alignItems": "center",
+                                                    "gap": "8px",
+                                                    "marginBottom": "10px",
+                                                },
+                                                children=[
+                                                    html.Label(
+                                                        "Ticker",
+                                                        style={
+                                                            "fontSize": "12px",
+                                                            "color": _MUTED,
+                                                            "width": "60px",
+                                                        },
+                                                    ),
+                                                    dcc.Input(
+                                                        id="compare-ticker",
+                                                        type="text",
+                                                        placeholder="e.g. SPY",
+                                                        value="SPY",
+                                                        debounce=False,
+                                                        style={
+                                                            "width": "90px",
+                                                            "fontSize": "12px",
+                                                            "padding": "4px 8px",
+                                                            "border": f"1px solid {_BORDER}",
+                                                            "borderRadius": "4px",
+                                                        },
+                                                    ),
+                                                    html.Label(
+                                                        "Qty",
+                                                        style={
+                                                            "fontSize": "12px",
+                                                            "color": _MUTED,
+                                                            "marginLeft": "10px",
+                                                        },
+                                                    ),
+                                                    dcc.Input(
+                                                        id="compare-qty",
+                                                        type="number",
+                                                        value=1,
+                                                        min=0.01,
+                                                        step=1,
+                                                        debounce=False,
+                                                        style={
+                                                            "width": "80px",
+                                                            "fontSize": "12px",
+                                                            "padding": "4px 8px",
+                                                            "border": f"1px solid {_BORDER}",
+                                                            "borderRadius": "4px",
+                                                        },
+                                                    ),
+                                                ],
+                                            ),
+                                            html.Div(
+                                                id="compare-csv-div",
+                                                style={
+                                                    "display": "none",
+                                                    "alignItems": "center",
+                                                    "gap": "8px",
+                                                    "marginBottom": "10px",
+                                                },
+                                                children=[
+                                                    html.Label(
+                                                        "CSV Path",
+                                                        style={
+                                                            "fontSize": "12px",
+                                                            "color": _MUTED,
+                                                            "width": "60px",
+                                                        },
+                                                    ),
+                                                    dcc.Input(
+                                                        id="compare-csv",
+                                                        type="text",
+                                                        placeholder="~/dev/wealthy-option-live/trades.csv",
+                                                        debounce=False,
+                                                        style={
+                                                            "width": "340px",
+                                                            "fontSize": "12px",
+                                                            "padding": "4px 8px",
+                                                            "border": f"1px solid {_BORDER}",
+                                                            "borderRadius": "4px",
+                                                        },
+                                                    ),
+                                                ],
+                                            ),
+                                            html.Div(
+                                                id="compare-backtest-div",
+                                                style={
+                                                    "display": "none",
+                                                    "alignItems": "center",
+                                                    "gap": "8px",
+                                                    "marginBottom": "10px",
+                                                },
+                                                children=[
+                                                    html.Label(
+                                                        "Backtest",
+                                                        style={
+                                                            "fontSize": "12px",
+                                                            "color": _MUTED,
+                                                            "width": "60px",
+                                                        },
+                                                    ),
+                                                    dcc.Dropdown(
+                                                        id="compare-backtest-id",
+                                                        options=compare_bt_options,
+                                                        value=compare_bt_options[0]["value"] if compare_bt_options else None,
+                                                        placeholder="Select a backtest…",
+                                                        clearable=False,
+                                                        style={
+                                                            "width": "420px",
+                                                            "fontSize": "12px",
+                                                        },
+                                                    ),
+                                                ],
+                                            ),
+                                            html.Div(
+                                                style={
+                                                    "display": "flex",
+                                                    "alignItems": "center",
+                                                    "gap": "10px",
+                                                },
+                                                children=[
+                                                    html.Button(
+                                                        "Load",
+                                                        id="compare-load-btn",
+                                                        n_clicks=0,
+                                                        style={
+                                                            "fontSize": "11px",
+                                                            "fontWeight": "600",
+                                                            "color": "white",
+                                                            "background": _BLUE,
+                                                            "border": "none",
+                                                            "borderRadius": "4px",
+                                                            "padding": "5px 16px",
+                                                            "cursor": "pointer",
+                                                        },
+                                                    ),
+                                                    html.Button(
+                                                        "Clear",
+                                                        id="compare-clear-btn",
+                                                        n_clicks=0,
+                                                        style={
+                                                            "fontSize": "11px",
+                                                            "fontWeight": "600",
+                                                            "color": _MUTED,
+                                                            "background": "none",
+                                                            "border": f"1px solid {_BORDER}",
+                                                            "borderRadius": "4px",
+                                                            "padding": "5px 16px",
+                                                            "cursor": "pointer",
+                                                        },
+                                                    ),
+                                                    html.Span(
+                                                        id="compare-status",
+                                                        style={"fontSize": "12px", "color": _RED},
+                                                    ),
+                                                ],
+                                            ),
+                                        ],
                                     ),
                                 ],
                                 style={"flex": "1"},
@@ -1387,10 +2064,147 @@ def create_app(
         ],
     )
 
+
+def create_app(
+    output_db_path: str,
+    input_db_path: str | None = None,
+    backtest_id: int | None = None,
+) -> Dash:
+    """Build and return the Dash app.
+
+    ``app.layout`` returns a thin shell with ``dcc.Location`` and a
+    page-content div. A routing callback reads ``?backtest_id=N`` from the
+    URL and renders either the landing-page index or the full backtest
+    dashboard — the canonical Dash pattern for client-side URL routing.
+    """
+    app = Dash(
+        __name__,
+        assets_folder=_ASSETS,
+        title="btkit",
+        suppress_callback_exceptions=True,
+    )
+    server = app.server
+
+    @server.route("/chart/<int:position_id>")
+    def trade_chart_page(position_id: int):
+        html_content = _build_chart_html(position_id, output_db_path, input_db_path)
+        return Response(html_content, content_type="text/html; charset=utf-8")
+
+    def _serve_layout():
+        return html.Div(
+            [
+                dcc.Location(id="url", refresh=False),
+                dcc.Loading(
+                    html.Div(id="page-content"),
+                    type="circle",
+                    color=_BLUE,
+                    style={"minHeight": "100vh"},
+                ),
+            ],
+            style={"minHeight": "100vh", "backgroundColor": _BG},
+        )
+
+    app.layout = _serve_layout
+
+    @app.callback(
+        Output("page-content", "children"),
+        Input("url", "search"),
+    )
+    def _route(search: str | None):
+        from urllib.parse import parse_qs
+
+        params = parse_qs((search or "").lstrip("?"))
+        bid_str = params.get("backtest_id", [None])[0]
+        effective_bid = int(bid_str) if bid_str else backtest_id
+        if effective_bid is None:
+            with OutputDatabase(output_db_path) as odb:
+                return _build_index_layout(odb)
+        return _build_backtest_layout(effective_bid, output_db_path, input_db_path)
+
     # ── Histogram callback ───────────────────────────────────────────────
-    @app.callback(Output("pnl-hist", "figure"), Input("hist-mode", "value"))
-    def update_histogram(mode: str) -> go.Figure:
-        return _build_pnl_histogram(net_pnls, mode)
+    @app.callback(
+        Output("pnl-hist", "figure"),
+        Input("hist-mode", "value"),
+        State("btkit-net-pnls", "data"),
+    )
+    def update_histogram(mode: str, net_pnls_data: list) -> go.Figure:
+        return _build_pnl_histogram(net_pnls_data or [], mode)
+
+    # ── Compare panel toggle ─────────────────────────────────────────────
+    @app.callback(
+        Output("compare-panel", "style"),
+        Input("compare-btn", "n_clicks"),
+        State("compare-panel", "style"),
+        prevent_initial_call=True,
+    )
+    def _toggle_compare_panel(_n, current_style):
+        visible = current_style.get("display") != "none"
+        return {**current_style, "display": "none" if visible else "block"}
+
+    # ── Compare input type toggle ────────────────────────────────────────
+    @app.callback(
+        Output("compare-ticker-div", "style"),
+        Output("compare-csv-div", "style"),
+        Output("compare-backtest-div", "style"),
+        Input("compare-type", "value"),
+    )
+    def _toggle_compare_inputs(mode):
+        base = {"alignItems": "center", "gap": "8px", "marginBottom": "10px"}
+        return (
+            {**base, "display": "flex" if mode == "buyhold" else "none"},
+            {**base, "display": "flex" if mode == "livetrades" else "none"},
+            {**base, "display": "flex" if mode == "backtest" else "none"},
+        )
+
+    # ── Load / clear comparison trace ───────────────────────────────────
+    @app.callback(
+        Output("equity-fig", "figure"),
+        Output("compare-status", "children"),
+        Input("compare-load-btn", "n_clicks"),
+        Input("compare-clear-btn", "n_clicks"),
+        State("equity-fig", "figure"),
+        State("compare-type", "value"),
+        State("compare-ticker", "value"),
+        State("compare-qty", "value"),
+        State("compare-csv", "value"),
+        State("compare-backtest-id", "value"),
+        State("btkit-meta", "data"),
+        prevent_initial_call=True,
+    )
+    def _load_comparison(_lc, _cc, current_fig, mode, ticker, qty, csv_path, compare_bid, meta):
+        fig = _remove_comparison_traces(current_fig)
+        if ctx.triggered_id == "compare-clear-btn":
+            return fig, ""
+
+        start_date = end_date = None
+        if meta:
+            from datetime import date as _date
+
+            try:
+                start_date = _date.fromisoformat(meta["start_date"]) if meta.get("start_date") else None
+                end_date = _date.fromisoformat(meta["end_date"]) if meta.get("end_date") else None
+            except Exception:
+                pass
+
+        if mode == "buyhold":
+            if not ticker:
+                return fig, "Enter a ticker symbol"
+            quantity = float(qty) if qty is not None else 1.0
+            trace, err = _fetch_buyhold_trace(ticker, start_date, end_date, quantity)
+        elif mode == "livetrades":
+            if not csv_path:
+                return fig, "Enter a CSV file path"
+            trace, err = _fetch_livetrades_trace(csv_path, start_date, end_date)
+        else:
+            if compare_bid is None:
+                return fig, "Select a backtest to compare"
+            trace, err = _fetch_backtest_trace(output_db_path, compare_bid)
+
+        if err:
+            return fig, err
+
+        fig["data"].append(trace.to_plotly_json())
+        return fig, ""
 
     return app
 

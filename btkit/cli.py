@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import duckdb
 import typer
 
 from btkit.analysis.metrics import PostProcessor
@@ -28,6 +29,8 @@ from btkit.backtest.engine import BacktestEngine
 from btkit.db.input_db import InputDatabase
 from btkit.db.output_db import OutputDatabase
 from btkit.pipeline.builder import DatabaseBuilder
+from btkit.pipeline.indicators import IndicatorRunner
+from btkit.strategy.definition import StrategyDefinition
 from btkit.strategy.loader import load_strategy
 
 app = typer.Typer(
@@ -35,6 +38,62 @@ app = typer.Typer(
     help="Vectorized options backtesting framework.",
     add_completion=False,
 )
+
+
+def _ensure_indicators(input_db_path: str, strategy: StrategyDefinition) -> None:
+    """Run any indicator scripts listed in strategy.indicators that are not yet in the DB,
+    or that are stale because new underlying bars have been added since they were last built."""
+    if not strategy.indicators:
+        return
+
+    typer.echo("Checking strategy indicators...")
+    con = duckdb.connect(input_db_path)
+    try:
+        underlyings = con.execute(
+            "SELECT DISTINCT instrument_id FROM underlying_bars"
+        ).fetchall()
+
+        max_underlying_ts = con.execute(
+            "SELECT MAX(ts_event) FROM underlying_bars"
+        ).fetchone()[0]
+
+        for script_str in strategy.indicators:
+            script_path = Path(script_str)
+            if not script_path.exists():
+                typer.echo(
+                    f"  WARNING: indicator script not found: {script_path}", err=True
+                )
+                continue
+
+            script_source = script_path.read_text()
+            row = con.execute(
+                """
+                SELECT MAX(ib.ts_event)
+                FROM indicator_bars ib
+                JOIN indicator_definition idef ON ib.indicator_id = idef.id
+                WHERE idef.script_source = ?
+                """,
+                [script_source],
+            ).fetchone()
+            max_indicator_ts = row[0] if row else None
+
+            if max_indicator_ts is None:
+                typer.echo(f"  {script_path.name}: new indicator detected, building...")
+            elif max_underlying_ts and max_indicator_ts < max_underlying_ts:
+                typer.echo(
+                    f"  {script_path.name}: underlying data extended "
+                    f"({max_indicator_ts.date()} → {max_underlying_ts.date()}), recalculating..."
+                )
+            else:
+                typer.echo(f"  {script_path.name}: up to date, skipping")
+                continue
+
+            runner = IndicatorRunner(con, script_path)
+            for (underlying_id,) in underlyings:
+                runner.run(underlying_id)
+            typer.echo(f"  {script_path.name}: done")
+    finally:
+        con.close()
 
 
 @app.command()
@@ -45,13 +104,21 @@ def build(
         default=[],
         help="Paths to indicator scripts. May be repeated for multiple scripts.",
     ),
+    append: bool = typer.Option(
+        default=False,
+        help=(
+            "Append new data to an existing database instead of rebuilding. "
+            "Skips OHLCV rows, greeks, and indicator bars that are already present."
+        ),
+    ),
 ) -> None:
     """Build the input database from raw Databento files."""
-    typer.echo(f"Building database: {db_path}")
+    typer.echo(f"{'Appending to' if append else 'Building'} database: {db_path}")
     builder = DatabaseBuilder(
         raw_data_path=data_path,
         db_path=db_path,
         indicator_scripts=indicators or None,
+        append=append,
     )
     builder.build()
     typer.echo("Build complete.")
@@ -70,6 +137,7 @@ def run(
     """Run a backtest from a strategy YAML. Single-run only for this version."""
     typer.echo(f"Loading strategy: {strategy}")
     definition = load_strategy(strategy)
+    _ensure_indicators(input_db, definition)
 
     with InputDatabase(input_db) as idb, OutputDatabase(output_db) as odb:
         odb.create_schema()
@@ -135,6 +203,7 @@ def pipeline(
 
     typer.echo(f"Loading strategy: {strategy}")
     definition = load_strategy(strategy)
+    _ensure_indicators(db_path, definition)
 
     with InputDatabase(db_path) as idb, OutputDatabase(output_db) as odb:
         odb.create_schema()

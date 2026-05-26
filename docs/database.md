@@ -177,6 +177,185 @@ CREATE INDEX idx_indicator_bars ON indicator_bars (indicator_id, ts_event);
 
 ---
 
+## Incremental Builds (`--append`)
+
+By default, `btkit build` creates a new input database from scratch. The `--append` flag
+switches to an incremental mode that adds new data to an **existing** database without
+touching rows that are already there. This is the correct workflow whenever you want to
+extend the date range covered by a database, or add data for new symbols alongside
+existing ones.
+
+---
+
+### When to use it
+
+| Scenario | Command |
+|---|---|
+| Initial build from scratch | `btkit build --data-path data/ --db-path input.db` |
+| Extend date range (new zips, same symbols) | `btkit build --data-path new_data/ --db-path input.db --append` |
+| Add new symbols (e.g. add NQ alongside existing ES) | `btkit build --data-path nq_data/ --db-path input.db --append` |
+| Mix: new time range + new symbols | `btkit build --data-path mixed_data/ --db-path input.db --append` |
+
+---
+
+### Basic workflow
+
+```bash
+# 1. Initial build — May data
+btkit build \
+  --data-path data/may/ \
+  --db-path output/input.db
+
+# 2. Download June data from Databento and drop the zips into data/june/
+
+# 3. Append June to the existing database
+btkit build \
+  --data-path data/june/ \
+  --db-path output/input.db \
+  --append
+
+# 4. Run a backtest spanning May–June — no other changes needed
+btkit run \
+  --strategy strategies/iron_condor_0dte.yaml \
+  --input-db output/input.db \
+  --output-db output/output.db
+```
+
+The strategy YAML `start_date` / `end_date` controls the backtest window. After
+appending June data you only need to widen those dates and re-run — the database
+already contains everything.
+
+---
+
+### What happens at each layer
+
+#### Definitions
+
+Databento includes a full instrument definition file in every download. When appending,
+btkit reads the definition files from the **new** zip batch and builds an in-memory
+instrument map for that batch. This map is used solely to enrich the new OHLCV rows at
+ingest time — it does not touch anything already in the database.
+
+The key design point is that **definition metadata is pre-joined into every `option_bars`
+row at ingest time** (`underlying_id`, `expiration`, `strike_price`, `right`,
+`multiplier`). There is no separate definitions table to keep in sync. When you append
+new option bar data, those rows carry their `underlying_id` directly from the Databento
+definition record, so the link between options and their underlying futures is always
+exact and current.
+
+#### OHLCV (`underlying_bars`, `option_bars`)
+
+Each row is deduplicated against the existing database on `(ts_event, instrument_id)`:
+
+```sql
+INSERT INTO underlying_bars
+SELECT t.* FROM new_batch t
+WHERE NOT EXISTS (
+    SELECT 1 FROM underlying_bars e
+    WHERE e.ts_event = t.ts_event AND e.instrument_id = t.instrument_id
+)
+```
+
+Rows that already exist are silently skipped. Rows for new timestamps or new
+instrument IDs are inserted. This is safe for overlapping, non-overlapping, and
+gap-free date ranges.
+
+> **Note:** Even within a single `--append` invocation, the input batch is first
+> deduplicated internally before the `NOT EXISTS` check runs, so duplicate rows
+> within the same zip do not accumulate.
+
+#### Greeks (`option_greeks`)
+
+Greeks are computed only for `option_bars` rows that do not yet have a corresponding
+entry in `option_greeks`:
+
+```sql
+-- Only process option bars not already in option_greeks
+WHERE NOT EXISTS (
+    SELECT 1 FROM option_greeks og
+    WHERE og.ts_event = ob.ts_event AND og.instrument_id = ob.instrument_id
+)
+```
+
+Previously computed greeks are never touched. The batching and progress counter reflect
+only the new rows being processed.
+
+#### Indicators
+
+Indicators are checked for staleness automatically whenever you run `btkit run` (or
+`btkit pipeline`). The check compares the maximum timestamp in `indicator_bars` against
+the maximum timestamp in `underlying_bars`:
+
+- **Up to date** — indicator coverage reaches the latest underlying bar. No action.
+- **Stale** — new underlying bars extend beyond the current indicator coverage. The
+  indicator is recomputed on the full underlying bar history and only the new timestamps
+  are inserted (`NOT EXISTS` on `(ts_event, indicator_id)`). The console prints:
+
+  ```
+  Checking strategy indicators...
+    vwap.py: underlying data extended (2026-05-21 → 2026-06-18), recalculating...
+    vwap.py: done
+  ```
+
+- **Not yet built** — no entry found in `indicator_definition` for this script. The
+  indicator is built from scratch and the console prints:
+
+  ```
+  Checking strategy indicators...
+    vwap.py: new indicator detected, building...
+    vwap.py: done
+  ```
+
+> **Why recompute on full history?** Indicators like cumulative VWAP, moving averages,
+> and any signal that uses a lookback window need to see all prior bars to produce
+> correct values for the new bars. Only the result rows for new timestamps are written
+> to the database — the full recompute is a correctness requirement, not a bug.
+
+---
+
+### Adding new symbols
+
+When `--append` is used with data for a symbol not yet in the database (e.g. adding NQ
+alongside existing ES data), the full pipeline runs for the new symbol:
+
+1. The new zip's definition files supply the `underlying_id` mapping for NQ options.
+2. NQ `underlying_bars` and `option_bars` rows are inserted (they don't exist yet, so
+   no `NOT EXISTS` filtering is needed in practice — all rows are new).
+3. Greeks are computed for all new NQ option bars.
+4. If any strategy indicators are specified, they are recalculated because the new NQ
+   underlying bars extend beyond the last indicator timestamp for the NQ
+   `underlying_id`.
+
+No manual steps are required. The strategy YAML controls which `root_symbol` is active,
+so NQ and ES strategies each only see their own underlying's data.
+
+---
+
+### Overlapping date ranges
+
+If the new zip files contain dates that already exist in the database (e.g. you
+re-download a date range you already have), the `NOT EXISTS` checks ensure no
+duplicates are created. The append is effectively a no-op for rows that are already
+present. This makes `--append` safe to run even when you're not certain whether new
+data overlaps with existing data.
+
+---
+
+### Full command reference
+
+```
+btkit build [OPTIONS]
+
+  --data-path PATH        Directory containing Databento .zip files  [required]
+  --db-path PATH          Input database path (created if absent)     [required]
+  --indicators PATH       Indicator script(s). May be repeated.
+  --append / --no-append  Append to existing DB instead of rebuilding.
+                          Skips OHLCV rows, greeks, and indicator bars
+                          that are already present.  [default: no-append]
+```
+
+---
+
 ## Output Database
 
 Written by `btkit run`. One output database file per run (or per matrix run, containing
