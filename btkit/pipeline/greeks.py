@@ -42,6 +42,12 @@ from numba import njit
 # numba JIT releases the GIL, so threads scale well up to the physical core count.
 _GREEKS_WORKERS = min(os.cpu_count() or 4, 8)
 
+# Days accumulated before a single bulk INSERT into option_greeks.
+# Each INSERT carries ~0.75 s of fixed DuckDB overhead regardless of size.
+# N=20 makes variable cost (20 × 37k rows / 100k rows·s⁻¹ ≈ 7.4 s) dominate
+# fixed cost by 10×, capturing ~94% of the available throughput improvement.
+_BATCH_DAYS = 20
+
 # ---------------------------------------------------------------------------
 # numba-compiled Black-76 kernels
 # ---------------------------------------------------------------------------
@@ -247,30 +253,47 @@ class GreeksCalculator:
         written = 0
         completed = 0
 
+        # Results accumulate here until _BATCH_DAYS days are ready, then flushed
+        # with a single bulk INSERT to amortise DuckDB's per-statement fixed overhead.
+        accumulated: list[pl.DataFrame] = []
+        accumulated_rows = 0
+
+        def _flush() -> None:
+            nonlocal written, accumulated_rows
+            if not accumulated:
+                return
+            batch = pl.concat(accumulated)
+            self.con.register("_greeks_batch", batch)
+            self.con.execute("INSERT INTO option_greeks SELECT * FROM _greeks_batch")
+            self.con.unregister("_greeks_batch")
+            written += len(batch)
+            accumulated.clear()
+            accumulated_rows = 0
+
         # Pipelined parallel execution: the main thread reads each day's batch from
         # DuckDB (sequential — not thread-safe) and immediately submits the numba
-        # computation to the pool. Results are drained into DuckDB once the pipeline
-        # fills to 2× worker count, keeping memory bounded to ~2× _GREEKS_WORKERS
-        # days at a time regardless of dataset size.
+        # computation to the pool. Completed results are buffered; every _BATCH_DAYS
+        # days the buffer is flushed with one bulk INSERT, amortising fixed overhead.
         #
-        # numba @njit functions release the GIL, so thread parallelism provides
+        # numba @njit(nogil=True) releases the GIL so thread parallelism provides
         # near-linear speedup up to the physical core count.
         pending: list[tuple[object, Future]] = []
 
         def _drain_one() -> None:
-            nonlocal written, completed
+            nonlocal completed, accumulated_rows
             date_d, fut = pending.pop(0)
             result = fut.result()
             if not result.is_empty():
-                self.con.register("_greeks_batch", result)
-                self.con.execute("INSERT INTO option_greeks SELECT * FROM _greeks_batch")
-                self.con.unregister("_greeks_batch")
-                written += len(result)
+                accumulated.append(result)
+                accumulated_rows += len(result)
             completed += 1
             print(
-                f"\r[greeks] {date_d}  {completed}/{len(dates)} days  rows={written:,}",
+                f"\r[greeks] {date_d}  {completed}/{len(dates)} days"
+                f"  rows={written + accumulated_rows:,}",
                 end="", flush=True,
             )
+            if len(accumulated) >= _BATCH_DAYS:
+                _flush()
 
         with ThreadPoolExecutor(max_workers=_GREEKS_WORKERS) as pool:
             for date in dates:
@@ -289,6 +312,7 @@ class GreeksCalculator:
             while pending:
                 _drain_one()
 
+        _flush()  # write any days that didn't fill a complete batch
         self.con.execute("DROP TABLE IF EXISTS _greek_pending")
         print(f"\n[greeks] Wrote {written:,} option_greeks rows")
 
