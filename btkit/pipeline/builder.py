@@ -5,35 +5,29 @@ Build sequence:
     0. _collect_ohlcv_instrument_ids() — lightweight pre-scan of all OHLCV files;
                                          returns the exact set of instrument_ids
                                          that appear in price data
-    1. _ingest_definitions(required_ids) — read definition files in chronological
-                                           order, stopping as soon as every id in
-                                           required_ids is resolved; avoids reading
-                                           the full set of daily snapshots
+    1. _ingest_definitions(required_ids) — read all definition files in parallel
+                                           (one worker per zip archive), merge
+                                           results into a single instrument map
     2. _ingest_ohlcv()        — read .dbn OHLCV files, write underlying_bars and
                                 option_bars (with definition metadata pre-joined)
     3. _compute_greeks()      — run GreeksCalculator over option_bars
     4. _run_indicators()      — run each user indicator script via IndicatorRunner
 
-Why pre-scan OHLCV before reading definitions?
-    Databento includes one definition snapshot per trading day. For a 4-month
-    dataset that is ~121 files, for a multi-year dataset it is 500+. The snapshot
-    is a complete picture of all listed instruments on that date. Because instrument
-    metadata (strike, expiry, multiplier) is static — options don't change their
-    terms mid-life — consecutive daily snapshots are largely identical. The naive
-    approach of reading all snapshots wastes most of the time re-parsing rows that
-    are already in the map.
+Parallelism strategy:
+    - Definition ingest: one ThreadPoolExecutor worker per zip archive. Each worker
+      opens its zip once, reads every *.definition.dbn.zst file sequentially, and
+      returns a partial {instrument_id → _InstrumentInfo} dict. Results are merged
+      in the main thread (first-seen wins; metadata is static so any snapshot gives
+      the correct values). This scales to multi-year datasets where the early-stop
+      optimisation saves very few files in practice.
 
-    The correct solution is to read definition files only until every instrument that
-    actually appears in the OHLCV data has been resolved. The pre-scan collects that
-    set in a single pass over the (smaller, fewer) OHLCV files. Definition reading
-    then stops as soon as the set is empty. This is correct across all dataset sizes
-    and time spans because:
-      - New futures contracts (quarterly rolls) are captured: their first OHLCV bar
-        forces the new instrument_id into the required set, which then drives reading
-        the definition file from the period when the contract was listed.
-      - New strikes added intra-period are captured for the same reason.
-      - Instruments in definitions but absent from OHLCV (unlisted strikes, expired
-        contracts that never traded) are correctly ignored — they contribute no bars.
+    - OHLCV ingest: one worker per zip archive, same pattern.
+
+    - Greeks: days are processed in a pipelined ThreadPoolExecutor — the main thread
+      reads each day's batch from DuckDB and submits the numba computation to the
+      pool; completed results are written back to DuckDB in the main thread while
+      the next batch is already computing. numba JIT functions release the GIL, so
+      threads provide near-linear speedup up to the physical core count.
 
 raw_data_path must be a directory containing one or more .zip files downloaded from
 Databento. The builder auto-detects schema type by inspecting filenames inside each zip:
@@ -184,92 +178,40 @@ class DatabaseBuilder:
 
     def _ingest_definitions(self, required_ids: set[int]) -> None:
         """
-        Read *.definition.dbn.zst files from zip archives and build
-        self._instrument_map: instrument_id → _InstrumentInfo.
+        Read all *.definition.dbn.zst files in parallel (one worker per zip archive)
+        and build self._instrument_map: instrument_id → _InstrumentInfo.
 
-        Files are processed in chronological order. Processing stops as soon as
-        every id in required_ids has been resolved — there is no need to read
-        further snapshots once the full OHLCV instrument universe is covered.
-
-        required_ids comes from _collect_ohlcv_instrument_ids() and contains
-        exactly the instrument_ids that appear in price data. This bounds
-        definition reads to the minimum needed for correctness while remaining
-        correct across all dataset sizes and futures roll cycles — see the module
-        docstring for the full design rationale.
+        Each worker opens its zip once, reads every definition file inside it, and
+        returns a partial {instrument_id: _InstrumentInfo} dict. The main thread
+        merges all partial dicts (first-seen wins). Because option/future metadata
+        is static — strike, expiry, and multiplier never change — any snapshot is
+        equivalent and the merge order does not affect correctness.
 
         Only instrument_class F (future), C (call), and P (put) are kept.
         Spreads, calendar spreads, and strategy instruments are filtered out.
         """
-        remaining = set(required_ids)
-        processed = 0
-        files_read = 0
+        zip_files = sorted(self.raw_data_path.glob("*.zip"))
+        if not zip_files:
+            raise FileNotFoundError(f"No zip files found in {self.raw_data_path}")
 
-        for data in self._iter_dbn_files("definition"):
-            files_read += 1
-            store = db_sdk.DBNStore.from_bytes(data)
-            arr = store.to_ndarray()
+        total_files = 0
+        with ThreadPoolExecutor(max_workers=_INGEST_WORKERS) as pool:
+            for partial_map, files_read in pool.map(_scan_zip_for_definitions, zip_files):
+                total_files += files_read
+                for iid, info in partial_map.items():
+                    if iid not in self._instrument_map:
+                        self._instrument_map[iid] = info
 
-            # Discard ALL instrument_ids seen in this file — including spreads and
-            # other non-F/C/P classes — so they don't block the early-stop below.
-            # Without this, the 286k IDs from to_ndarray() (which includes spreads)
-            # would never all be resolved, causing all 121 definition files to be read.
-            remaining -= set(arr["instrument_id"].astype(np.int64).tolist())
-
-            # Keep only futures and options; drop spreads, T, M, etc.
-            fcp_mask = np.isin(arr["instrument_class"], [b"F", b"C", b"P"])
-            for row in arr[fcp_mask]:
-                iid = int(row["instrument_id"])
-                if iid in self._instrument_map:
-                    continue
-
-                icls = row["instrument_class"].decode("ascii")
-                # expiration is uint64 nanoseconds; sentinel = 9223372036854775807
-                exp_ns = int(row["expiration"])
-                exp_date = (
-                    datetime.fromtimestamp(exp_ns / 1_000_000_000, tz=timezone.utc).date()
-                    if 0 < exp_ns < 9_000_000_000_000_000_000
-                    else None
-                )
-
-                right = icls if icls in ("C", "P") else None
-                # strike_price is fixed-point int64 scaled by 1e9
-                strike = float(row["strike_price"]) / 1e9 if icls in ("C", "P") else None
-                # unit_of_measure_qty is the multiplier in fixed-point (e.g. 50_000_000_000 = 50).
-                # contract_multiplier is always INT32_MAX (sentinel = not set).
-                uom = int(row["unit_of_measure_qty"])
-                multiplier = round(uom / 1e9) if uom > 0 else 50
-                underlying_id = int(row["underlying_id"])
-
-                self._instrument_map[iid] = _InstrumentInfo(
-                    instrument_class=icls,
-                    raw_symbol=row["raw_symbol"].decode("ascii").rstrip("\x00"),
-                    expiration=exp_date,
-                    strike_price=strike,
-                    right=right,
-                    multiplier=multiplier,
-                    underlying_id=underlying_id,
-                )
-                processed += 1
-
-            # Stop as soon as every instrument that appears in OHLCV data is resolved.
-            # Remaining daily snapshots are redundant — they contain the same static
-            # metadata for instruments we've already mapped.
-            if not remaining:
-                break
-
-        if remaining:
-            # This should not happen with well-formed Databento data. If it does, the
-            # affected instrument_ids will be silently dropped during OHLCV ingest
-            # because they won't be in the instrument_map.
+        missing = required_ids - set(self._instrument_map)
+        if missing:
             print(
-                f"[ingest] Warning: {len(remaining)} instrument IDs found in OHLCV "
+                f"[ingest] Warning: {len(missing)} instrument IDs found in OHLCV "
                 f"data have no matching definition record and will be dropped."
             )
 
-        n_unique = len(self._instrument_map)
         print(
-            f"[ingest] Loaded {processed} instruments from {files_read} definition "
-            f"file(s) ({n_unique} unique)"
+            f"[ingest] Loaded {len(self._instrument_map):,} instruments "
+            f"from {total_files} definition file(s) across {len(zip_files)} zip(s)"
         )
 
     # ------------------------------------------------------------------
@@ -521,6 +463,60 @@ def _dbn_to_polars(store) -> pl.DataFrame:
             "volume": pl.Series(arr["volume"].astype(np.int64)),
         }
     )
+
+
+
+def _scan_zip_for_definitions(
+    zip_path: Path,
+) -> tuple[dict[int, _InstrumentInfo], int]:
+    """
+    Read every *.definition.dbn.zst file inside one zip archive.
+
+    Returns (partial_map, files_read) where partial_map maps instrument_id →
+    _InstrumentInfo for all F/C/P instruments found. First occurrence per iid
+    is kept (files are sorted, so first occurrence is chronologically earliest).
+
+    Iterates rows with an early-exit dict check (if iid in result: continue).
+    After the first file all ~19k unique instruments are known, so subsequent
+    files become nearly 100% fast hash-lookup skips with no object allocation.
+    This is faster than a vectorised concat+unique approach, which accumulates
+    ~100 MB of intermediate arrays across a 95-file zip and incurs GC pressure.
+
+    from_bytes() (ZST decompression) is C-extension work that releases the GIL,
+    so workers on different zip files run truly in parallel.
+    """
+    result: dict[int, _InstrumentInfo] = {}
+    files_read = 0
+    with zipfile.ZipFile(zip_path) as zf:
+        for name in sorted(zf.namelist()):
+            if name.endswith(".dbn.zst") and ".definition." in name:
+                files_read += 1
+                arr = db_sdk.DBNStore.from_bytes(zf.read(name)).to_ndarray()
+                fcp_mask = np.isin(arr["instrument_class"], [b"F", b"C", b"P"])
+                for row in arr[fcp_mask]:
+                    iid = int(row["instrument_id"])
+                    if iid in result:
+                        continue
+                    icls = row["instrument_class"].decode("ascii")
+                    exp_ns = int(row["expiration"])
+                    exp_date = (
+                        datetime.fromtimestamp(exp_ns / 1_000_000_000, tz=timezone.utc).date()
+                        if 0 < exp_ns < 9_000_000_000_000_000_000
+                        else None
+                    )
+                    right = icls if icls in ("C", "P") else None
+                    strike = float(row["strike_price"]) / 1e9 if icls in ("C", "P") else None
+                    uom = int(row["unit_of_measure_qty"])
+                    result[iid] = _InstrumentInfo(
+                        instrument_class=icls,
+                        raw_symbol=row["raw_symbol"].decode("ascii").rstrip("\x00"),
+                        expiration=exp_date,
+                        strike_price=strike,
+                        right=right,
+                        multiplier=round(uom / 1e9) if uom > 0 else 50,
+                        underlying_id=int(row["underlying_id"]),
+                    )
+    return result, files_read
 
 
 def _scan_zip_for_ids(zip_path: Path) -> set[int]:

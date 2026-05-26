@@ -29,12 +29,18 @@ Greeks (annualised inputs, theta in per-day):
 from __future__ import annotations
 
 import math
+import os
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import timedelta
 
 import duckdb
 import numpy as np
 import polars as pl
 from numba import njit
+
+# Number of parallel workers for day-level Greeks computation.
+# numba JIT releases the GIL, so threads scale well up to the physical core count.
+_GREEKS_WORKERS = min(os.cpu_count() or 4, 8)
 
 # ---------------------------------------------------------------------------
 # numba-compiled Black-76 kernels
@@ -68,7 +74,7 @@ def _black76_price(F: float, K: float, T: float, r: float, sigma: float, is_call
         return df * (K * _norm_cdf(-d2) - F * _norm_cdf(-d1))
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _implied_vol(
     F: np.ndarray,
     K: np.ndarray,
@@ -102,7 +108,7 @@ def _implied_vol(
     return iv
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _greeks(
     F: np.ndarray,
     K: np.ndarray,
@@ -239,23 +245,49 @@ class GreeksCalculator:
         print(f"[greeks] Computing Greeks for {total:,} option bars across {len(dates)} days...")
 
         written = 0
-        for i, date in enumerate(dates, 1):
-            batch_df = self.con.execute(
-                "SELECT * FROM _greek_pending WHERE DATE(ts_event) = ? ORDER BY instrument_id, ts_event",
-                [date],
-            ).pl()
+        completed = 0
 
-            if batch_df.is_empty():
-                continue
+        # Pipelined parallel execution: the main thread reads each day's batch from
+        # DuckDB (sequential — not thread-safe) and immediately submits the numba
+        # computation to the pool. Results are drained into DuckDB once the pipeline
+        # fills to 2× worker count, keeping memory bounded to ~2× _GREEKS_WORKERS
+        # days at a time regardless of dataset size.
+        #
+        # numba @njit functions release the GIL, so thread parallelism provides
+        # near-linear speedup up to the physical core count.
+        pending: list[tuple[object, Future]] = []
 
-            result = self._compute_batch(batch_df)
+        def _drain_one() -> None:
+            nonlocal written, completed
+            date_d, fut = pending.pop(0)
+            result = fut.result()
             if not result.is_empty():
                 self.con.register("_greeks_batch", result)
                 self.con.execute("INSERT INTO option_greeks SELECT * FROM _greeks_batch")
                 self.con.unregister("_greeks_batch")
                 written += len(result)
+            completed += 1
+            print(
+                f"\r[greeks] {date_d}  {completed}/{len(dates)} days  rows={written:,}",
+                end="", flush=True,
+            )
 
-            print(f"\r[greeks] {date}  {i}/{len(dates)} days  rows={written:,}", end="", flush=True)
+        with ThreadPoolExecutor(max_workers=_GREEKS_WORKERS) as pool:
+            for date in dates:
+                batch_df = self.con.execute(
+                    "SELECT * FROM _greek_pending "
+                    "WHERE DATE(ts_event) = ? ORDER BY instrument_id, ts_event",
+                    [date],
+                ).pl()
+                pending.append((date, pool.submit(self._compute_batch, batch_df)))
+
+                # Drain oldest result once the pipeline is full.
+                if len(pending) >= _GREEKS_WORKERS * 2:
+                    _drain_one()
+
+            # Drain all remaining futures.
+            while pending:
+                _drain_one()
 
         self.con.execute("DROP TABLE IF EXISTS _greek_pending")
         print(f"\n[greeks] Wrote {written:,} option_greeks rows")
