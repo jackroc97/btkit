@@ -25,7 +25,7 @@ class TestLoadStrategy:
         assert strat.name is not None
         assert len(strat.trades) > 0
 
-    def test_rejects_parameterized_strategy(self, tmp_path):
+    def test_accepts_parameterized_strategy(self, tmp_path):
         yaml_content = """
 strategy:
   name: sweep_test
@@ -53,8 +53,8 @@ strategy:
 """
         f = tmp_path / "sweep.yaml"
         f.write_text(yaml_content)
-        with pytest.raises(ValueError, match="Matrix runs are not supported"):
-            load_strategy(f)
+        strat = load_strategy(f)
+        assert strat.is_parameterized()
 
     def test_missing_strategy_key_raises(self, tmp_path):
         f = tmp_path / "bad.yaml"
@@ -192,18 +192,18 @@ class TestParseConditionBooleans:
 
 class TestParseConditionDotNotation:
     def test_leg_property_reference(self):
-        # "short_put.delta > -0.30" → col("short_put_delta") > -0.30
+        # "short_put.delta > -0.30" → col("leg_short_put_delta") > -0.30
         expr = parse_condition("short_put.delta > -0.30")
-        df = pl.DataFrame({"short_put_delta": [-0.40, -0.25, -0.10]})
-        result = df.filter(expr)["short_put_delta"].to_list()
+        df = pl.DataFrame({"leg_short_put_delta": [-0.40, -0.25, -0.10]})
+        result = df.filter(expr)["leg_short_put_delta"].to_list()
         assert result == [-0.25, -0.10]
 
     def test_multiple_dot_references(self):
         expr = parse_condition("short_put.delta > -0.30 and long_put.delta > -0.20")
         df = pl.DataFrame(
             {
-                "short_put_delta": [-0.25, -0.35, -0.25],
-                "long_put_delta": [-0.15, -0.15, -0.25],
+                "leg_short_put_delta": [-0.25, -0.35, -0.25],
+                "leg_long_put_delta": [-0.15, -0.15, -0.25],
             }
         )
         result = df.filter(expr)

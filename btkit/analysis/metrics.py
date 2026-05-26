@@ -1,9 +1,10 @@
 """
 PostProcessor — loads backtest results and computes standard metrics.
 
-Supports both single-run (backtest_id) and matrix-run (matrix_id) analysis.
-For MVP, single-run analysis and terminal output are the priority. Matrix-run
-heatmap analysis is deferred.
+Supports single-run (backtest_id) and study-run (study_id) analysis.
+Single-run metrics and terminal output are fully implemented. Study-level
+summary (study_summary()) returns per-combination metrics. Heatmap analysis
+requires a StudyExpander.params_df and is deferred.
 
 MAE (Maximum Adverse Excursion) is derived from worst_mark and open_mark stored
 in the position table — no additional data collection needed.
@@ -24,18 +25,20 @@ class PostProcessor:
         self,
         output_db: OutputDatabase,
         backtest_id: int | None = None,
-        matrix_id: int | None = None,
+        study_id: int | None = None,
+        matrix_id: int | None = None,  # deprecated alias for study_id
     ) -> None:
         """
-        Initialise with at most one of backtest_id (single run) or matrix_id
-        (all runs from a matrix expansion). If neither is given, the most recent
-        backtest is used.
+        Initialise with at most one of backtest_id (single run) or study_id
+        (all runs from a study). If neither is given, the most recent backtest
+        is used. matrix_id is a deprecated alias for study_id.
         """
-        if backtest_id is not None and matrix_id is not None:
-            raise ValueError("Provide at most one of backtest_id or matrix_id")
+        effective_study_id = study_id or matrix_id
+        if backtest_id is not None and effective_study_id is not None:
+            raise ValueError("Provide at most one of backtest_id or study_id")
         self.output_db = output_db
         self.backtest_id = backtest_id
-        self.matrix_id = matrix_id
+        self.study_id = effective_study_id
 
     def metrics(self) -> dict[str, Any]:
         """
@@ -50,7 +53,7 @@ class PostProcessor:
             avg_mae, median_mae, worst_mae
 
         MAE metrics derived from: abs(worst_mark - open_mark) per position.
-        Only valid when initialised with backtest_id.
+        Only valid when initialised with backtest_id (single run).
         """
         positions = self._load_positions()
         if positions.is_empty():
@@ -198,6 +201,49 @@ class PostProcessor:
             .sort("open_time")
         )
 
+    def study_summary(self) -> pl.DataFrame:
+        """
+        Returns one row per backtest in the study, with key metrics as columns.
+        Columns: backtest_id, combination_id, strategy_name, status,
+                 net_profit, total_trades, percent_profitable, sharpe_ratio.
+
+        Requires study_id to be set.
+        """
+        if self.study_id is None:
+            raise ValueError("study_id is required for study_summary()")
+
+        backtests = self.output_db._con.execute(
+            """
+            SELECT id, combination_id, strategy_name, status
+            FROM backtest
+            WHERE study_id = ?
+            ORDER BY combination_id
+            """,
+            [self.study_id],
+        ).pl()
+
+        if backtests.is_empty():
+            return pl.DataFrame()
+
+        rows = []
+        for row in backtests.iter_rows(named=True):
+            bid = row["id"]
+            pp = PostProcessor(self.output_db, backtest_id=bid)
+            m = pp.metrics()
+            rows.append({
+                "backtest_id": bid,
+                "combination_id": row["combination_id"],
+                "strategy_name": row["strategy_name"],
+                "status": row["status"],
+                "net_profit": m["net_profit"],
+                "total_trades": m["total_trades"],
+                "percent_profitable": m["percent_profitable"],
+                "sharpe_ratio": m["sharpe_ratio"],
+                "profit_factor": m["profit_factor"] if math.isfinite(m["profit_factor"]) else None,
+                "max_drawdown_pct": m["max_drawdown_pct"],
+            })
+        return pl.DataFrame(rows)
+
     def summarize(self, formatted: bool = False) -> str:
         """
         Returns a formatted multi-line string of all metrics for terminal display.
@@ -239,20 +285,30 @@ class PostProcessor:
         fixed_params: dict[str, Any] | None = None,
     ) -> Any:
         """
-        DEFERRED — requires matrix_id and StrategyMatrix.params_df.
-
         Plot a heatmap of the given metric across two swept parameters.
-        fixed_params filters the matrix to a specific slice when more than
+        Requires study_id and a StudyExpander.params_df to be provided.
+        fixed_params filters the study to a specific slice when more than
         two parameters were swept.
         """
-        raise NotImplementedError("heatmap() is deferred — not available in MVP")
+        raise NotImplementedError(
+            "heatmap() requires study_id and params_df — not yet implemented"
+        )
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 
     def _load_positions(self) -> pl.DataFrame:
-        """Load positions for this backtest / matrix run."""
+        """Load positions for this backtest or study run."""
+        if self.study_id is not None:
+            return self.output_db._con.execute(
+                """
+                SELECT p.* FROM position p
+                JOIN backtest b ON p.backtest_id = b.id
+                WHERE b.study_id = ?
+                """,
+                [self.study_id],
+            ).pl()
         bid = self._resolve_backtest_id()
         if bid is None:
             return pl.DataFrame()

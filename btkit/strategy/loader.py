@@ -29,8 +29,9 @@ def load_strategy(path: str | Path) -> StrategyDefinition:
     structural errors, invalid field values, and mutually-exclusive-field
     violations are all raised here as ValidationError.
 
-    For MVP, also raises ValueError if the loaded strategy is parameterized
-    (contains sweep params or explicit combinations). Matrix runs are deferred.
+    Parameterized strategies (sweep params or explicit combinations) are accepted;
+    the caller is responsible for dispatching to BacktestEngine (scalar) or
+    StudyExpander (parameterized).
     """
     path = Path(path)
     with path.open() as f:
@@ -41,14 +42,6 @@ def load_strategy(path: str | Path) -> StrategyDefinition:
         raise ValueError(f"YAML file {path} must have a top-level 'strategy' key")
 
     definition = StrategyDefinition.model_validate(strategy_data)
-
-    if definition.is_parameterized():
-        raise ValueError(
-            "Strategy contains sweep or combination parameters. "
-            "Matrix runs are not supported in this version. "
-            "Use scalar values for all leg and exit parameters."
-        )
-
     return definition
 
 

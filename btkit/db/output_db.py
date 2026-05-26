@@ -1,9 +1,10 @@
 """
 OutputDatabase — write access to a btkit backtest output database.
 
-One OutputDatabase file is created per backtest run (or per matrix run, with
-results for all combinations in a single file after merging). Schema is created
-on first use via create_schema().
+One OutputDatabase file is created per backtest run (scalar) or study run
+(all combinations merged into one file). Schema is created on first use via
+create_schema(), which also auto-migrates legacy DBs that still have the old
+matrix_id column name.
 """
 
 from __future__ import annotations
@@ -21,10 +22,21 @@ class OutputDatabase:
 
     def create_schema(self) -> None:
         """Create output tables if they do not already exist."""
+        self._maybe_migrate()
+        self._con.execute("""
+            CREATE TABLE IF NOT EXISTS study (
+                id                  INTEGER PRIMARY KEY,
+                name                VARCHAR         NOT NULL,
+                strategy_yaml       TEXT            NOT NULL,
+                total_combinations  INTEGER         NOT NULL,
+                created_at          TIMESTAMPTZ     NOT NULL,
+                finished_at         TIMESTAMPTZ
+            )
+        """)
         self._con.execute("""
             CREATE TABLE IF NOT EXISTS backtest (
                 id                INTEGER PRIMARY KEY,
-                matrix_id         INTEGER,
+                study_id          INTEGER,
                 combination_id    INTEGER,
                 strategy_name     VARCHAR         NOT NULL,
                 strategy_version  VARCHAR,
@@ -79,6 +91,38 @@ class OutputDatabase:
             )
         """)
 
+    # ------------------------------------------------------------------
+    # Study
+    # ------------------------------------------------------------------
+
+    def write_study(
+        self,
+        name: str,
+        strategy_yaml: str,
+        total_combinations: int,
+    ) -> int:
+        """Insert a study row and return the generated id."""
+        next_id = self._next_id("study")
+        self._con.execute(
+            """
+            INSERT INTO study (id, name, strategy_yaml, total_combinations, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [next_id, name, strategy_yaml, total_combinations, datetime.now(UTC)],
+        )
+        return next_id
+
+    def finalize_study(self, study_id: int) -> None:
+        """Set finished_at on a study row."""
+        self._con.execute(
+            "UPDATE study SET finished_at = ? WHERE id = ?",
+            [datetime.now(UTC), study_id],
+        )
+
+    # ------------------------------------------------------------------
+    # Backtest
+    # ------------------------------------------------------------------
+
     def write_backtest(self, metadata: dict) -> int:
         """
         Insert a backtest record and return the generated id.
@@ -88,14 +132,14 @@ class OutputDatabase:
         self._con.execute(
             """
             INSERT INTO backtest (
-                id, matrix_id, combination_id, strategy_name, strategy_version,
+                id, study_id, combination_id, strategy_name, strategy_version,
                 strategy_params, initial_equity, slippage_pct, fee_per_contract,
                 created_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 next_id,
-                metadata.get("matrix_id"),
+                metadata.get("study_id"),
                 metadata.get("combination_id"),
                 metadata["strategy_name"],
                 metadata.get("strategy_version"),
@@ -236,6 +280,27 @@ class OutputDatabase:
     def _next_id(self, table: str) -> int:
         row = self._con.execute(f"SELECT COALESCE(MAX(id), 0) + 1 FROM {table}").fetchone()
         return row[0]
+
+    def _maybe_migrate(self) -> None:
+        """Rename matrix_id → study_id on existing output DBs (one-time, safe)."""
+        tables = {
+            row[0]
+            for row in self._con.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'main'"
+            ).fetchall()
+        }
+        if "backtest" not in tables:
+            return
+        cols = {
+            row[0]
+            for row in self._con.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'backtest'"
+            ).fetchall()
+        }
+        if "matrix_id" in cols and "study_id" not in cols:
+            self._con.execute("ALTER TABLE backtest RENAME COLUMN matrix_id TO study_id")
 
     # ------------------------------------------------------------------
     # Lifecycle

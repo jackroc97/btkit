@@ -1,0 +1,4 @@
+study:
+  name: simple_study
+  strategies:
+    - path: ../strategies/short_put_spread.yaml

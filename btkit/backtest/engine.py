@@ -42,11 +42,15 @@ class BacktestEngine:
         output_db: OutputDatabase,
         strategy: StrategyDefinition,
         initial_equity: float = 100_000.0,
+        study_id: int | None = None,
+        combination_id: int | None = None,
     ) -> None:
         self.input_db = input_db
         self.output_db = output_db
         self.strategy = strategy
         self.initial_equity = initial_equity
+        self.study_id = study_id
+        self.combination_id = combination_id
 
     def run(self) -> int:
         """
@@ -213,5 +217,7 @@ class BacktestEngine:
                 "slippage_pct": self.strategy.costs.slippage_pct,
                 "fee_per_contract": self.strategy.costs.fee_per_contract,
                 "created_at": datetime.now(UTC),
+                "study_id": self.study_id,
+                "combination_id": self.combination_id,
             }
         )

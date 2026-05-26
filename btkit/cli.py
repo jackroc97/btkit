@@ -2,19 +2,23 @@
 btkit CLI — entry point for all pipeline commands.
 
 Commands:
-    btkit build     Build the input database from raw Databento files.
-    btkit run       Run a backtest from a strategy YAML (single run only for MVP).
-    btkit analyze   Compute metrics and print results to terminal.
-    btkit pipeline  Full pipeline: build (if needed) → run → analyze.
-    btkit serve     Launch the interactive Dash dashboard for a backtest run.
+    btkit build         Build the input database from raw Databento files.
+    btkit run           Run a backtest from a strategy YAML (single scalar run).
+    btkit analyze       Compute metrics and print results to terminal.
+    btkit pipeline      Full pipeline: build (if needed) → run → analyze.
+    btkit serve         Launch the interactive Dash dashboard for a backtest run.
+    btkit study run     Run a study: expand parameterized strategies and execute
+                        all combinations in parallel.
 
 Usage:
-    btkit build   --data-path DATA --db-path DB [--indicators SCRIPT ...]
-    btkit run     --strategy YAML --input-db DB --output-db DB [--initial-equity N]
-    btkit analyze --output-db DB [--backtest-id N | --matrix-id N]
-    btkit pipeline --data-path DATA --strategy YAML --db-path DB --output-db DB
-                   [--indicators SCRIPT ...] [--initial-equity N] [--rebuild]
-    btkit serve   --output-db DB [--backtest-id N] [--port 8050]
+    btkit build       --data-path DATA --db-path DB [--indicators SCRIPT ...]
+    btkit run         --strategy YAML --input-db DB --output-db DB [--initial-equity N]
+    btkit analyze     --output-db DB [--backtest-id N | --study-id N]
+    btkit pipeline    --data-path DATA --strategy YAML --db-path DB --output-db DB
+                      [--indicators SCRIPT ...] [--initial-equity N] [--rebuild]
+    btkit serve       --output-db DB [--backtest-id N] [--port 8050]
+    btkit study run   --study YAML --input-db DB --output-db DB
+                      [--workers N] [--max-combinations N] [--initial-equity N]
 """
 
 from __future__ import annotations
@@ -38,6 +42,13 @@ app = typer.Typer(
     help="Vectorized options backtesting framework.",
     add_completion=False,
 )
+
+study_app = typer.Typer(
+    name="study",
+    help="Study commands — multi-strategy / parameter-sweep backtests.",
+    add_completion=False,
+)
+app.add_typer(study_app, name="study")
 
 
 def _ensure_indicators(input_db_path: str, strategy: StrategyDefinition) -> None:
@@ -134,9 +145,16 @@ def run(
         help="Starting account equity. Used for equity curve and minimum_equity filtering.",
     ),
 ) -> None:
-    """Run a backtest from a strategy YAML. Single-run only for this version."""
+    """Run a backtest from a strategy YAML (single scalar run)."""
     typer.echo(f"Loading strategy: {strategy}")
     definition = load_strategy(strategy)
+    if definition.is_parameterized():
+        typer.echo(
+            "Error: strategy contains sweep parameters. "
+            "Use 'btkit study run' for parameterized strategies.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
     _ensure_indicators(input_db, definition)
 
     with InputDatabase(input_db) as idb, OutputDatabase(output_db) as odb:
@@ -158,15 +176,23 @@ def analyze(
     backtest_id: int = typer.Option(
         default=None, help="Analyse a specific backtest run (defaults to most recent)."
     ),
-    matrix_id: int = typer.Option(default=None, help="Analyse all runs from a matrix expansion."),
+    study_id: int = typer.Option(default=None, help="Analyse all runs from a study."),
+    matrix_id: int = typer.Option(
+        default=None, hidden=True, help="Deprecated alias for --study-id."
+    ),
 ) -> None:
     """Compute metrics and print results to terminal."""
-    if backtest_id is not None and matrix_id is not None:
-        typer.echo("Provide at most one of --backtest-id or --matrix-id.", err=True)
+    # Support legacy --matrix-id as a hidden alias.
+    effective_study_id = study_id or matrix_id
+
+    if backtest_id is not None and effective_study_id is not None:
+        typer.echo("Provide at most one of --backtest-id or --study-id.", err=True)
         raise typer.Exit(code=1)
 
     with OutputDatabase(output_db) as odb:
-        processor = PostProcessor(odb, backtest_id=backtest_id, matrix_id=matrix_id)
+        processor = PostProcessor(
+            odb, backtest_id=backtest_id, study_id=effective_study_id
+        )
         summary = processor.summarize(formatted=True)
 
     typer.echo(summary)
@@ -203,6 +229,13 @@ def pipeline(
 
     typer.echo(f"Loading strategy: {strategy}")
     definition = load_strategy(strategy)
+    if definition.is_parameterized():
+        typer.echo(
+            "Error: strategy contains sweep parameters. "
+            "Use 'btkit study run' for parameterized strategies.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
     _ensure_indicators(db_path, definition)
 
     with InputDatabase(db_path) as idb, OutputDatabase(output_db) as odb:
@@ -249,6 +282,66 @@ def serve(
     run_dashboard(
         output_db, input_db_path=input_db, backtest_id=backtest_id, port=port, debug=debug
     )
+
+
+# ---------------------------------------------------------------------------
+# btkit study …
+# ---------------------------------------------------------------------------
+
+
+@study_app.command("run")
+def study_run(
+    study: str = typer.Option(..., help="Path to the study YAML file."),
+    input_db: str = typer.Option(..., help="Path to the input database."),
+    output_db: str = typer.Option(..., help="Path for the output database (created if absent)."),
+    workers: int = typer.Option(
+        default=None, help="Worker process count (default: cpu_count)."
+    ),
+    max_combinations: int = typer.Option(
+        default=None, help="Abort if expansion exceeds this many combinations."
+    ),
+    initial_equity: float = typer.Option(
+        default=100_000.0,
+        help="Starting account equity for each combination.",
+    ),
+) -> None:
+    """
+    Run a study: expand parameterized strategies and execute all combinations
+    in parallel, then merge results into a single output database.
+    """
+    from btkit.study.loader import load_study
+    from btkit.study.runner import StudyRunner
+
+    study_path = Path(study)
+    study_yaml_text = study_path.read_text()
+    study_def, study_dir = load_study(study_path)
+
+    typer.echo(f"Starting study '{study_def.name}'")
+
+    runner = StudyRunner(
+        study=study_def,
+        study_dir=study_dir,
+        study_yaml_text=study_yaml_text,
+        input_db_path=input_db,
+        output_db_path=output_db,
+        max_workers=workers,
+        max_combinations=max_combinations,
+        initial_equity=initial_equity,
+    )
+
+    study_id, failed = runner.run()
+
+    if failed:
+        typer.echo(
+            f"\nStudy complete with {len(failed)} failed combination(s):", err=True
+        )
+        for f in failed:
+            cid = f["combination_id"]
+            label = f"combination_id={cid}" if cid >= 0 else "runner error"
+            typer.echo(f"  {label}: {f['error']}", err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(f"Study complete. study_id={study_id}")
 
 
 if __name__ == "__main__":
