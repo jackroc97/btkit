@@ -69,6 +69,33 @@ exit:
 # → 3 × 2 = 6 combinations
 ```
 
+List values may include `null` to include "this exit disabled" as one of the
+combinations. For example:
+
+```yaml
+exit:
+  stop_loss:        [null, 2.0]     # 2 combos: no SL, then SL at 2.0 per point
+  take_profit:      [null, 0.50]    # 2 combos: no TP, then TP at 0.50 per point
+  take_profit_pct:  [null, 0.70]    # 2 combos: no TP, then TP at 70% of open mark
+```
+
+A `null` entry produces a combination where that exit condition is entirely absent
+— the position can only close via the other active exits (DTE exit, expiry, or
+indicator conditions). `null` and non-null values may be freely mixed in the same
+list, and sweeping two nullable fields produces the full cartesian product:
+
+```yaml
+exit:
+  stop_loss:       [null, 2.0]   # [None, 2.0]
+  take_profit_pct: [null, 0.70]  # [None, 0.70]
+# → 4 combinations: (None, None), (None, 0.70), (2.0, None), (2.0, 0.70)
+```
+
+**Note on pct-based take profit:** the top-level `take_profit_pct` field is the
+correct way to sweep a percentage-based take profit with `null`. Using
+`take_profit: {pct: [null, 0.70]}` is not supported for sweeps — the nested
+`TakeProfitConfig` form only accepts scalar values when used in a study.
+
 ### Range sweep
 
 ```yaml

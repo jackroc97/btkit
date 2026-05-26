@@ -39,8 +39,10 @@ class SweepRange(BaseModel):
 
 
 # Scalar, list, or range — valid for any numeric sweep field.
+# Lists may contain None to include "disabled" as one combination value,
+# e.g. stop_loss: [null, 2.0] sweeps over {no stop loss, stop loss at 2.0}.
 # For MVP all fields using these types must resolve to plain scalars.
-NumericSweep = float | list[float] | SweepRange
+NumericSweep = float | list[float | None] | SweepRange
 IntSweep = int | list[int] | SweepRange
 
 
@@ -198,7 +200,7 @@ StructuredCombination = dict[str, dict[str, Any]]
 class TableCombinations(BaseModel):
     mode: Literal["table"]
     columns: list[str]  # dot-path refs e.g. "short_put.delta"
-    rows: list[list[float | int]]
+    rows: list[list[float | int | None]]
 
     @model_validator(mode="after")
     def row_lengths_match_columns(self) -> TableCombinations:

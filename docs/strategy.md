@@ -163,6 +163,12 @@ delta:
   start: -0.20
   stop:  -0.35
   step:  -0.05              # generates [-0.20, -0.25, -0.30, -0.35]
+
+# List with null — include "exit disabled" as one combination
+# (valid for exit fields only; null is not meaningful for delta or dte)
+stop_loss: [null, 1.5, 2.0]        # 3 combos: no SL, 1.5, 2.0
+take_profit: [null, 0.50]           # 2 combos: no TP, 0.50 per point
+take_profit_pct: [null, 0.70]       # 2 combos: no TP, 70% of open mark
 ```
 
 **Sweepable parameters:**
