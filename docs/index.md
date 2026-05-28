@@ -81,6 +81,8 @@ re-engineering of the project where necessary.
      write output database. Automatically checks for stale indicators and rebuilds them
      if the underlying bar data has been extended since the last build.
    - **`btkit analyze`** — Compute metrics, open results dashboard.
+  - **`btkit db merge`** — Merge two or more output databases into one. See
+    [Output Database Utilities](database.md#output-database-utilities).
 
 ---
 

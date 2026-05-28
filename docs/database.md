@@ -485,3 +485,44 @@ CREATE TABLE position_leg (
     exit_price      DOUBLE
 );
 ```
+
+---
+
+## Output Database Utilities
+
+### `btkit db merge` — Combine output databases
+
+Merges two or more output databases into a single target file. Useful for combining
+runs from separate machines, consolidating monthly result files, or archiving multiple
+study runs into one database for unified dashboard browsing.
+
+```
+btkit db merge --sources jan.db feb.db mar.db --target q1.db
+```
+
+| Option | Description |
+|---|---|
+| `--sources` | One or more source output database paths (space-separated). |
+| `--target` | Target output database path. Created with schema if absent; rows are appended if it already exists. |
+
+The target must not be one of the source paths.
+
+**What is merged**
+
+All four output tables are merged in FK order. Primary keys and foreign key references are
+re-sequenced so IDs are globally unique in the target:
+
+| Table | Re-sequenced columns |
+|---|---|
+| `study` | `id` |
+| `backtest` | `id`, `study_id` |
+| `position` | `id`, `backtest_id` |
+| `position_leg` | `id`, `position_id` |
+
+`study_id IS NULL` on standalone backtests (those not part of a study) is preserved
+correctly — only non-null study FK references are offset.
+
+**Idempotency note**: running the merge twice against the same target will duplicate
+rows. The command does not deduplicate. Use a fresh target file when re-merging from
+scratch, or rely on the append behaviour deliberately when adding new source databases
+incrementally.
