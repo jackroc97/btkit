@@ -93,5 +93,6 @@ re-engineering of the project where necessary.
 | [strategy.md](strategy.md) | Strategy YAML schema, Pydantic models, condition expressions, exit priority |
 | [study.md](study.md) | Study YAML format, sweep expansion, parallel execution, result analysis |
 | [fill_price_and_costs.md](fill_price_and_costs.md) | Fill price rules, slippage model, fee model |
+| [dashboard.md](dashboard.md) | Dashboard panels, Compare feature, live trades CSV format |
 | [constraints.md](constraints.md) | Known constraints, limitations, and reach goals |
 | [mvp.md](mvp.md) | MVP success criteria, in-scope components, and deferred features |
