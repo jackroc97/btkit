@@ -492,9 +492,20 @@ CREATE TABLE position_leg (
 
 ### `btkit db merge` — Combine output databases
 
-Merges two or more output databases into a single target file. Useful for combining
-runs from separate machines, consolidating monthly result files, or archiving multiple
-study runs into one database for unified dashboard browsing.
+Merges two or more output databases into a single target file. Each backtest and study
+remains completely independent after the merge — rows are appended with re-sequenced
+primary keys, no trade data is mixed across runs, and each backtest retains its own
+`strategy_params`, `created_at`, and `note`. The result is identical to having run
+everything against the same output database from the start.
+
+Merging is appropriate any time you want multiple runs consolidated for dashboard browsing
+or analysis, regardless of whether they cover the same date ranges or used different
+parameters. Common cases:
+
+- Combining results from separate machines or sessions
+- Consolidating runs with different strategy parameters into one browsable database
+- Merging a new month of results into an existing database as new market data arrives
+- Archiving multiple study runs into a single file
 
 ```
 btkit db merge --sources jan.db feb.db mar.db --target q1.db
