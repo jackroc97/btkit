@@ -96,7 +96,8 @@ class OutputMerger:
                 duration_s,
                 warnings,
                 error_message,
-                error_traceback
+                error_traceback,
+                note
             FROM w.backtest
         """)
 

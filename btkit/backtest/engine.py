@@ -44,6 +44,7 @@ class BacktestEngine:
         initial_equity: float = 100_000.0,
         study_id: int | None = None,
         combination_id: int | None = None,
+        note: str | None = None,
     ) -> None:
         self.input_db = input_db
         self.output_db = output_db
@@ -51,6 +52,7 @@ class BacktestEngine:
         self.initial_equity = initial_equity
         self.study_id = study_id
         self.combination_id = combination_id
+        self.note = note
 
     def run(self) -> int:
         """
@@ -219,5 +221,6 @@ class BacktestEngine:
                 "created_at": datetime.now(UTC),
                 "study_id": self.study_id,
                 "combination_id": self.combination_id,
+                "note": self.note,
             }
         )

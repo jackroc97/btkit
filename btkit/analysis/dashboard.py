@@ -1916,6 +1916,8 @@ def _build_index_layout(odb) -> html.Div:
         SELECT
             b.id,
             b.strategy_name,
+            b.strategy_version,
+            b.note,
             b.created_at,
             b.initial_equity,
             COUNT(p.id)                                                                 AS total_trades,
@@ -1931,14 +1933,14 @@ def _build_index_layout(odb) -> html.Div:
         FROM backtest b
         LEFT JOIN position p ON p.backtest_id = b.id
         WHERE b.study_id IS NULL
-        GROUP BY b.id, b.strategy_name, b.created_at, b.initial_equity
+        GROUP BY b.id, b.strategy_name, b.strategy_version, b.note, b.created_at, b.initial_equity
         ORDER BY b.created_at DESC, b.id DESC
         """
     ).fetchall()
 
     bt_rows = []
     for (
-        bid, strategy_name, created_at, initial_equity,
+        bid, strategy_name, strategy_version, note, created_at, initial_equity,
         total_trades, net_profit, win_rate, profit_factor, avg_loss,
         first_trade, last_trade,
     ) in bt_raw:
@@ -1954,6 +1956,8 @@ def _build_index_layout(odb) -> html.Div:
             "id": bid,
             "run": f"[#{bid}](?backtest_id={bid})",
             "strategy": strategy_name or "—",
+            "version": strategy_version or "—",
+            "note": note or "",
             "run_date": created_at.strftime("%Y-%m-%d %H:%M") if created_at else "—",
             "date_range": date_range,
             "trades": int(total_trades) if total_trades else 0,
@@ -1975,6 +1979,7 @@ def _build_index_layout(odb) -> html.Div:
             SELECT
                 s.id,
                 s.name,
+                s.note,
                 s.created_at,
                 s.total_combinations,
                 s.finished_at,
@@ -1984,11 +1989,11 @@ def _build_index_layout(odb) -> html.Div:
             FROM study s
             LEFT JOIN backtest b ON b.study_id = s.id
             LEFT JOIN position p ON p.backtest_id = b.id
-            GROUP BY s.id, s.name, s.created_at, s.total_combinations, s.finished_at
+            GROUP BY s.id, s.name, s.note, s.created_at, s.total_combinations, s.finished_at
             ORDER BY s.created_at DESC, s.id DESC
             """
         ).fetchall()
-        for (sid, name, created_at, total_combinations, finished_at,
+        for (sid, name, st_note, created_at, total_combinations, finished_at,
              completed, first_trade, last_trade) in st_raw:
             if first_trade and last_trade:
                 date_range = f"{first_trade.strftime('%Y-%m-%d')} – {last_trade.strftime('%Y-%m-%d')}"
@@ -1999,6 +2004,7 @@ def _build_index_layout(odb) -> html.Div:
             st_rows.append({
                 "id": sid,
                 "study": f"[{name}](?study_id={sid})",
+                "note": st_note or "",
                 "run_date": created_at.strftime("%Y-%m-%d %H:%M") if created_at else "—",
                 "combinations": f"{int(completed or 0)}/{total_combinations}",
                 "date_range": date_range,
@@ -2019,6 +2025,10 @@ def _build_index_layout(odb) -> html.Div:
             {"field": "run", "headerName": "Run", "width": 70, "cellRenderer": "markdown",
              "sortable": False, "filter": False, "pinned": "left", "suppressSizeToFit": True},
             {"field": "strategy", "headerName": "Strategy", "flex": 1, "minWidth": 120},
+            {"field": "version", "headerName": "Version", "width": 80,
+             "cellStyle": {"color": _MUTED, "fontSize": "12px", "fontFamily": "monospace"}},
+            {"field": "note", "headerName": "Note", "flex": 1, "minWidth": 120,
+             "cellStyle": {"color": _MUTED, "fontSize": "12px"}},
             {"field": "run_date", "headerName": "Run Date", "width": 145,
              "cellStyle": {"color": _MUTED, "fontSize": "12px"}},
             {"field": "date_range", "headerName": "Date Range", "width": 220,
@@ -2059,6 +2069,8 @@ def _build_index_layout(odb) -> html.Div:
         columnDefs=[
             {"field": "study", "headerName": "Study", "flex": 1, "minWidth": 160,
              "cellRenderer": "markdown", "sortable": False, "filter": False},
+            {"field": "note", "headerName": "Note", "flex": 1, "minWidth": 120,
+             "cellStyle": {"color": _MUTED, "fontSize": "12px"}},
             {"field": "run_date", "headerName": "Run Date", "width": 145,
              "cellStyle": {"color": _MUTED, "fontSize": "12px"}},
             {"field": "combinations", "headerName": "Combinations", "width": 130,

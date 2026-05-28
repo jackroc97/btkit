@@ -155,6 +155,10 @@ def run(
         default=100_000.0,
         help="Starting account equity. Used for equity curve and minimum_equity filtering.",
     ),
+    note: str = typer.Option(
+        default=None,
+        help="Free-text label stored with this run (shown in the dashboard index).",
+    ),
 ) -> None:
     """Run a backtest from a strategy YAML (single scalar run)."""
     typer.echo(f"Loading strategy: {strategy}")
@@ -175,6 +179,7 @@ def run(
             output_db=odb,
             strategy=definition,
             initial_equity=initial_equity,
+            note=note,
         )
         backtest_id = engine.run()
 
@@ -317,6 +322,10 @@ def study_run(
         default=100_000.0,
         help="Starting account equity for each combination.",
     ),
+    note: str = typer.Option(
+        default=None,
+        help="Free-text label stored with this study (shown in the dashboard index).",
+    ),
 ) -> None:
     """
     Run a study: expand parameterized strategies and execute all combinations
@@ -340,6 +349,7 @@ def study_run(
         max_workers=workers,
         max_combinations=max_combinations,
         initial_equity=initial_equity,
+        note=note,
     )
 
     study_id, failed = runner.run()

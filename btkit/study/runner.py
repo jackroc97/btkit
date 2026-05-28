@@ -92,6 +92,7 @@ class StudyRunner:
         max_workers: int | None = None,
         max_combinations: int | None = None,
         initial_equity: float = 100_000.0,
+        note: str | None = None,
     ) -> None:
         self._study = study
         self._study_dir = study_dir
@@ -101,6 +102,7 @@ class StudyRunner:
         self._max_workers = max_workers or study.workers or os.cpu_count()
         self._max_combinations = max_combinations or study.max_combinations
         self._initial_equity = initial_equity
+        self._note = note
 
     def run(self) -> tuple[int, list[dict]]:
         """Execute the full study. Returns (study_id, failed_combinations)."""
@@ -116,6 +118,7 @@ class StudyRunner:
                 name=self._study.name,
                 strategy_yaml=self._study_yaml_text,
                 total_combinations=len(combinations),
+                note=self._note,
             )
 
         tmp_dir = tempfile.mkdtemp(prefix="btkit_study_")

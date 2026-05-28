@@ -30,7 +30,8 @@ class OutputDatabase:
                 strategy_yaml       TEXT            NOT NULL,
                 total_combinations  INTEGER         NOT NULL,
                 created_at          TIMESTAMPTZ     NOT NULL,
-                finished_at         TIMESTAMPTZ
+                finished_at         TIMESTAMPTZ,
+                note                VARCHAR
             )
         """)
         self._con.execute("""
@@ -49,7 +50,8 @@ class OutputDatabase:
                 duration_s        DOUBLE,
                 warnings          JSON,
                 error_message     VARCHAR,
-                error_traceback   VARCHAR
+                error_traceback   VARCHAR,
+                note              VARCHAR
             )
         """)
         self._con.execute("""
@@ -100,15 +102,16 @@ class OutputDatabase:
         name: str,
         strategy_yaml: str,
         total_combinations: int,
+        note: str | None = None,
     ) -> int:
         """Insert a study row and return the generated id."""
         next_id = self._next_id("study")
         self._con.execute(
             """
-            INSERT INTO study (id, name, strategy_yaml, total_combinations, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO study (id, name, strategy_yaml, total_combinations, created_at, note)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            [next_id, name, strategy_yaml, total_combinations, datetime.now(UTC)],
+            [next_id, name, strategy_yaml, total_combinations, datetime.now(UTC), note],
         )
         return next_id
 
@@ -134,8 +137,8 @@ class OutputDatabase:
             INSERT INTO backtest (
                 id, study_id, combination_id, strategy_name, strategy_version,
                 strategy_params, initial_equity, slippage_pct, fee_per_contract,
-                created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                created_at, note
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 next_id,
@@ -148,6 +151,7 @@ class OutputDatabase:
                 metadata["slippage_pct"],
                 metadata["fee_per_contract"],
                 metadata.get("created_at", datetime.now(UTC)),
+                metadata.get("note"),
             ],
         )
         return next_id
@@ -282,7 +286,7 @@ class OutputDatabase:
         return row[0]
 
     def _maybe_migrate(self) -> None:
-        """Rename matrix_id → study_id on existing output DBs (one-time, safe)."""
+        """Apply incremental schema migrations to existing output DBs."""
         tables = {
             row[0]
             for row in self._con.execute(
@@ -292,15 +296,28 @@ class OutputDatabase:
         }
         if "backtest" not in tables:
             return
-        cols = {
+        bt_cols = {
             row[0]
             for row in self._con.execute(
                 "SELECT column_name FROM information_schema.columns "
                 "WHERE table_name = 'backtest'"
             ).fetchall()
         }
-        if "matrix_id" in cols and "study_id" not in cols:
+        if "matrix_id" in bt_cols and "study_id" not in bt_cols:
             self._con.execute("ALTER TABLE backtest RENAME COLUMN matrix_id TO study_id")
+        if "note" not in bt_cols:
+            self._con.execute("ALTER TABLE backtest ADD COLUMN note VARCHAR")
+
+        if "study" in tables:
+            st_cols = {
+                row[0]
+                for row in self._con.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'study'"
+                ).fetchall()
+            }
+            if "note" not in st_cols:
+                self._con.execute("ALTER TABLE study ADD COLUMN note VARCHAR")
 
     # ------------------------------------------------------------------
     # Lifecycle
