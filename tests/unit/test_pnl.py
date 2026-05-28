@@ -7,7 +7,7 @@ dollar amounts produced by the cost model:
 
     gross_pnl    = (open_mark - exit_mark) × multiplier
     slippage     = |exit_mark| × multiplier × slippage_pct
-    fee          = fee_per_contract  (flat, per round-trip)
+    fee          = (entry_fee + exit_or_expiration_fee) × total_contracts
     net_pnl      = gross_pnl - slippage - fee
 """
 
@@ -24,6 +24,7 @@ from btkit.strategy.definition import (
     EntryConfig,
     EntryWindowConfig,
     ExitConfig,
+    FeesConfig,
     InstrumentConfig,
     LegConfig,
     StrategyDefinition,
@@ -39,6 +40,7 @@ from btkit.strategy.definition import (
 def _make_strategy(
     slippage_pct: float = 0.0,
     fee_per_contract: float = 0.0,
+    fees: FeesConfig | None = None,
     n_legs: int = 1,
 ) -> StrategyDefinition:
     legs = [
@@ -67,7 +69,7 @@ def _make_strategy(
             start_date=date(2026, 1, 1),
             end_date=date(2026, 3, 31),
         ),
-        costs=CostsConfig(slippage_pct=slippage_pct, fee_per_contract=fee_per_contract),
+        costs=CostsConfig(slippage_pct=slippage_pct, fee_per_contract=fee_per_contract, fees=fees),
         trades=[
             TradeDefinition(
                 name="trade1",
@@ -117,6 +119,43 @@ def _make_entries(
     )
 
 
+def _make_entries_2leg(
+    entry_id: int = 0,
+    open_mark: float = 5.0,
+    multiplier: float = 50.0,
+    trade_name: str = "trade1",
+) -> pl.DataFrame:
+    """Entries DataFrame with short_put + long_put columns for 2-leg spread tests."""
+    row = {
+        "entry_id": [entry_id],
+        "trade_name": [trade_name],
+        "entry_time": pl.Series(["2026-01-15 10:30:00"], dtype=pl.Datetime("us", "UTC")),
+        "open_mark": [open_mark],
+        "tp_price": [open_mark - 1.0],
+        "sl_price": [open_mark + 2.0],
+        "dte_exit": pl.Series([None], dtype=pl.Int32),
+    }
+    for leg_name in ("short_put", "long_put"):
+        row.update({
+            f"leg_{leg_name}_instrument_id": [1001],
+            f"leg_{leg_name}_symbol": [f"EW3K6 P4300"],
+            f"leg_{leg_name}_expiration": pl.Series(["2026-01-17"], dtype=pl.Date),
+            f"leg_{leg_name}_strike_price": [4300.0],
+            f"leg_{leg_name}_right": ["P"],
+            f"leg_{leg_name}_action": ["sell_to_open"],
+            f"leg_{leg_name}_quantity": [1],
+            f"leg_{leg_name}_multiplier": [multiplier],
+            f"leg_{leg_name}_close": [5.0],
+            f"leg_{leg_name}_delta": [-0.25],
+            f"leg_{leg_name}_iv": [0.20],
+            f"leg_{leg_name}_gamma": [0.01],
+            f"leg_{leg_name}_theta": [-0.05],
+            f"leg_{leg_name}_vega": [10.0],
+            f"leg_{leg_name}_dte": [21],
+        })
+    return pl.DataFrame(row)
+
+
 def _make_exits(
     entry_id: int = 0,
     exit_mark: float = 4.0,
@@ -163,7 +202,8 @@ class TestPnLCalculatorCostModel:
         assert pos["slippage_cost"][0] == pytest.approx(expected_slip)
         assert pos["net_pnl"][0] == pytest.approx(50.0 - expected_slip)
 
-    def test_flat_fee(self):
+    def test_flat_fee_legacy(self):
+        # fee_per_contract=0.65 splits to entry=0.325 + exit=0.325 × 1 leg = 0.65 total
         strat = _make_strategy(slippage_pct=0.0, fee_per_contract=0.65)
         calc = PnLCalculator(strat)
         entries = _make_entries(open_mark=5.0, multiplier=50.0)
@@ -173,7 +213,7 @@ class TestPnLCalculatorCostModel:
         assert pos["fee_cost"][0] == pytest.approx(0.65)
         assert pos["net_pnl"][0] == pytest.approx(50.0 - 0.65)
 
-    def test_both_costs(self):
+    def test_both_costs_legacy(self):
         strat = _make_strategy(slippage_pct=0.01, fee_per_contract=0.65)
         calc = PnLCalculator(strat)
         entries = _make_entries(open_mark=5.0, multiplier=50.0)
@@ -182,7 +222,7 @@ class TestPnLCalculatorCostModel:
         pos = result.positions
         gross = (5.0 - 4.0) * 50.0
         slip = 4.0 * 50.0 * 0.01
-        fee = 0.65
+        fee = 0.65  # 0.325 entry + 0.325 exit, 1 leg
         assert pos["net_pnl"][0] == pytest.approx(gross - slip - fee)
 
     def test_loss_position(self):
@@ -325,3 +365,107 @@ class TestPnLCalculatorOutput:
         assert leg["entry_delta"][0] == pytest.approx(-0.25)
         assert leg["entry_iv"][0] == pytest.approx(0.20)
         assert leg["entry_dte"][0] == 21
+
+
+class TestStructuredFees:
+    """Tests for the FeesConfig-based fee model."""
+
+    def test_structured_fees_single_leg_active_exit(self):
+        # entry=0.65, exit=0.65, expiry=0.00 × 1 leg → 1.30 for TP/SL exit
+        strat = _make_strategy(
+            fees=FeesConfig(entry_fee_per_contract=0.65, exit_fee_per_contract=0.65)
+        )
+        calc = PnLCalculator(strat)
+        entries = _make_entries(open_mark=5.0, multiplier=50.0)
+        exits = _make_exits(exit_mark=4.0, exit_reason="take_profit")
+        result = calc.compute({"trade1": entries}, {"trade1": exits})
+        assert result.positions["fee_cost"][0] == pytest.approx(1.30)
+
+    def test_structured_fees_single_leg_expiry_exit(self):
+        # expiration_fee=0.00 → only entry fee charged on expiry
+        strat = _make_strategy(
+            fees=FeesConfig(
+                entry_fee_per_contract=0.65,
+                exit_fee_per_contract=0.65,
+                expiration_fee_per_contract=0.0,
+            )
+        )
+        calc = PnLCalculator(strat)
+        entries = _make_entries(open_mark=5.0, multiplier=50.0)
+        exits = _make_exits(exit_mark=0.0, exit_reason="expiry")
+        result = calc.compute({"trade1": entries}, {"trade1": exits})
+        # Only entry fee: 0.65 × 1 leg
+        assert result.positions["fee_cost"][0] == pytest.approx(0.65)
+
+    def test_structured_fees_expiry_nonzero_expiration_fee(self):
+        strat = _make_strategy(
+            fees=FeesConfig(
+                entry_fee_per_contract=0.65,
+                exit_fee_per_contract=0.65,
+                expiration_fee_per_contract=0.10,
+            )
+        )
+        calc = PnLCalculator(strat)
+        entries = _make_entries(open_mark=5.0, multiplier=50.0)
+        exits = _make_exits(exit_mark=0.0, exit_reason="expiry")
+        result = calc.compute({"trade1": entries}, {"trade1": exits})
+        assert result.positions["fee_cost"][0] == pytest.approx(0.75)  # 0.65 + 0.10
+
+    def test_structured_fees_sl_exit_uses_exit_fee_not_expiration(self):
+        strat = _make_strategy(
+            fees=FeesConfig(
+                entry_fee_per_contract=0.65,
+                exit_fee_per_contract=0.65,
+                expiration_fee_per_contract=0.0,
+            )
+        )
+        calc = PnLCalculator(strat)
+        entries = _make_entries(open_mark=3.0, multiplier=50.0)
+        exits = _make_exits(exit_mark=6.0, exit_reason="stop_loss")
+        result = calc.compute({"trade1": entries}, {"trade1": exits})
+        # entry + exit = 0.65 + 0.65 = 1.30
+        assert result.positions["fee_cost"][0] == pytest.approx(1.30)
+
+    def test_structured_fees_scales_with_leg_count(self):
+        # 2-leg spread: fee × 2 legs
+        strat = _make_strategy(
+            fees=FeesConfig(entry_fee_per_contract=0.65, exit_fee_per_contract=0.65),
+            n_legs=2,
+        )
+        calc = PnLCalculator(strat)
+        entries = _make_entries_2leg(open_mark=5.0, multiplier=50.0)
+        exits = _make_exits(exit_mark=4.0, exit_reason="take_profit")
+        result = calc.compute({"trade1": entries}, {"trade1": exits})
+        # (0.65 entry + 0.65 exit) × 2 legs = 2.60
+        assert result.positions["fee_cost"][0] == pytest.approx(2.60)
+
+    def test_legacy_fee_per_contract_two_legs(self):
+        # fee_per_contract=0.65 splits to 0.325+0.325 × 2 legs = 1.30 total
+        strat = _make_strategy(fee_per_contract=0.65, n_legs=2)
+        calc = PnLCalculator(strat)
+        entries = _make_entries_2leg(open_mark=5.0, multiplier=50.0)
+        exits = _make_exits(exit_mark=4.0, exit_reason="take_profit")
+        result = calc.compute({"trade1": entries}, {"trade1": exits})
+        assert result.positions["fee_cost"][0] == pytest.approx(1.30)
+
+    def test_no_fees_zero_cost(self):
+        strat = _make_strategy(fees=FeesConfig())
+        calc = PnLCalculator(strat)
+        entries = _make_entries(open_mark=5.0, multiplier=50.0)
+        exits = _make_exits(exit_mark=4.0)
+        result = calc.compute({"trade1": entries}, {"trade1": exits})
+        assert result.positions["fee_cost"][0] == pytest.approx(0.0)
+
+    def test_net_pnl_with_ibkr_style_fees(self):
+        # Realistic IBKR scenario: 2-leg spread, entry=exit=0.65, expiry=0
+        strat = _make_strategy(
+            fees=FeesConfig(entry_fee_per_contract=0.65, exit_fee_per_contract=0.65),
+            n_legs=2,
+        )
+        calc = PnLCalculator(strat)
+        entries = _make_entries_2leg(open_mark=5.0, multiplier=50.0)
+        exits = _make_exits(exit_mark=4.0, exit_reason="take_profit")
+        result = calc.compute({"trade1": entries}, {"trade1": exits})
+        gross = (5.0 - 4.0) * 50.0  # 50.0
+        fee = (0.65 + 0.65) * 2     # 2.60
+        assert result.positions["net_pnl"][0] == pytest.approx(gross - fee)

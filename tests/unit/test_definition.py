@@ -14,11 +14,14 @@ import pytest
 from pydantic import ValidationError
 
 from btkit.strategy.definition import (
+    CostsConfig,
     EntryConfig,
     EntryWindowConfig,
     ExitConfig,
+    FeesConfig,
     InstrumentConfig,
     LegConfig,
+    LiquidityConfig,
     StopLossConfig,
     StrategyDefinition,
     SweepRange,
@@ -194,17 +197,34 @@ class TestLegConfig:
         assert leg.strike_offset is None
         assert leg.reference_leg is None
 
-    def test_strike_offset_mode(self):
+    def test_strike_offset_mode_no_dte(self):
+        # dte is optional for offset legs — omitting it means "inherit from reference"
         leg = LegConfig(
             name="wing",
             right="put",
             action="buy_to_open",
-            dte=21,
             strike_offset=-25.0,
             reference_leg="short_put",
         )
         assert leg.strike_offset == -25.0
         assert leg.reference_leg == "short_put"
+        assert leg.dte is None
+
+    def test_strike_offset_mode_with_dte(self):
+        # dte may still be specified on an offset leg (reserved for calendar spreads)
+        leg = LegConfig(
+            name="wing",
+            right="put",
+            action="buy_to_open",
+            dte=45,
+            strike_offset=-25.0,
+            reference_leg="short_put",
+        )
+        assert leg.dte == 45
+
+    def test_delta_leg_without_dte_rejected(self):
+        with pytest.raises(ValidationError, match="dte is required for delta-targeted legs"):
+            LegConfig(name="leg", right="put", action="sell_to_open", delta=-0.25)
 
     def test_delta_and_offset_mutually_exclusive(self):
         with pytest.raises(ValidationError, match="mutually exclusive"):
@@ -228,7 +248,6 @@ class TestLegConfig:
                 name="leg",
                 right="put",
                 action="buy_to_open",
-                dte=21,
                 strike_offset=-10.0,
             )
 
@@ -454,3 +473,150 @@ class TestSweepRange:
         sr = SweepRange(start=0.0, stop=0.05, step=0.01)
         vals = sr.values()
         assert len(vals) == 6
+
+
+# ---------------------------------------------------------------------------
+# LiquidityConfig
+# ---------------------------------------------------------------------------
+
+
+class TestLiquidityConfig:
+    def test_defaults(self):
+        liq = LiquidityConfig()
+        assert liq.min_exit_volume is None
+        assert liq.lookback_minutes == 3
+        assert liq.pre_expiry_lock_minutes is None
+        assert liq.slippage_model == "flat"
+
+    def test_is_default_true_when_all_defaults(self):
+        assert LiquidityConfig().is_default is True
+
+    def test_is_default_false_when_volume_set(self):
+        liq = LiquidityConfig(min_exit_volume=100)
+        assert liq.is_default is False
+
+    def test_is_default_false_when_pre_expiry_lock_set(self):
+        liq = LiquidityConfig(pre_expiry_lock_minutes=15)
+        assert liq.is_default is False
+
+    def test_is_default_false_when_spread_slippage(self):
+        liq = LiquidityConfig(slippage_model="spread")
+        assert liq.is_default is False
+
+    def test_needs_volume_false_by_default(self):
+        assert LiquidityConfig().needs_volume is False
+
+    def test_needs_volume_true_when_set(self):
+        assert LiquidityConfig(min_exit_volume=50).needs_volume is True
+
+    def test_needs_spread_false_by_default(self):
+        assert LiquidityConfig().needs_spread is False
+
+    def test_needs_spread_true_when_spread(self):
+        assert LiquidityConfig(slippage_model="spread").needs_spread is True
+
+    def test_invalid_slippage_model_rejected(self):
+        with pytest.raises(ValidationError):
+            LiquidityConfig(slippage_model="half_spread")
+
+    def test_custom_lookback_minutes(self):
+        liq = LiquidityConfig(min_exit_volume=200, lookback_minutes=5)
+        assert liq.lookback_minutes == 5
+        assert liq.needs_volume is True
+
+    def test_all_features_enabled(self):
+        liq = LiquidityConfig(
+            min_exit_volume=100,
+            lookback_minutes=5,
+            pre_expiry_lock_minutes=30,
+            slippage_model="spread",
+        )
+        assert liq.needs_volume is True
+        assert liq.needs_spread is True
+        assert liq.is_default is False
+
+    def test_exit_config_default_liquidity(self):
+        cfg = ExitConfig(stop_loss=2.0, take_profit=1.0)
+        assert cfg.liquidity.is_default is True
+
+    def test_exit_config_liquidity_override(self):
+        cfg = ExitConfig(
+            stop_loss=2.0,
+            take_profit=1.0,
+            liquidity=LiquidityConfig(min_exit_volume=100, slippage_model="spread"),
+        )
+        assert cfg.liquidity.needs_volume is True
+        assert cfg.liquidity.needs_spread is True
+
+
+# ---------------------------------------------------------------------------
+# FeesConfig / CostsConfig.effective_fees
+# ---------------------------------------------------------------------------
+
+
+class TestFeesConfig:
+    def test_defaults_all_zero(self):
+        f = FeesConfig()
+        assert f.entry_fee_per_contract == 0.0
+        assert f.exit_fee_per_contract == 0.0
+        assert f.expiration_fee_per_contract == 0.0
+
+    def test_all_fields_set(self):
+        f = FeesConfig(
+            entry_fee_per_contract=0.65,
+            exit_fee_per_contract=0.65,
+            expiration_fee_per_contract=0.0,
+        )
+        assert f.entry_fee_per_contract == 0.65
+        assert f.exit_fee_per_contract == 0.65
+        assert f.expiration_fee_per_contract == 0.0
+
+
+class TestCostsConfigFees:
+    def test_default_costs_effective_fees_all_zero(self):
+        fees = CostsConfig().effective_fees
+        assert fees.entry_fee_per_contract == 0.0
+        assert fees.exit_fee_per_contract == 0.0
+        assert fees.expiration_fee_per_contract == 0.0
+
+    def test_legacy_fee_per_contract_splits_evenly(self):
+        fees = CostsConfig(fee_per_contract=0.65).effective_fees
+        assert fees.entry_fee_per_contract == pytest.approx(0.325)
+        assert fees.exit_fee_per_contract == pytest.approx(0.325)
+        assert fees.expiration_fee_per_contract == 0.0
+
+    def test_structured_fees_takes_precedence(self):
+        fees = CostsConfig(
+            fees=FeesConfig(
+                entry_fee_per_contract=0.65,
+                exit_fee_per_contract=0.65,
+                expiration_fee_per_contract=0.0,
+            )
+        ).effective_fees
+        assert fees.entry_fee_per_contract == 0.65
+        assert fees.exit_fee_per_contract == 0.65
+        assert fees.expiration_fee_per_contract == 0.0
+
+    def test_structured_fees_with_nonzero_expiration(self):
+        fees = CostsConfig(
+            fees=FeesConfig(
+                entry_fee_per_contract=0.65,
+                exit_fee_per_contract=0.65,
+                expiration_fee_per_contract=0.10,
+            )
+        ).effective_fees
+        assert fees.expiration_fee_per_contract == pytest.approx(0.10)
+
+    def test_fee_per_contract_and_fees_mutually_exclusive(self):
+        with pytest.raises(ValidationError, match="mutually exclusive"):
+            CostsConfig(
+                fee_per_contract=0.65,
+                fees=FeesConfig(entry_fee_per_contract=0.65),
+            )
+
+    def test_fees_none_with_zero_legacy_returns_zeros(self):
+        # Default: no fee_per_contract set, no fees block → all zeros
+        costs = CostsConfig(slippage_pct=0.01)
+        fees = costs.effective_fees
+        assert fees.entry_fee_per_contract == 0.0
+        assert fees.exit_fee_per_contract == 0.0

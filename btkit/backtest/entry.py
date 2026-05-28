@@ -37,6 +37,7 @@ from zoneinfo import ZoneInfo
 
 import polars as pl
 
+from btkit.backtest._util import tick_round_expr
 from btkit.db.input_db import InputDatabase
 from btkit.strategy.definition import (
     StopLossConfig,
@@ -338,32 +339,36 @@ class EntryScanner:
     # ------------------------------------------------------------------
 
     def _compute_open_mark(self, entries: pl.DataFrame) -> pl.DataFrame:
+        tick = self.trade.instrument.tick_size
+
         mark_expr = pl.lit(0.0)
         for leg in self.trade.legs:
             sign = 1.0 if leg.action == "sell_to_open" else -1.0
             mark_expr = mark_expr + pl.col(f"leg_{leg.name}_close") * pl.lit(sign * leg.quantity)
 
         exit_cfg = self.trade.exit
-        entries = entries.with_columns([mark_expr.alias("open_mark")])
+        entries = entries.with_columns(
+            [tick_round_expr(mark_expr, tick).alias("open_mark")]
+        )
 
         if isinstance(exit_cfg.take_profit, TakeProfitConfig):
             if exit_cfg.take_profit.pct is not None:
-                tp_expr = (
-                    pl.col("open_mark") * pl.lit(1.0 - float(exit_cfg.take_profit.pct))
-                ).alias("tp_price")
+                tp_raw = pl.col("open_mark") * pl.lit(1.0 - float(exit_cfg.take_profit.pct))
             else:
-                tp_expr = (
-                    pl.col("open_mark") - pl.lit(float(exit_cfg.take_profit.price))
-                ).alias("tp_price")
+                tp_raw = pl.col("open_mark") - pl.lit(float(exit_cfg.take_profit.price))
         elif exit_cfg.take_profit_pct is not None:
             # tp_price = open_mark × (1 - pct): exit when mark falls to this fraction
-            tp_expr = (
-                pl.col("open_mark") * pl.lit(1.0 - float(exit_cfg.take_profit_pct))
-            ).alias("tp_price")
+            tp_raw = pl.col("open_mark") * pl.lit(1.0 - float(exit_cfg.take_profit_pct))
         elif exit_cfg.take_profit is not None:
-            tp_expr = (pl.col("open_mark") - pl.lit(float(exit_cfg.take_profit))).alias("tp_price")
+            tp_raw = pl.col("open_mark") - pl.lit(float(exit_cfg.take_profit))
         else:
-            tp_expr = pl.lit(None).cast(pl.Float64).alias("tp_price")
+            tp_raw = None
+
+        tp_expr = (
+            tick_round_expr(tp_raw, tick).alias("tp_price")
+            if tp_raw is not None
+            else pl.lit(None).cast(pl.Float64).alias("tp_price")
+        )
 
         if exit_cfg.stop_loss is None:
             sl_expr = pl.lit(None).cast(pl.Float64).alias("sl_price")
@@ -373,7 +378,9 @@ class EntryScanner:
                 if isinstance(exit_cfg.stop_loss, StopLossConfig)
                 else float(exit_cfg.stop_loss)
             )
-            sl_expr = (pl.col("open_mark") + pl.lit(sl_price)).alias("sl_price")
+            sl_expr = tick_round_expr(
+                pl.col("open_mark") + pl.lit(sl_price), tick
+            ).alias("sl_price")
 
         entries = entries.with_columns(
             [

@@ -13,7 +13,7 @@ plain scalars — list or SweepRange values are rejected by the engine at run ti
 from __future__ import annotations
 
 from datetime import date, time
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, model_validator
 
@@ -68,6 +68,7 @@ class UniverseConfig(BaseModel):
 class InstrumentConfig(BaseModel):
     root_symbol: str
     asset_class: Literal["future", "equity", "etf"]
+    tick_size: float = 0.0  # minimum price increment; 0.0 = continuous (no rounding)
     expiry_close_time: time | None = (
         None  # local time after which expiry_exit triggers on expiration day
     )
@@ -108,15 +109,18 @@ class LegConfig(BaseModel):
     name: str
     right: Literal["call", "put"]
     action: Literal["buy_to_open", "sell_to_open"]
-    dte: IntSweep
+    # dte is required for delta-targeted legs.
+    # For offset legs it may be omitted (None) to inherit the reference leg's
+    # expiration — the standard case for vertical spreads.  Specifying a value
+    # reserves the leg for a future calendar-spread mode (not yet executed by
+    # the engine, which currently always inherits the reference expiration).
+    dte: IntSweep | None = None
     quantity: int = 1
     # Selection mode A: delta-targeted (standard)
     delta: NumericSweep | None = None
     delta_tolerance: float = 0.10  # ±band around target_delta for candidate search
     dte_tolerance: int = 5  # ±band around target_dte for candidate search
     # Selection mode B: fixed strike offset from a reference leg
-    # When strike_offset is set, dte is ignored — the expiration is inherited
-    # from the reference leg to guarantee all legs share the same expiry.
     strike_offset: float | None = None  # positive = above ref strike, negative = below
     reference_leg: str | None = None  # name of the leg whose strike is the origin
 
@@ -130,6 +134,8 @@ class LegConfig(BaseModel):
             raise ValueError("one of delta or strike_offset is required")
         if has_offset and self.reference_leg is None:
             raise ValueError("reference_leg is required when strike_offset is set")
+        if not has_offset and self.dte is None:
+            raise ValueError("dte is required for delta-targeted legs")
         return self
 
 
@@ -157,6 +163,52 @@ class TakeProfitConfig(BaseModel):
         return self
 
 
+class LiquidityConfig(BaseModel):
+    """
+    Controls execution realism for exit fills.  All fields default to None /
+    "flat", which reproduces the original naïve-fill behaviour exactly.
+
+    min_exit_volume:         Minimum cumulative option volume (contracts) over
+                             the trailing ``lookback_minutes`` window required
+                             before a price-triggered exit (TP/SL) is attempted.
+                             Bars missing from the data count as 0 volume, so
+                             gaps near expiry are naturally penalised.
+                             None → volume gate disabled.
+
+    lookback_minutes:        Time-based rolling window for the volume check.
+                             Defaults to 3 minutes.
+
+    pre_expiry_lock_minutes: Suppress all price-triggered exits (TP, SL, gap)
+                             in the final N minutes before the instrument's
+                             expiry close.  Expiry and DTE exits are unaffected.
+                             None → lock disabled.
+
+    slippage_model:          "flat"   – use bar close as fill price (current
+                                        behaviour, no extra cost).
+                             "spread" – add half the bar's high-low range per
+                                        leg to the fill price, modelling the
+                                        cost of crossing the bid-ask spread.
+    """
+
+    min_exit_volume: Optional[int] = None
+    lookback_minutes: int = 3
+    pre_expiry_lock_minutes: Optional[int] = None
+    slippage_model: Literal["flat", "spread"] = "flat"
+
+    @property
+    def needs_volume(self) -> bool:
+        return self.min_exit_volume is not None
+
+    @property
+    def needs_spread(self) -> bool:
+        return self.slippage_model == "spread"
+
+    @property
+    def is_default(self) -> bool:
+        """True when no liquidity constraints are active (original engine behaviour)."""
+        return not self.needs_volume and not self.needs_spread and self.pre_expiry_lock_minutes is None
+
+
 class ExitConfig(BaseModel):
     stop_loss: NumericSweep | StopLossConfig | None = None
     take_profit: NumericSweep | TakeProfitConfig | None = None
@@ -164,6 +216,7 @@ class ExitConfig(BaseModel):
     dte_exit: IntSweep | None = None
     expiry_exit: bool = True
     conditions: list[str] = []  # OR logic — position closes if any condition is true
+    liquidity: LiquidityConfig = LiquidityConfig()
 
     @model_validator(mode="after")
     def validate_take_profit(self) -> ExitConfig:
@@ -179,9 +232,50 @@ class ExitConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class FeesConfig(BaseModel):
+    """
+    Structured per-contract fee model.
+
+    Fees are applied per leg per contract at each event:
+      - entry_fee_per_contract: charged when a position is opened
+      - exit_fee_per_contract:  charged when closed via TP, SL, condition, or DTE exit
+      - expiration_fee_per_contract: charged when the position expires (typically $0 at IBKR)
+
+    Total fee = (entry_fee + exit_or_expiration_fee) × sum(leg.quantity)
+    """
+
+    entry_fee_per_contract: float = 0.0
+    exit_fee_per_contract: float = 0.0
+    expiration_fee_per_contract: float = 0.0
+
+
 class CostsConfig(BaseModel):
     slippage_pct: float = 0.0
-    fee_per_contract: float = 0.0
+    fee_per_contract: float = 0.0  # legacy: split evenly as entry=fee/2, exit=fee/2
+    fees: FeesConfig | None = None  # structured form; takes precedence over fee_per_contract
+
+    @model_validator(mode="after")
+    def validate_fee_fields(self) -> CostsConfig:
+        if self.fee_per_contract != 0.0 and self.fees is not None:
+            raise ValueError(
+                "fee_per_contract and fees are mutually exclusive; "
+                "use fees.entry_fee_per_contract / exit_fee_per_contract / expiration_fee_per_contract"
+            )
+        return self
+
+    @property
+    def effective_fees(self) -> FeesConfig:
+        """Resolve the active fee model.
+
+        Returns the explicit fees block if present. Falls back to splitting
+        fee_per_contract evenly across entry and exit (legacy behaviour).
+        """
+        if self.fees is not None:
+            return self.fees
+        if self.fee_per_contract != 0.0:
+            half = self.fee_per_contract / 2.0
+            return FeesConfig(entry_fee_per_contract=half, exit_fee_per_contract=half)
+        return FeesConfig()
 
 
 class MatrixConfig(BaseModel):

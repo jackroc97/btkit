@@ -6,10 +6,13 @@ produces final position and leg records matching the output database schema.
 No database access — operates entirely on in-memory Polars DataFrames.
 
 Cost model:
-    gross_pnl    = (open_mark - exit_mark) × multiplier          [dollars]
-    slippage     = |exit_mark| × multiplier × slippage_pct        [dollars]
-    fee          = fee_per_contract                                [dollars, flat per round-trip]
-    net_pnl      = gross_pnl - slippage - fee                     [dollars]
+    gross_pnl    = (open_mark - exit_mark) × multiplier                    [dollars]
+    slippage     = |exit_mark| × multiplier × slippage_pct                  [dollars]
+    fee          = (entry_fee + exit_or_expiration_fee) × total_contracts   [dollars]
+    net_pnl      = gross_pnl - slippage - fee                               [dollars]
+
+total_contracts = sum(leg.quantity for each leg in the trade).
+Expiry exits use expiration_fee_per_contract; all other exits use exit_fee_per_contract.
 
 open_mark, exit_mark, and worst_mark remain in per-point terms in the output.
 All PnL columns (gross_pnl, slippage_cost, fee_cost, net_pnl) are in dollars.
@@ -47,9 +50,9 @@ class PnLCalculator:
 
         Steps:
             1. Join entries + exits on entry_id.
-            2. gross_pnl = open_mark - exit_mark
-            3. slippage_cost = |exit_mark| * costs.slippage_pct
-            4. fee_cost = costs.fee_per_contract * total_contracts_in_position * 2
+            2. gross_pnl = (open_mark - exit_mark) * multiplier
+            3. slippage_cost = |exit_mark| * multiplier * costs.slippage_pct
+            4. fee_cost = (entry_fee + exit_or_expiration_fee) * total_contracts
             5. net_pnl = gross_pnl - slippage_cost - fee_cost
 
         trade_name is carried through from the entries DataFrames and written to
@@ -60,6 +63,7 @@ class PnLCalculator:
         Returns BacktestPositions with DataFrames matching the output DB schema.
         """
         costs = self.strategy.costs
+        fees = costs.effective_fees
         positions_list: list[pl.DataFrame] = []
         legs_list: list[pl.DataFrame] = []
 
@@ -74,6 +78,11 @@ class PnLCalculator:
             # All legs share the same underlying multiplier; read it from the first leg.
             first_leg = trade.legs[0].name
             multiplier_col = f"leg_{first_leg}_multiplier"
+            total_contracts = float(sum(leg.quantity for leg in trade.legs))
+
+            entry_fee = fees.entry_fee_per_contract * total_contracts
+            active_exit_fee = fees.exit_fee_per_contract * total_contracts
+            expiry_exit_fee = fees.expiration_fee_per_contract * total_contracts
 
             pos = entries.join(exits, on="entry_id", how="inner")
             pos = pos.with_columns(
@@ -88,8 +97,13 @@ class PnLCalculator:
                         * pl.col(multiplier_col)
                         * pl.lit(float(costs.slippage_pct))
                     ).alias("slippage_cost"),
-                    # Flat dollar fee per round-trip
-                    pl.lit(float(costs.fee_per_contract)).alias("fee_cost"),
+                    # Structured fee: entry + exit (expiry exits use expiration_fee_per_contract)
+                    (
+                        pl.lit(entry_fee)
+                        + pl.when(pl.col("exit_reason") == pl.lit("expiry"))
+                        .then(pl.lit(expiry_exit_fee))
+                        .otherwise(pl.lit(active_exit_fee))
+                    ).alias("fee_cost"),
                 ]
             ).with_columns(
                 (pl.col("gross_pnl") - pl.col("slippage_cost") - pl.col("fee_cost")).alias(

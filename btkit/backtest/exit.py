@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 
 import polars as pl
 
+from btkit.backtest._util import tick_round_expr
 from btkit.db.input_db import InputDatabase
 from btkit.strategy.definition import (
     StopLossConfig,
@@ -164,12 +165,19 @@ class ExitScanner:
         position_mark    = Σ(leg_close × signed_qty)  — used for TP/SL detection
         spread_open_mark = Σ(leg_open  × signed_qty)  — used for gap-open detection
 
-        Returns columns: entry_id, ts_event, position_mark, spread_open_mark.
+        When liquidity config requires it, also produces:
+          _min_leg_volume  — min contracts traded across legs (0 when any leg has no bar)
+          _total_slippage  — Σ(|high - low| / 2) per leg — half bid-ask spread estimate
 
         Option bars are sparse (only when traded), so different legs rarely share
         the same ts_event. We full-outer-join all legs on (entry_id, ts_event) and
-        forward-fill stale prices within each entry_id.
+        forward-fill stale prices within each entry_id. Volume and spread columns
+        are gap-filled with 0 (a missing bar means zero trading activity).
         """
+        liq = self.trade.exit.liquidity
+        need_volume = liq.needs_volume
+        need_spread = liq.needs_spread
+
         per_leg: list[pl.DataFrame] = []
 
         for leg in self.trade.legs:
@@ -184,18 +192,32 @@ class ExitScanner:
                 ]
             )
 
+            # Build the per-leg select expression list
+            bar_exprs: list[pl.Expr] = [
+                pl.col("ts_event"),
+                pl.col("instrument_id"),
+                (pl.col("close") * pl.lit(signed_qty)).alias(f"_leg_{leg.name}_mark_close"),
+                (pl.col("open") * pl.lit(signed_qty)).alias(f"_leg_{leg.name}_mark_open"),
+            ]
+            if need_volume:
+                bar_exprs.append(pl.col("volume").alias(f"_leg_{leg.name}_volume"))
+            if need_spread:
+                # Half the high-low range is a per-leg slippage cost (unsigned)
+                bar_exprs.append(
+                    ((pl.col("high") - pl.col("low")) / 2.0).alias(f"_leg_{leg.name}_spread_half")
+                )
+
+            src_cols = ["ts_event", "instrument_id", "open", "close"]
+            if need_volume:
+                src_cols.append("volume")
+            if need_spread:
+                src_cols.extend(["high", "low"])
+
             leg_bars = (
-                option_bars.select(["ts_event", "instrument_id", "open", "close"])
+                option_bars.select(src_cols)
                 .join(leg_map, on="instrument_id", how="inner")
                 .filter(pl.col("ts_event") > pl.col("entry_time"))
-                .select(
-                    [
-                        "entry_id",
-                        "ts_event",
-                        (pl.col("close") * pl.lit(signed_qty)).alias(f"_leg_{leg.name}_mark_close"),
-                        (pl.col("open") * pl.lit(signed_qty)).alias(f"_leg_{leg.name}_mark_open"),
-                    ]
-                )
+                .select(["entry_id"] + [e for e in bar_exprs if not isinstance(e, str)])
             )
 
             if leg_bars.is_empty():
@@ -212,25 +234,41 @@ class ExitScanner:
 
         close_cols = [f"_leg_{leg.name}_mark_close" for leg in self.trade.legs]
         open_cols = [f"_leg_{leg.name}_mark_open" for leg in self.trade.legs]
+        vol_cols = [f"_leg_{leg.name}_volume" for leg in self.trade.legs] if need_volume else []
+        spread_cols = [f"_leg_{leg.name}_spread_half" for leg in self.trade.legs] if need_spread else []
 
-        result = result.sort(["entry_id", "ts_event"]).with_columns(
-            [
-                *[pl.col(c).forward_fill().over("entry_id") for c in close_cols],
-                *[pl.col(c).forward_fill().over("entry_id") for c in open_cols],
-            ]
-        )
+        fill_exprs: list[pl.Expr] = [
+            # Prices: forward-fill stale values from the last real bar
+            *[pl.col(c).forward_fill().over("entry_id") for c in close_cols],
+            *[pl.col(c).forward_fill().over("entry_id") for c in open_cols],
+            # Volume / spread: null means no bar was recorded → zero activity, not forward-filled
+            *[pl.col(c).fill_null(0) for c in vol_cols],
+            *[pl.col(c).fill_null(0) for c in spread_cols],
+        ]
 
+        result = result.sort(["entry_id", "ts_event"]).with_columns(fill_exprs)
         result = result.drop_nulls(subset=close_cols + open_cols)
 
         if result.is_empty():
             return pl.DataFrame()
 
-        return result.with_columns(
-            [
-                pl.sum_horizontal(close_cols).alias("position_mark"),
-                pl.sum_horizontal(open_cols).alias("spread_open_mark"),
-            ]
-        ).select(["entry_id", "ts_event", "position_mark", "spread_open_mark"])
+        aggregate_exprs: list[pl.Expr] = [
+            pl.sum_horizontal(close_cols).alias("position_mark"),
+            pl.sum_horizontal(open_cols).alias("spread_open_mark"),
+        ]
+        if need_volume:
+            # min across legs: 0 if any leg had no bar at this ts_event
+            aggregate_exprs.append(pl.min_horizontal(vol_cols).fill_null(0).alias("_min_leg_volume"))
+        if need_spread:
+            aggregate_exprs.append(pl.sum_horizontal(spread_cols).fill_null(0).alias("_total_slippage"))
+
+        out_cols = ["entry_id", "ts_event", "position_mark", "spread_open_mark"]
+        if need_volume:
+            out_cols.append("_min_leg_volume")
+        if need_spread:
+            out_cols.append("_total_slippage")
+
+        return result.with_columns(aggregate_exprs).select(out_cols)
 
     # ------------------------------------------------------------------
     # Step 3: Find first exit hit per entry
@@ -271,13 +309,24 @@ class ExitScanner:
         worst_mark is computed in a single pass via cum_max().over("entry_id"),
         avoiding the previous second full scan of position_marks.
 
-        Fill price:
+        Fill price (before slippage):
             gap_sl / gap_tp       → spread_open_mark
             stop_loss (close)     → sl_price
             take_profit (close)   → tp_price
             condition / dte / exp → position_mark (bar close)
+
+        Liquidity adjustments (when liquidity config is non-default):
+            volume gate      — price-triggered exits blocked when rolling volume
+                               over the lookback window is below min_exit_volume.
+                               Missing bars count as zero (gap-robust).
+            pre-expiry lock  — price-triggered exits suppressed in the final N
+                               minutes before the instrument's expiry close on
+                               expiry day (DTE=0). Expiry/DTE exits unaffected.
+            spread slippage  — fill price worsened by Σ(|high-low|/2) per leg,
+                               modelling the cost of crossing the bid-ask spread.
         """
         exit_cfg = self.trade.exit
+        liq = exit_cfg.liquidity
 
         exp_cols = [f"leg_{leg.name}_expiration" for leg in self.trade.legs]
         entry_meta = (
@@ -316,6 +365,15 @@ class ExitScanner:
             .alias("_dte_now")
         )
 
+        # Materialise local-time seconds once; used by session mask, expiry
+        # exit, and the pre-expiry lock so we avoid repeated tz conversions.
+        m = m.with_columns(
+            (
+                pl.col("ts_event").dt.convert_time_zone(tz_str).dt.hour().cast(pl.Int32) * 3600
+                + pl.col("ts_event").dt.convert_time_zone(tz_str).dt.minute().cast(pl.Int32) * 60
+            ).alias("_local_sec")
+        )
+
         # Session mask: only allow price-triggered exits (SL/TP/gap) during
         # configured session hours so illiquid after-hours option prices don't
         # fire stops. DTE and expiry exits are intentionally unconstrained.
@@ -323,12 +381,8 @@ class ExitScanner:
         if session.start_time is not None and session.end_time is not None:
             sess_start_sec = session.start_time.hour * 3600 + session.start_time.minute * 60
             sess_end_sec = session.end_time.hour * 3600 + session.end_time.minute * 60
-            _local_sec = (
-                pl.col("ts_event").dt.convert_time_zone(tz_str).dt.hour().cast(pl.Int32) * 3600
-                + pl.col("ts_event").dt.convert_time_zone(tz_str).dt.minute().cast(pl.Int32) * 60
-            )
-            _in_session = (_local_sec >= pl.lit(sess_start_sec)) & (
-                _local_sec <= pl.lit(sess_end_sec)
+            _in_session = (pl.col("_local_sec") >= pl.lit(sess_start_sec)) & (
+                pl.col("_local_sec") <= pl.lit(sess_end_sec)
             )
             if session.weekdays_only:
                 _in_session = _in_session & (
@@ -336,6 +390,48 @@ class ExitScanner:
                 )
         else:
             _in_session = pl.lit(True)
+
+        # ── Feature 1: volume gate ────────────────────────────────────────
+        # Time-based rolling sum of min-leg-volume over the lookback window.
+        # Missing bars contribute 0 (gap-robust by construction: only rows
+        # that exist in the DataFrame are summed).
+        if liq.needs_volume and "_min_leg_volume" in m.columns:
+            lookback_str = f"{liq.lookback_minutes}m"
+
+            def _add_rolling_volume(df: pl.DataFrame) -> pl.DataFrame:
+                return df.sort("ts_event").with_columns(
+                    pl.col("_min_leg_volume")
+                    .rolling_sum_by("ts_event", window_size=lookback_str)
+                    .alias("_rolling_volume")
+                )
+
+            m = m.group_by("entry_id", maintain_order=True).map_groups(_add_rolling_volume)
+            _liquid = pl.col("_rolling_volume") >= pl.lit(liq.min_exit_volume)
+        else:
+            _liquid = pl.lit(True)
+
+        # ── Feature 2: pre-expiry lock ────────────────────────────────────
+        # Suppress price-triggered exits in the final N minutes of expiry day.
+        # Uses expiry_close_time if set, otherwise falls back to session end.
+        if liq.pre_expiry_lock_minutes is not None:
+            close_time = self.trade.instrument.expiry_close_time
+            if close_time is not None:
+                ref_close_sec = close_time.hour * 3600 + close_time.minute * 60
+            else:
+                ref_close_sec = (
+                    session.end_time.hour * 3600 + session.end_time.minute * 60
+                    if session.end_time is not None
+                    else 16 * 3600  # fallback: 16:00 local
+                )
+            lock_start_sec = ref_close_sec - liq.pre_expiry_lock_minutes * 60
+            _locked = (pl.col("_dte_now") == 0) & (
+                pl.col("_local_sec") >= pl.lit(lock_start_sec)
+            ) & (pl.col("_local_sec") <= pl.lit(ref_close_sec))
+        else:
+            _locked = pl.lit(False)
+
+        # Combined guard applied to all price-triggered exits
+        _price_ok = _in_session & _liquid & ~_locked
 
         sl_cond = self._parse_trigger_condition(
             exit_cfg.stop_loss.condition
@@ -351,10 +447,10 @@ class ExitScanner:
 
         m = m.with_columns(
             [
-                ((pl.col("spread_open_mark") >= pl.col("sl_price")) & _in_session & sl_cond).alias("_gap_sl"),
-                ((pl.col("spread_open_mark") <= pl.col("tp_price")) & _in_session & tp_cond).alias("_gap_tp"),
-                ((pl.col("position_mark") >= pl.col("sl_price")) & _in_session & sl_cond).alias("_sl"),
-                ((pl.col("position_mark") <= pl.col("tp_price")) & _in_session & tp_cond).alias("_tp"),
+                ((pl.col("spread_open_mark") >= pl.col("sl_price")) & _price_ok & sl_cond).alias("_gap_sl"),
+                ((pl.col("spread_open_mark") <= pl.col("tp_price")) & _price_ok & tp_cond).alias("_gap_tp"),
+                ((pl.col("position_mark") >= pl.col("sl_price")) & _price_ok & sl_cond).alias("_sl"),
+                ((pl.col("position_mark") <= pl.col("tp_price")) & _price_ok & tp_cond).alias("_tp"),
             ]
         )
 
@@ -393,19 +489,14 @@ class ExitScanner:
             m = m.with_columns(pl.lit(False).alias("_dte_exit"))
 
         if exit_cfg.expiry_exit:
-            expiry_expr = pl.col("ts_event").dt.convert_time_zone(tz_str).dt.date() >= pl.col(
-                "trade_expiration"
+            expiry_expr = (
+                pl.col("ts_event").dt.convert_time_zone(tz_str).dt.date()
+                >= pl.col("trade_expiration")
             )
             close_time = self.trade.instrument.expiry_close_time
             if close_time is not None:
-                tz_str = self.strategy.universe.session.timezone
                 close_sec = close_time.hour * 3600 + close_time.minute * 60
-                local_sec = (
-                    pl.col("ts_event").dt.convert_time_zone(tz_str).dt.hour().cast(pl.Int32) * 3600
-                    + pl.col("ts_event").dt.convert_time_zone(tz_str).dt.minute().cast(pl.Int32)
-                    * 60
-                )
-                expiry_expr = expiry_expr & (local_sec >= pl.lit(close_sec))
+                expiry_expr = expiry_expr & (pl.col("_local_sec") >= pl.lit(close_sec))
             m = m.with_columns(expiry_expr.alias("_expiry"))
         else:
             m = m.with_columns(pl.lit(False).alias("_expiry"))
@@ -434,16 +525,34 @@ class ExitScanner:
             subset=["entry_id"], keep="first"
         )
 
+        # ── Feature 3: spread-adjusted fill price ─────────────────────────
+        # Add the per-bar OHLC spread estimate to the fill price, modelling
+        # the cost of crossing the bid-ask. Applied to all exit types.
+        # Slippage is 0 for missing bars (fill_null(0) already applied in
+        # _compute_position_marks).
+        if liq.needs_spread and "_total_slippage" in first_exit.columns:
+            slippage = pl.col("_total_slippage")
+        else:
+            slippage = pl.lit(0.0)
+
+        tick = self.trade.instrument.tick_size
+
+        # Raw exit mark: threshold price (already on-tick from entry scanner) for
+        # TP/SL; bar-level price for gap/condition/DTE/expiry exits (needs rounding).
+        raw_exit_mark = (
+            pl.when(pl.col("_priority").is_in([1, 2]))
+            .then(pl.col("spread_open_mark") + slippage)
+            .when(pl.col("_priority") == 3)
+            .then(pl.col("sl_price") + slippage)
+            .when(pl.col("_priority") == 4)
+            .then(pl.col("tp_price") + slippage)
+            .otherwise(pl.col("position_mark") + slippage)
+        )
+
         first_exit = first_exit.with_columns(
             [
-                pl.when(pl.col("_priority").is_in([1, 2]))
-                .then(pl.col("spread_open_mark"))
-                .when(pl.col("_priority") == 3)
-                .then(pl.col("sl_price"))
-                .when(pl.col("_priority") == 4)
-                .then(pl.col("tp_price"))
-                .otherwise(pl.col("position_mark"))
-                .alias("exit_mark"),
+                tick_round_expr(raw_exit_mark, tick).alias("exit_mark"),
+                tick_round_expr(pl.col("_running_worst"), tick).alias("worst_mark"),
                 pl.when(pl.col("_priority").is_in([1, 3]))
                 .then(pl.lit("stop_loss"))
                 .when(pl.col("_priority").is_in([2, 4]))
@@ -455,19 +564,25 @@ class ExitScanner:
                 .otherwise(pl.lit("expiry"))
                 .alias("exit_reason"),
             ]
-        ).rename({"ts_event": "exit_time", "_running_worst": "worst_mark"})
+        ).rename({"ts_event": "exit_time"})
 
         # --- Handle entries with no exit hit (force expiry at last available bar) ---
         found_ids = first_exit["entry_id"].to_list()
         missing = m.filter(~pl.col("entry_id").is_in(found_ids))
         if not missing.is_empty():
+            # Apply slippage to fallback expiry fills too
+            if liq.needs_spread and "_total_slippage" in missing.columns:
+                fallback_mark = pl.col("position_mark") + pl.col("_total_slippage")
+            else:
+                fallback_mark = pl.col("position_mark")
+
             last_bars = (
                 missing.unique(subset=["entry_id"], keep="last")
                 .with_columns(
                     [
-                        pl.col("position_mark").alias("exit_mark"),
+                        tick_round_expr(fallback_mark, tick).alias("exit_mark"),
                         pl.lit("expiry").alias("exit_reason"),
-                        pl.col("_running_worst").alias("worst_mark"),
+                        tick_round_expr(pl.col("_running_worst"), tick).alias("worst_mark"),
                     ]
                 )
                 .rename({"ts_event": "exit_time"})
