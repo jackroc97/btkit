@@ -278,6 +278,36 @@ class OutputDatabase:
             self._con.unregister("_legs")
 
     # ------------------------------------------------------------------
+    # Delete
+    # ------------------------------------------------------------------
+
+    def delete_backtest(self, backtest_id: int) -> None:
+        """Permanently delete a backtest and all its positions and legs."""
+        self._con.execute(
+            "DELETE FROM position_leg WHERE position_id IN "
+            "(SELECT id FROM position WHERE backtest_id = ?)",
+            [backtest_id],
+        )
+        self._con.execute("DELETE FROM position WHERE backtest_id = ?", [backtest_id])
+        self._con.execute("DELETE FROM backtest WHERE id = ?", [backtest_id])
+
+    def delete_study(self, study_id: int) -> None:
+        """Permanently delete a study and all its backtests, positions, and legs."""
+        self._con.execute(
+            "DELETE FROM position_leg WHERE position_id IN "
+            "(SELECT id FROM position WHERE backtest_id IN "
+            "(SELECT id FROM backtest WHERE study_id = ?))",
+            [study_id],
+        )
+        self._con.execute(
+            "DELETE FROM position WHERE backtest_id IN "
+            "(SELECT id FROM backtest WHERE study_id = ?)",
+            [study_id],
+        )
+        self._con.execute("DELETE FROM backtest WHERE study_id = ?", [study_id])
+        self._con.execute("DELETE FROM study WHERE id = ?", [study_id])
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 

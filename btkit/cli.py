@@ -9,6 +9,7 @@ Commands:
     btkit serve         Launch the interactive Dash dashboard for a backtest run.
     btkit study run     Run a study: expand parameterized strategies and execute
                         all combinations in parallel.
+    btkit db merge      Merge two or more output databases into one.
 
 Usage:
     btkit build       --data-path DATA --db-path DB [--indicators SCRIPT ...]
@@ -19,6 +20,7 @@ Usage:
     btkit serve       --output-db DB [--backtest-id N] [--port 8050]
     btkit study run   --study YAML --input-db DB --output-db DB
                       [--workers N] [--max-combinations N] [--initial-equity N]
+    btkit db merge    --sources a.db b.db ... --target combined.db
 """
 
 from __future__ import annotations
@@ -49,6 +51,13 @@ study_app = typer.Typer(
     add_completion=False,
 )
 app.add_typer(study_app, name="study")
+
+db_app = typer.Typer(
+    name="db",
+    help="Database utilities.",
+    add_completion=False,
+)
+app.add_typer(db_app, name="db")
 
 
 def _require_output_db(path: str) -> None:
@@ -365,6 +374,44 @@ def study_run(
         raise typer.Exit(code=1)
 
     typer.echo(f"Study complete. study_id={study_id}")
+
+
+# ---------------------------------------------------------------------------
+# btkit db …
+# ---------------------------------------------------------------------------
+
+
+@db_app.command("merge")
+def db_merge(
+    sources: list[str] = typer.Option(
+        ..., help="One or more source output database paths to merge."
+    ),
+    target: str = typer.Option(..., help="Target output database path (created if absent)."),
+) -> None:
+    """
+    Merge two or more output databases into one.
+
+    Example:
+        btkit db merge --sources jan.db feb.db mar.db --target q1.db
+    """
+    from btkit.study.merger import OutputMerger
+
+    missing = [p for p in sources if not Path(p).exists()]
+    if missing:
+        for p in missing:
+            typer.echo(f"Error: source database not found: {p}", err=True)
+        raise typer.Exit(code=1)
+
+    if Path(target).resolve() in [Path(p).resolve() for p in sources]:
+        typer.echo("Error: --target must not be one of the --sources paths.", err=True)
+        raise typer.Exit(code=1)
+
+    with OutputDatabase(target) as odb:
+        odb.create_schema()
+
+    typer.echo(f"Merging {len(sources)} database(s) into {target} …")
+    OutputMerger().merge(source_db_paths=sources, target_db_path=target)
+    typer.echo("Merge complete.")
 
 
 if __name__ == "__main__":

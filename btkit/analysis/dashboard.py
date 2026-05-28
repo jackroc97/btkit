@@ -1811,6 +1811,8 @@ def _build_study_layout(study_id: int, output_db_path: str) -> html.Div:
         },
         children=[
             dcc.Store(id="study-equity-store", data=equity_store),
+            dcc.Store(id="delete-pending", data={"type": "study", "id": study_id, "name": study_name}),
+            _delete_modal(),
             # Header
             html.Div(
                 className="btkit-header",
@@ -1839,6 +1841,17 @@ def _build_study_layout(study_id: int, output_db_path: str) -> html.Div:
                                 style={"fontSize": "12px", "color": "#9CA3AF"},
                             ),
                             html.Span(created_str, style={"fontSize": "12px", "color": "#9CA3AF"}),
+                            html.Button(
+                                "Delete Study",
+                                id="header-delete-btn",
+                                style={
+                                    "fontSize": "11px", "fontWeight": "600",
+                                    "color": _DANGER, "background": "none",
+                                    "border": f"1px solid {_DANGER}",
+                                    "borderRadius": "4px", "padding": "3px 10px",
+                                    "cursor": "pointer",
+                                },
+                            ),
                         ],
                     ),
                 ],
@@ -1898,6 +1911,81 @@ def _build_study_layout(study_id: int, output_db_path: str) -> html.Div:
                     ),
                 ],
             ),
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Delete confirmation modal
+# ---------------------------------------------------------------------------
+
+_DANGER = "#DC2626"
+
+
+def _delete_modal() -> html.Div:
+    """Styled confirmation modal for destructive delete actions."""
+    return html.Div(
+        id="delete-modal-overlay",
+        style={
+            "display": "none",
+            "position": "fixed",
+            "inset": "0",
+            "backgroundColor": "rgba(0,0,0,0.45)",
+            "zIndex": "1000",
+            "alignItems": "center",
+            "justifyContent": "center",
+        },
+        children=[
+            html.Div(
+                style={
+                    "backgroundColor": _CARD,
+                    "border": f"1px solid {_BORDER}",
+                    "borderRadius": "10px",
+                    "padding": "28px 32px",
+                    "maxWidth": "420px",
+                    "width": "90%",
+                    "boxShadow": "0 8px 30px rgba(0,0,0,0.18)",
+                    "fontFamily": "Inter, system-ui, sans-serif",
+                },
+                children=[
+                    html.P(
+                        "Delete permanently?",
+                        style={"fontSize": "15px", "fontWeight": "700",
+                               "color": _TEXT, "margin": "0 0 8px 0"},
+                    ),
+                    html.P(
+                        id="delete-modal-body",
+                        style={"fontSize": "13px", "color": _MUTED,
+                               "margin": "0 0 24px 0", "lineHeight": "1.5"},
+                    ),
+                    html.Div(
+                        style={"display": "flex", "gap": "10px", "justifyContent": "flex-end"},
+                        children=[
+                            html.Button(
+                                "Cancel",
+                                id="delete-cancel-btn",
+                                style={
+                                    "fontSize": "12px", "fontWeight": "600",
+                                    "color": _MUTED, "background": "none",
+                                    "border": f"1px solid {_BORDER}",
+                                    "borderRadius": "4px", "padding": "6px 18px",
+                                    "cursor": "pointer",
+                                },
+                            ),
+                            html.Button(
+                                "Delete permanently",
+                                id="delete-confirm-btn",
+                                style={
+                                    "fontSize": "12px", "fontWeight": "600",
+                                    "color": "white", "background": _DANGER,
+                                    "border": "none", "borderRadius": "4px",
+                                    "padding": "6px 18px", "cursor": "pointer",
+                                },
+                            ),
+                        ],
+                    ),
+                ],
+            )
         ],
     )
 
@@ -2056,11 +2144,18 @@ def _build_index_layout(odb) -> html.Div:
             {"field": "final_equity", "headerName": "Final Equity", "width": 120,
              "cellStyle": {"textAlign": "right"},
              "valueFormatter": {"function": "d3.format('$,.2f')(params.value)"}},
+            {"field": "id", "headerName": "", "width": 42,
+             "cellRenderer": "markdown",
+             "valueGetter": {"function": "'🗑'"},
+             "cellStyle": {"textAlign": "center", "cursor": "pointer", "color": _MUTED},
+             "sortable": False, "filter": False, "pinned": "right",
+             "suppressSizeToFit": True},
         ],
         defaultColDef={"sortable": True, "filter": True, "resizable": True},
         dashGridOptions=_shared_grid_opts,
         className="ag-theme-alpine",
         style={"width": "100%"},
+        id="index-bt-grid",
     )
 
     # ── Studies grid ──────────────────────────────────────────────────
@@ -2082,11 +2177,18 @@ def _build_index_layout(odb) -> html.Div:
                  {"condition": "params.value === 'Complete'", "style": {"color": _GREEN, "fontWeight": "600"}},
                  {"condition": "params.value !== 'Complete'", "style": {"color": _AMBER}},
              ]}},
+            {"field": "id", "headerName": "", "width": 42,
+             "cellRenderer": "markdown",
+             "valueGetter": {"function": "'🗑'"},
+             "cellStyle": {"textAlign": "center", "cursor": "pointer", "color": _MUTED},
+             "sortable": False, "filter": False, "pinned": "right",
+             "suppressSizeToFit": True},
         ],
         defaultColDef={"sortable": True, "filter": True, "resizable": True},
         dashGridOptions=_shared_grid_opts,
         className="ag-theme-alpine",
         style={"width": "100%"},
+        id="index-st-grid",
     )
 
     n_bt = len(bt_rows)
@@ -2099,6 +2201,8 @@ def _build_index_layout(odb) -> html.Div:
     return html.Div(
         style={"fontFamily": "Inter, system-ui, sans-serif", "backgroundColor": _BG, "minHeight": "100vh"},
         children=[
+            dcc.Store(id="delete-pending", data=None),
+            _delete_modal(),
             html.Div(
                 className="btkit-header",
                 style={"backgroundColor": _HEADER, "color": "white", "padding": "13px 24px",
@@ -2321,6 +2425,8 @@ def _build_backtest_layout(
         children=[
             dcc.Store(id="btkit-meta", data=_meta_store),
             dcc.Store(id="btkit-net-pnls", data=net_pnls),
+            dcc.Store(id="delete-pending", data={"type": "backtest", "id": bid, "name": strategy_name}),
+            _delete_modal(),
             # Header
             html.Div(
                 className="btkit-header",
@@ -2348,6 +2454,17 @@ def _build_backtest_layout(
                                 f"run #{bid}", style={"fontSize": "12px", "color": "#9CA3AF"}
                             ),
                             html.Span(created_at, style={"fontSize": "12px", "color": "#9CA3AF"}),
+                            html.Button(
+                                "Delete Run",
+                                id="header-delete-btn",
+                                style={
+                                    "fontSize": "11px", "fontWeight": "600",
+                                    "color": _DANGER, "background": "none",
+                                    "border": f"1px solid {_DANGER}",
+                                    "borderRadius": "4px", "padding": "3px 10px",
+                                    "cursor": "pointer",
+                                },
+                            ),
                         ],
                     ),
                 ],
@@ -2863,6 +2980,77 @@ def create_app(
 
         fig["data"].append(trace.to_plotly_json())
         return fig, ""
+
+    # ── Delete: grid row click → populate delete-pending ────────────────
+    @app.callback(
+        Output("delete-pending", "data"),
+        Input("index-bt-grid", "cellClicked"),
+        Input("index-st-grid", "cellClicked"),
+        Input("header-delete-btn", "n_clicks"),
+        State("delete-pending", "data"),
+        prevent_initial_call=True,
+    )
+    def _set_delete_pending(bt_cell, st_cell, _hdr, current_pending):
+        tid = ctx.triggered_id
+        if tid == "index-bt-grid" and bt_cell and bt_cell.get("colId") == "id":
+            d = bt_cell["data"]
+            return {"type": "backtest", "id": d["id"], "name": d.get("strategy", "run")}
+        if tid == "index-st-grid" and st_cell and st_cell.get("colId") == "id":
+            d = st_cell["data"]
+            return {"type": "study", "id": d["id"], "name": d.get("study", "study")}
+        if tid == "header-delete-btn":
+            return current_pending  # already pre-populated by layout Store
+        return current_pending
+
+    # ── Delete: pending store → open modal ──────────────────────────────
+    @app.callback(
+        Output("delete-modal-overlay", "style"),
+        Output("delete-modal-body", "children"),
+        Input("delete-pending", "data"),
+        Input("delete-cancel-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _toggle_delete_modal(pending, _cancel):
+        _flex = {"display": "flex", "position": "fixed", "inset": "0",
+                 "backgroundColor": "rgba(0,0,0,0.45)", "zIndex": "1000",
+                 "alignItems": "center", "justifyContent": "center"}
+        _none = {**_flex, "display": "none"}
+
+        if ctx.triggered_id == "delete-cancel-btn":
+            return _none, ""
+        if ctx.triggered_id == "delete-pending" and pending:
+            kind = pending.get("type", "backtest")
+            name = pending.get("name", "")
+            rid = pending.get("id", "")
+            if kind == "study":
+                body = (f'Study "{name}" (#{rid}) and all its combinations, '
+                        "positions, and legs will be permanently removed.")
+            else:
+                body = (f'Backtest "{name}" (#{rid}) and all its positions '
+                        "and legs will be permanently removed.")
+            return _flex, body
+        return _none, ""
+
+    # ── Delete: confirm → execute → redirect ────────────────────────────
+    @app.callback(
+        Output("url", "href"),
+        Input("delete-confirm-btn", "n_clicks"),
+        State("delete-pending", "data"),
+        prevent_initial_call=True,
+    )
+    def _execute_delete(_n, pending):
+        if not pending:
+            return "/"
+        kind = pending.get("type")
+        rid = pending.get("id")
+        if rid is None:
+            return "/"
+        with OutputDatabase(output_db_path) as odb:
+            if kind == "study":
+                odb.delete_study(int(rid))
+            else:
+                odb.delete_backtest(int(rid))
+        return "/"
 
     return app
 

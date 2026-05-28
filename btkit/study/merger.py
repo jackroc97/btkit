@@ -1,19 +1,19 @@
 """
-OutputMerger — consolidates per-worker output databases into one.
+OutputMerger — consolidates output databases into one.
 
-Each worker writes to an isolated DuckDB file. After all workers complete,
-OutputMerger reads them in sequence and INSERTs all rows into the final output
-database, re-sequencing primary keys to be globally unique while preserving
-study_id and combination_id.
+Used internally to merge per-worker temp DBs after a study run, and
+exposed as a general-purpose utility via `btkit db merge` for combining
+any set of output databases.
 
 FK chain:  study → backtest → position → position_leg
 
-Re-sequencing order per worker:
-    1. backtest rows: id += bt_offset
-    2. position rows: id += pos_offset, backtest_id += bt_offset
-    3. position_leg rows: id += pl_offset, position_id += pos_offset
+Re-sequencing order per source:
+    1. study rows:       id += study_offset
+    2. backtest rows:    id += bt_offset; study_id += study_offset (if set)
+    3. position rows:    id += pos_offset; backtest_id += bt_offset
+    4. position_leg rows: id += pl_offset; position_id += pos_offset
 
-Uses DuckDB ATTACH to avoid loading worker data through Python memory.
+Uses DuckDB ATTACH to avoid loading source data through Python memory.
 """
 
 from __future__ import annotations
@@ -25,28 +25,31 @@ import duckdb
 
 
 class OutputMerger:
-    """Merge per-worker output DBs into one consolidated output database."""
+    """Merge one or more source output DBs into a consolidated target database."""
 
     def merge(
         self,
-        worker_db_paths: list[str],
-        output_db_path: str,
-        cleanup: bool = True,
+        source_db_paths: list[str],
+        target_db_path: str,
+        cleanup: bool = False,
         tmp_dir: str | None = None,
     ) -> None:
         """
-        Merge worker databases into output_db_path (must already exist with schema).
+        Merge source databases into target_db_path.
 
-        cleanup=True removes worker files (or the entire tmp_dir) after a
-        successful merge.
+        target_db_path must already exist with the btkit schema applied
+        (i.e. OutputDatabase.create_schema() has been called on it).
+
+        cleanup=True removes source files (or the entire tmp_dir if given)
+        after a successful merge — used by StudyRunner for temp worker DBs.
         """
-        con = duckdb.connect(output_db_path)
+        con = duckdb.connect(target_db_path)
         try:
-            for worker_path in worker_db_paths:
-                if not Path(worker_path).exists():
-                    continue  # worker wrote nothing (no entry signals fired)
+            for source_path in source_db_paths:
+                if not Path(source_path).exists():
+                    continue
 
-                con.execute(f"ATTACH '{worker_path}' AS w (READ_ONLY)")
+                con.execute(f"ATTACH '{source_path}' AS w (READ_ONLY)")
                 try:
                     self._merge_one(con)
                 finally:
@@ -58,23 +61,44 @@ class OutputMerger:
             if tmp_dir:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
             else:
-                for p in worker_db_paths:
+                for p in source_db_paths:
                     try:
                         Path(p).unlink()
                     except FileNotFoundError:
                         pass
 
     # ------------------------------------------------------------------
-    # Per-worker merge (con already has 'w' attached as READ_ONLY)
+    # Per-source merge (con already has 'w' attached as READ_ONLY)
     # ------------------------------------------------------------------
 
     def _merge_one(self, con: duckdb.DuckDBPyConnection) -> None:
-        # Check the worker has any rows to merge.
+        # ── 0. study ───────────────────────────────────────────────────
+        # Worker DBs have no study rows (StudyRunner pre-creates them in
+        # the target). General merges may have study rows — handle both.
+        study_offset = con.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM study"
+        ).fetchone()[0]
+
+        src_study_count = con.execute("SELECT COUNT(*) FROM w.study").fetchone()[0]
+        if src_study_count > 0:
+            con.execute(f"""
+                INSERT INTO study
+                SELECT
+                    id + {study_offset},
+                    name,
+                    strategy_yaml,
+                    total_combinations,
+                    created_at,
+                    finished_at,
+                    note
+                FROM w.study
+            """)
+
+        # ── 1. backtest ────────────────────────────────────────────────
         bt_count = con.execute("SELECT COUNT(*) FROM w.backtest").fetchone()[0]
         if bt_count == 0:
             return
 
-        # ── 1. backtest ────────────────────────────────────────────────
         bt_offset = con.execute(
             "SELECT COALESCE(MAX(id), 0) FROM backtest"
         ).fetchone()[0]
@@ -83,7 +107,8 @@ class OutputMerger:
             INSERT INTO backtest
             SELECT
                 id + {bt_offset},
-                study_id,
+                CASE WHEN study_id IS NULL THEN NULL
+                     ELSE study_id + {study_offset} END,
                 combination_id,
                 strategy_name,
                 strategy_version,
