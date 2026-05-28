@@ -1,0 +1,29 @@
+@import "tailwindcss";
+@import "bootstrap/dist/css/bootstrap.min.css";
+
+:root {
+  --btk-blue:   #2563EB;
+  --btk-green:  #16A34A;
+  --btk-red:    #DC2626;
+  --btk-amber:  #D97706;
+  --btk-gray:   #6B7280;
+  --btk-bg:     #F3F4F6;
+  --btk-card:   #FFFFFF;
+  --btk-border: #E5E7EB;
+  --btk-text:   #111827;
+  --btk-muted:  #6B7280;
+  --btk-header: #111827;
+
+  font-family: Inter, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  margin: 0;
+  background: var(--btk-bg);
+  color: var(--btk-text);
+}
+
+#root {
+  min-height: 100vh;
+}
