@@ -454,6 +454,26 @@ class ExitScanner:
             ]
         )
 
+        # ── TP confirmation bars ──────────────────────────────────────────
+        # Require the TP condition to hold for N consecutive 1-min bars before
+        # the exit fires. Filters out fleeting TP touches that a live system
+        # with real scanning latency would miss. Only applies to close-based TP
+        # (_tp); gap TP (_gap_tp) is instantaneous and skips confirmation.
+        if isinstance(tp_src, TakeProfitConfig) and tp_src.confirmation_bars > 1:
+            cb = tp_src.confirmation_bars
+
+            def _apply_tp_confirmation(df: pl.DataFrame) -> pl.DataFrame:
+                return df.sort("ts_event").with_columns(
+                    (
+                        pl.col("_tp").cast(pl.Int8)
+                        .rolling_sum(window_size=cb)
+                        .fill_null(0)
+                        >= cb
+                    ).alias("_tp")
+                )
+
+            m = m.group_by("entry_id", maintain_order=True).map_groups(_apply_tp_confirmation)
+
         cond_expr = pl.lit(False)
         for cond_str in exit_cfg.conditions:
             try:

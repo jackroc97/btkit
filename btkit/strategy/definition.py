@@ -98,6 +98,7 @@ class EntryConfig(BaseModel):
     conditions: list[str] = []
     min_credit: NumericSweep | None = None  # skip entry if open_mark < this
     max_debit: NumericSweep | None = None  # skip entry if open_mark > this
+    max_entries_per_day: int | None = None  # cap re-entries per calendar day (None = unlimited)
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +154,7 @@ class TakeProfitConfig(BaseModel):
     price: NumericSweep | None = None  # fixed per-point offset from open_mark
     pct: NumericSweep | None = None  # fraction of open_mark to retain (e.g. 0.70 = exit at 70% profit)
     condition: str | None = None  # AND-gated: TP only fires when this expression is also true
+    confirmation_bars: int = 1  # consecutive 1-min bars at/below TP level required before exit fires
 
     @model_validator(mode="after")
     def validate_tp_config(self) -> TakeProfitConfig:

@@ -85,6 +85,10 @@ class BacktestEngine:
                 warnings.extend(exit_scanner.warnings)
 
                 entries, exits = self._enforce_one_at_a_time(entries, exits)
+                if trade.entry.max_entries_per_day is not None:
+                    entries, exits = self._enforce_max_entries_per_day(
+                        entries, exits, trade.entry.max_entries_per_day
+                    )
                 all_entries[trade.name] = entries
                 all_exits[trade.name] = exits
                 # Advance by pre-enforcement count so surviving entry_ids from this
@@ -203,6 +207,45 @@ class BacktestEngine:
                 last_exit = exit_times[i]
 
         keep_ids = entry_ids[keep].tolist()
+
+        return (
+            entries.filter(pl.col("entry_id").is_in(keep_ids)),
+            exits.filter(pl.col("entry_id").is_in(keep_ids)),
+        )
+
+    def _enforce_max_entries_per_day(
+        self,
+        entries: pl.DataFrame,
+        exits: pl.DataFrame,
+        max_entries: int,
+    ) -> tuple[pl.DataFrame, pl.DataFrame]:
+        """
+        After one-at-a-time enforcement, further cap the number of positions
+        opened per calendar day to max_entries. Entries are ranked chronologically
+        within each day; only the first max_entries survive.
+
+        Addresses the re-entry frequency gap between backtest (opens a new position
+        immediately after each TP exit) and live execution (may not re-enter the
+        same day after an early exit).
+        """
+        if entries.is_empty():
+            return entries, exits
+
+        tz_str = self.strategy.universe.session.timezone
+
+        entries_capped = (
+            entries.sort("entry_time")
+            .with_columns(
+                pl.col("entry_time").dt.convert_time_zone(tz_str).dt.date().alias("_entry_date")
+            )
+            .with_columns(
+                pl.col("entry_id").cum_count().over("_entry_date").alias("_day_rank")
+            )
+            .filter(pl.col("_day_rank") <= max_entries)
+            .drop(["_entry_date", "_day_rank"])
+        )
+
+        keep_ids = set(entries_capped["entry_id"].to_list())
 
         return (
             entries.filter(pl.col("entry_id").is_in(keep_ids)),

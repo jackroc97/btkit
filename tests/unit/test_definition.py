@@ -110,6 +110,47 @@ class TestEntryWindowConfig:
 # ---------------------------------------------------------------------------
 
 
+class TestEntryConfig:
+    def test_defaults(self):
+        cfg = EntryConfig(window=EntryWindowConfig(start=time(9, 45), end=time(14, 30)))
+        assert cfg.max_entries_per_day is None
+        assert cfg.conditions == []
+        assert cfg.min_credit is None
+
+    def test_max_entries_per_day_set(self):
+        cfg = EntryConfig(
+            window=EntryWindowConfig(start=time(9, 45), end=time(14, 30)),
+            max_entries_per_day=1,
+        )
+        assert cfg.max_entries_per_day == 1
+
+    def test_max_entries_per_day_unlimited(self):
+        cfg = EntryConfig(
+            window=EntryWindowConfig(start=time(9, 45), end=time(14, 30)),
+            max_entries_per_day=None,
+        )
+        assert cfg.max_entries_per_day is None
+
+
+class TestTakeProfitConfig:
+    def test_confirmation_bars_default(self):
+        cfg = TakeProfitConfig(pct=0.70)
+        assert cfg.confirmation_bars == 1
+
+    def test_confirmation_bars_set(self):
+        cfg = TakeProfitConfig(pct=0.70, confirmation_bars=2)
+        assert cfg.confirmation_bars == 2
+
+    def test_confirmation_bars_with_price(self):
+        cfg = TakeProfitConfig(price=1.0, confirmation_bars=3)
+        assert cfg.confirmation_bars == 3
+
+    def test_confirmation_bars_with_condition(self):
+        cfg = TakeProfitConfig(pct=0.70, condition="close > vwap", confirmation_bars=2)
+        assert cfg.confirmation_bars == 2
+        assert cfg.condition == "close > vwap"
+
+
 class TestExitConfig:
     def test_all_optional(self):
         cfg = ExitConfig()
