@@ -150,7 +150,16 @@ class StudyExpander:
                 if isinstance(v, StopLossConfig):
                     v = v.price
                 elif isinstance(v, TakeProfitConfig):
+                    # Use a sub-path so _apply_overrides patches only the swept
+                    # sub-field, preserving confirmation_bars and other attrs.
+                    sub = "price" if v.price is not None else "pct"
                     v = v.price if v.price is not None else v.pct
+                    if v is None:
+                        continue
+                    vals = _as_values(v)
+                    if vals is not None:
+                        sweep_axes[f"{trade.name}.exit.{fname}.{sub}"] = vals
+                    continue
                 if v is None:
                     continue
                 vals = _as_values(v)
@@ -237,18 +246,33 @@ class StudyExpander:
         trade_by_name = {t["name"]: i for i, t in enumerate(raw["trades"])}
 
         for dot_path, value in overrides.items():
-            parts = dot_path.split(".", 2)
+            parts = dot_path.split(".", 3)
             if len(parts) < 3:
                 raise ValueError(
-                    f"Override dot-path must have 3 parts (trade.section.field): {dot_path!r}"
+                    f"Override dot-path must have at least 3 parts (trade.section.field): {dot_path!r}"
                 )
-            trade_name, section, field = parts
+            trade_name, section = parts[0], parts[1]
             if trade_name not in trade_by_name:
                 raise ValueError(f"Unknown trade {trade_name!r} in dot-path {dot_path!r}")
             ti = trade_by_name[trade_name]
 
             if section == "exit":
-                raw["trades"][ti]["exit"][field] = value
+                if len(parts) == 4:
+                    # 4-part path: trade.exit.field.subfield — patch inside a
+                    # nested config object (e.g. take_profit.pct inside TakeProfitConfig).
+                    # null sweep value disables the entire parent feature (take_profit=None).
+                    field, sub_field = parts[2], parts[3]
+                    if value is None:
+                        raw["trades"][ti]["exit"][field] = None
+                    else:
+                        existing = raw["trades"][ti]["exit"].get(field)
+                        if isinstance(existing, dict):
+                            raw["trades"][ti]["exit"][field] = dict(existing, **{sub_field: value})
+                        else:
+                            raw["trades"][ti]["exit"][field] = {sub_field: value}
+                else:
+                    field = parts[2]
+                    raw["trades"][ti]["exit"][field] = value
             else:
                 leg_by_name = {
                     leg["name"]: j for j, leg in enumerate(raw["trades"][ti]["legs"])
@@ -256,6 +280,6 @@ class StudyExpander:
                 if section not in leg_by_name:
                     raise ValueError(f"Unknown leg {section!r} in dot-path {dot_path!r}")
                 lj = leg_by_name[section]
-                raw["trades"][ti]["legs"][lj][field] = value
+                raw["trades"][ti]["legs"][lj][parts[2]] = value
 
         return StrategyDefinition.model_validate(raw)
