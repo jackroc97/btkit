@@ -44,7 +44,6 @@ strategy:
           action:       buy_to_open
           reference_leg: short_put
           strike_offset: -50.0   # $50 wide — long put 50 points below short put
-          dte:          0
           quantity:     1
 
       exit:
@@ -79,7 +78,6 @@ strategy:
           action:       buy_to_open
           reference_leg: short_call
           strike_offset: 50.0   # $50 wide — long call 50 points above short call
-          dte:          0
           quantity:     1
 
       exit:

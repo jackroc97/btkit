@@ -35,8 +35,11 @@ strategy:
 
   # Transaction costs — shared across all trades
   costs:
-    slippage_pct:     0.01
-    fee_per_contract: 0.65
+    slippage_pct: 0.01
+    fees:
+      entry_fee_per_contract:      0.65   # per leg, charged at open
+      exit_fee_per_contract:       0.65   # per leg, charged on TP/SL/condition/DTE exit
+      expiration_fee_per_contract: 0.00   # per leg, charged at expiry (often $0 at IBKR)
 
   # Matrix expansion settings (only relevant for parameterized strategies)
   matrix:
@@ -49,6 +52,7 @@ strategy:
       instrument:
         root_symbol: ES
         asset_class: future         # future | equity | etf
+        tick_size: 0.05             # minimum price increment; 0.0 = no rounding (default)
 
       entry:
         window:
@@ -72,12 +76,12 @@ strategy:
             step:  15                        # range sweep → [30, 45, 60]
           quantity: 1
 
-        - name:     long_put
-          right:    put
-          action:   buy_to_open
-          delta:    -0.15                    # scalar — fixed across all combinations
-          dte:      45
-          quantity: 1
+        - name:          long_put
+          right:         put
+          action:        buy_to_open
+          reference_leg: short_put
+          strike_offset: -25.0              # 25 points below short_put — inherits its expiry
+          quantity:      1
 
       exit:
         stop_loss:   [1.50, 2.00, 2.50]     # list sweep
@@ -87,6 +91,11 @@ strategy:
         conditions:                          # exit if any condition is true (OR logic)
           - "rsi_14 > 70"
           - "vix_close > 40"
+        # liquidity:                         # optional — omit to use naive-fill defaults
+        #   min_exit_volume:  100
+        #   lookback_minutes: 3
+        #   pre_expiry_lock_minutes: 15
+        #   slippage_model: spread
 ```
 
 ### Multi-trade example: iron condor with independently managed wings
@@ -121,8 +130,8 @@ strategy:
         window: {start: "09:30", end: "14:00"}
         conditions: ["vix_close < 30", "rsi_14 < 40"]
       legs:
-        - {name: short_put, right: put, action: sell_to_open, delta: -0.20, dte: 45, quantity: 1}
-        - {name: long_put,  right: put, action: buy_to_open,  delta: -0.10, dte: 45, quantity: 1}
+        - {name: short_put, right: put,  action: sell_to_open, delta: -0.20, dte: 45, quantity: 1}
+        - {name: long_put,  right: put,  action: buy_to_open,  reference_leg: short_put, strike_offset: -25.0, quantity: 1}
       exit:
         stop_loss:   2.0
         take_profit: 0.50
@@ -137,7 +146,7 @@ strategy:
         conditions: ["vix_close < 30", "rsi_14 > 60"]
       legs:
         - {name: short_call, right: call, action: sell_to_open, delta: 0.20, dte: 45, quantity: 1}
-        - {name: long_call,  right: call, action: buy_to_open,  delta: 0.10, dte: 45, quantity: 1}
+        - {name: long_call,  right: call, action: buy_to_open,  reference_leg: short_call, strike_offset: 25.0, quantity: 1}
       exit:
         stop_loss:   2.0
         take_profit: 0.50
@@ -321,6 +330,7 @@ class UniverseConfig(BaseModel):
 class InstrumentConfig(BaseModel):
     root_symbol: str
     asset_class: Literal["future", "equity", "etf"]
+    tick_size: float = 0.0   # minimum price increment; 0.0 = continuous (no rounding)
 
 
 class EntryWindowConfig(BaseModel):
@@ -342,25 +352,47 @@ class EntryConfig(BaseModel):
 
 
 class LegConfig(BaseModel):
-    name:     str
-    right:    Literal["call", "put"]
-    action:   Literal["buy_to_open", "sell_to_open"]
-    delta:    NumericSweep
-    dte:      IntSweep
-    quantity: int = 1
+    name:            str
+    right:           Literal["call", "put"]
+    action:          Literal["buy_to_open", "sell_to_open"]
+    dte:             IntSweep | None = None   # required for delta legs; None = inherit parent expiry for offset legs
+    quantity:        int = 1
+    # Selection mode A: delta-targeted
+    delta:           NumericSweep | None = None
+    delta_tolerance: float = 0.10
+    dte_tolerance:   int = 5
+    # Selection mode B: fixed offset from a reference leg
+    strike_offset:   float | None = None   # positive = above ref strike, negative = below
+    reference_leg:   str | None = None     # name of the delta-targeted leg to offset from
+
+
+class LiquidityConfig(BaseModel):
+    min_exit_volume:         Optional[int] = None   # None → volume gate disabled
+    lookback_minutes:        int = 3
+    pre_expiry_lock_minutes: Optional[int] = None   # None → lock disabled
+    slippage_model:          Literal["flat", "spread"] = "flat"
 
 
 class ExitConfig(BaseModel):
-    stop_loss:   NumericSweep
-    take_profit: NumericSweep
-    dte_exit:    IntSweep | None = None
-    expiry_exit: bool = True
-    conditions:  list[str] = []  # exit if any condition is true (OR logic)
+    stop_loss:      NumericSweep | StopLossConfig | None = None
+    take_profit:    NumericSweep | TakeProfitConfig | None = None
+    take_profit_pct: NumericSweep | None = None   # legacy top-level form
+    dte_exit:       IntSweep | None = None
+    expiry_exit:    bool = True
+    conditions:     list[str] = []   # exit if any condition is true (OR logic)
+    liquidity:      LiquidityConfig = LiquidityConfig()
+
+
+class FeesConfig(BaseModel):
+    entry_fee_per_contract:      float = 0.0
+    exit_fee_per_contract:       float = 0.0
+    expiration_fee_per_contract: float = 0.0
 
 
 class CostsConfig(BaseModel):
     slippage_pct:     float = 0.0
-    fee_per_contract: float = 0.0
+    fee_per_contract: float = 0.0       # legacy: split evenly as entry=fee/2, exit=fee/2
+    fees: FeesConfig | None = None      # structured form; mutually exclusive with fee_per_contract
 
 
 class MatrixConfig(BaseModel):
@@ -606,6 +638,148 @@ exit:
 When an indicator exit fires, `exit_reason` is recorded as `'condition'` and the fill
 price follows the standard bar-close mark rule (not a TP/SL threshold price), since
 the exit is not triggered by a specific price level. See `fill_price_and_costs.md`.
+
+---
+
+## Exit Liquidity Modelling
+
+By default the exit engine assumes every bar is fillable at the bar's mark price —
+the same naive assumption used in most backtesting frameworks. For short-dated,
+far-OTM options this can overstate the number of price-triggered exits (TP/SL) that
+would actually fill in live trading, leading to optimistic P&L expectations.
+
+The optional `exit.liquidity` block exposes three independent controls:
+
+```yaml
+exit:
+  stop_loss:   5.00
+  take_profit_pct: 0.70
+  expiry_exit: true
+
+  liquidity:
+    # 1. Volume gate — suppress price-triggered exits when the option is illiquid
+    min_exit_volume:  100          # cumulative contracts over the lookback window
+    lookback_minutes: 3            # rolling time window (default: 3 min)
+
+    # 2. Pre-expiry lock — suppress price-triggered exits near option expiration
+    pre_expiry_lock_minutes: 30    # lock TP/SL in the final N minutes before expiry close
+
+    # 3. Spread slippage — add half the bar high-low range per leg to the fill price
+    slippage_model: spread         # "flat" (default) | "spread"
+```
+
+All fields are optional. Omitting `liquidity:` entirely (or any individual field)
+preserves the original naive-fill behaviour — the engine adds no extra columns to
+its queries and incurs no overhead.
+
+### Feature 1 — Volume Gate (`min_exit_volume`)
+
+A price-triggered exit (TP, SL, or gap) is only allowed when the **rolling sum of
+option volume across all legs** over the preceding `lookback_minutes` minutes is at
+least `min_exit_volume` contracts.
+
+- Volume is accumulated from the same 1-minute OHLCV bars used for mark prices.
+- Bars missing from the database (common near expiration for illiquid strikes) count
+  as **zero volume** — the engine does not assume they traded.
+- The minimum volume is the *weakest leg*: if any single leg has zero recent volume
+  the gate is closed regardless of volume in the other legs.
+- Expiry and DTE exits fire unconditionally — the volume gate only applies to
+  price-triggered exits.
+
+**Practical guidance:** For 0-DTE short credit spreads on ES, values in the range
+50–200 contracts per 3-minute window are a reasonable starting point. Run a study
+sweep over this parameter against live-trading results to calibrate.
+
+### Feature 2 — Pre-expiry Lock (`pre_expiry_lock_minutes`)
+
+Suppresses all price-triggered exits (TP, SL, gap) during the final N minutes before
+the instrument's expiry close time (`instrument.expiry_close_time`). This models the
+illiquid, wide-spread conditions that typically prevail as an option approaches its
+last print.
+
+- `expiry_close_time` must be set on the instrument when this feature is used; if it
+  is omitted the engine falls back to the session end time.
+- Expiry exits (i.e. the position is held to expiration) still fire normally.
+- The lock applies only on expiration day (`dte == 0`).
+
+**Practical guidance:** For 0-DTE ES options, 15–30 minutes before the 16:00 ET
+expiry close is a common lock window (i.e. `pre_expiry_lock_minutes: 15` suppresses
+TP/SL after 15:45).
+
+### Feature 3 — Spread Slippage (`slippage_model: spread`)
+
+When set to `"spread"`, the engine adds **half the bar's high-low range** per leg to
+the fill price on every exit. This estimates the cost of crossing the bid-ask spread
+when closing a position.
+
+- For credit spreads (sell-to-open), closing the position is a debit: the fill price
+  is the mark plus slippage, increasing the cost.
+- The bar high-low range is used as a proxy for the bid-ask spread width because it
+  is available in the existing 1-minute OHLCV data with no additional queries.
+- This is additive to `costs.slippage_pct` and `costs.fee_per_contract` — all three
+  apply simultaneously.
+- Expiry exits (position held to 0) are unaffected by spread slippage.
+
+**Design note:** Half-spread slippage applied to every exit is a conservative
+assumption. Realistically, limit orders often fill inside the spread; however,
+modelling limit-order fill probability requires tick data not available at 1-minute
+resolution. The conservative assumption produces a lower bound on strategy
+profitability that is more consistent with live results for illiquid 0-DTE options.
+
+### Interaction with `costs.slippage_pct`
+
+`costs.slippage_pct` applies a percentage-of-mark haircut to both entry and exit fills
+and represents general market impact / spread cost on both sides of the trade.
+`liquidity.slippage_model: spread` adds a separate, bar-specific cost only to exits.
+They model different phenomena and can be used simultaneously.
+
+---
+
+## Tick Size
+
+Options trade at discrete price increments. Setting `instrument.tick_size` causes all
+fill prices and the MAE high-water mark to be rounded to the nearest tick before being
+written to the output database. This prevents the backtest from recording fills at
+prices the exchange cannot actually print.
+
+```yaml
+instrument:
+  root_symbol: ES
+  asset_class: future
+  tick_size: 0.05      # $0.05 per point — standard for ES/MES options
+```
+
+**Common values:**
+
+| Instrument | Typical option tick |
+|---|---|
+| ES / MES futures options | 0.05 |
+| NQ / MNQ futures options | 0.05 |
+| SPY / QQQ equity options | 0.01 |
+| SPX / XSP index options | 0.05 (strikes > $3) or 0.10 |
+| IWM / EEM equity options | 0.01 |
+
+Check your broker's contract spec if unsure — tick sizes occasionally change or differ
+between regular and mini contracts.
+
+**What gets rounded:**
+
+| Price | Stage |
+|---|---|
+| `open_mark` | Entry — after summing leg close prices |
+| `tp_price`, `sl_price` | Entry — after deriving from `open_mark` |
+| `exit_mark` | Exit — gap fills, condition/DTE/expiry bar-close prices |
+| `worst_mark` | Exit — MAE high-water mark at output |
+
+TP and SL fills are already on-tick (thresholds are rounded at entry time) so they are
+not double-rounded. Only bar-level prices (gap opens, condition exits, expiry marks)
+need rounding at exit time.
+
+**Default:** `tick_size: 0.0` — all rounding disabled, prices are continuous. This is
+the default and reproduces the original engine behaviour exactly. Omitting the field is
+equivalent to `tick_size: 0.0`.
+
+See [fill_price_and_costs.md](fill_price_and_costs.md) for the full rounding rules.
 
 ---
 

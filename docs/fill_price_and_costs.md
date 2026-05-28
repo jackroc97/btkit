@@ -111,34 +111,86 @@ point for liquid index options.
 
 ### Fees
 
-Fees are modeled as a **flat dollar amount per contract** applied at both open and close.
+Fees are modeled per contract per leg, with separate rates for the three lifecycle events:
 
 ```
-trade_cost = fee_per_contract * total_contracts_in_position * 2   # open + close
+fee_cost = (entry_fee_per_contract + exit_or_expiration_fee_per_contract)
+           × total_contracts_in_position
 ```
 
-`total_contracts_in_position` is the sum of absolute contract counts across all legs.
+`total_contracts_in_position` is the sum of `quantity` across all legs.
+Expiry exits use `expiration_fee_per_contract`; all other exits (TP, SL, condition, DTE)
+use `exit_fee_per_contract`.
 
-**Default:** `fee_per_contract = 0.0`.
+#### Structured fees (recommended)
+
+```yaml
+costs:
+  slippage_pct: 0.01
+  fees:
+    entry_fee_per_contract:      0.65   # charged at open, per leg
+    exit_fee_per_contract:       0.65   # charged on TP/SL/condition/DTE exit, per leg
+    expiration_fee_per_contract: 0.00   # charged at expiry (IBKR waives for worthless expiry)
+```
+
+For a 2-leg spread (e.g. a put spread) with the values above:
+- Active exit (TP/SL): `(0.65 + 0.65) × 2 = $2.60`
+- Expiry (worthless): `(0.65 + 0.00) × 2 = $1.30`
+
+#### Legacy form
+
+`fee_per_contract` is still accepted and is split evenly across entry and exit:
+
+```yaml
+costs:
+  fee_per_contract: 0.65    # equivalent to entry=0.325 + exit=0.325 per leg
+```
+
+The `fees:` block and `fee_per_contract` are mutually exclusive; using both is a
+validation error at load time.
+
+**Defaults:** All fee fields default to `0.0`.
 
 ### Application Order
-
-Costs are applied after fill price is determined:
 
 ```
 1. Determine raw fill price (per rules above)
 2. Apply slippage to fill price
 3. Compute gross PnL from slippage-adjusted fill
-4. Subtract flat fee cost from gross PnL → net PnL
+4. Subtract fee_cost from gross PnL → net PnL
 ```
 
-### Strategy-Level Parameters
+---
+
+## Tick Size Rounding
+
+Options trade at discrete price increments. When `instrument.tick_size` is non-zero,
+all fill prices and the MAE high-water mark are rounded to the nearest tick before
+being written to the output database.
 
 ```yaml
-costs:
-  slippage_pct: 0.01        # 1% of exit spread mark
-  fee_per_contract: 0.65    # dollars per contract per side
+instrument:
+  root_symbol: ES
+  asset_class: future
+  tick_size: 0.05          # $0.05 per point — standard for ES options
 ```
+
+Prices rounded:
+
+| Price | When | Notes |
+|---|---|---|
+| `open_mark` | Entry fill | Signed sum of leg closes, then rounded |
+| `tp_price` | Threshold derivation | Derived from rounded `open_mark`, then rounded |
+| `sl_price` | Threshold derivation | Derived from rounded `open_mark`, then rounded |
+| `exit_mark` | All exit types | Gap fills, condition/DTE/expiry bar-close prices |
+| `worst_mark` | MAE tracking | Running max of position marks, rounded at output |
+
+**TP and SL threshold prices** are already on-tick (rounded at entry time) so their
+fill prices are not double-rounded — only the bar-level gap/condition/expiry marks
+need rounding at exit time.
+
+**Default:** `tick_size = 0.0` disables all rounding, reproducing the original
+continuous-price behaviour exactly.
 
 ---
 
@@ -151,5 +203,6 @@ costs:
   bar.
 - **Slippage is symmetric**: the model applies a flat percentage regardless of market
   conditions. In practice, slippage is larger during high-volatility periods.
-- **Fees are flat**: exchange fees, regulatory fees, and per-share/per-contract structures
-  vary by broker. The flat-per-contract model is an approximation.
+- **Fees are structured but not exchange-specific**: the model supports entry, exit, and
+  expiration fee tiers per contract per leg. Exchange pass-through fees, regulatory fees, and
+  tiered volume rebates are not modelled.

@@ -51,6 +51,17 @@ study_app = typer.Typer(
 app.add_typer(study_app, name="study")
 
 
+def _require_output_db(path: str) -> None:
+    """Exit with a clear message if the output database file does not exist."""
+    if not Path(path).exists():
+        typer.echo(
+            f"Error: output database not found: {path}\n"
+            "Run 'btkit run' or 'btkit study run' first to create it.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+
 def _ensure_indicators(input_db_path: str, strategy: StrategyDefinition) -> None:
     """Run any indicator scripts listed in strategy.indicators that are not yet in the DB,
     or that are stale because new underlying bars have been added since they were last built."""
@@ -189,6 +200,7 @@ def analyze(
         typer.echo("Provide at most one of --backtest-id or --study-id.", err=True)
         raise typer.Exit(code=1)
 
+    _require_output_db(output_db)
     with OutputDatabase(output_db) as odb:
         processor = PostProcessor(
             odb, backtest_id=backtest_id, study_id=effective_study_id
@@ -270,6 +282,7 @@ def serve(
     debug: bool = typer.Option(default=False, help="Run Dash in debug mode (enables hot-reload)."),
 ) -> None:
     """Launch the interactive dashboard for a backtest run."""
+    _require_output_db(output_db)
     try:
         from btkit.analysis.dashboard import run_dashboard
     except ImportError as exc:
