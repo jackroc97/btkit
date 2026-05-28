@@ -63,6 +63,7 @@ strategy:
           - "vix_close < 30"
         min_credit:  0.50           # skip entry if open_mark < this (optional)
         max_debit:   2.00           # skip entry if open_mark > this (optional)
+        max_entries_per_day: 1      # cap total positions opened per calendar day (optional)
 
       # Leg definitions — numeric fields accept scalar, list, or range (see Sweep Parameters)
       legs:
@@ -345,10 +346,11 @@ class EntryWindowConfig(BaseModel):
 
 
 class EntryConfig(BaseModel):
-    window:      EntryWindowConfig
-    conditions:  list[str] = []
-    min_credit:  NumericSweep | None = None  # enter only if open_mark >= this value
-    max_debit:   NumericSweep | None = None  # enter only if open_mark <= this value
+    window:              EntryWindowConfig
+    conditions:          list[str] = []
+    min_credit:          NumericSweep | None = None  # enter only if open_mark >= this value
+    max_debit:           NumericSweep | None = None  # enter only if open_mark <= this value
+    max_entries_per_day: int | None = None           # None = unlimited re-entries per day
 
 
 class LegConfig(BaseModel):
@@ -364,6 +366,18 @@ class LegConfig(BaseModel):
     # Selection mode B: fixed offset from a reference leg
     strike_offset:   float | None = None   # positive = above ref strike, negative = below
     reference_leg:   str | None = None     # name of the delta-targeted leg to offset from
+
+
+class StopLossConfig(BaseModel):
+    price:     NumericSweep         # per-point distance above open_mark that triggers SL
+    condition: str | None = None   # AND-gated: SL only fires when this expression is also true
+
+
+class TakeProfitConfig(BaseModel):
+    price:             NumericSweep | None = None  # fixed per-point offset from open_mark
+    pct:               NumericSweep | None = None  # fraction of open_mark to retain (e.g. 0.70 = exit at 70% profit)
+    condition:         str | None = None           # AND-gated: TP only fires when this expression is also true
+    confirmation_bars: int = 1                     # consecutive 1-min bars at/below TP threshold before exit fires
 
 
 class LiquidityConfig(BaseModel):
@@ -493,6 +507,33 @@ Each trade enforces a **one-at-a-time constraint**: a new entry for a given trad
 only opened once the previous position in that trade has closed. This is enforced
 exactly after Pass 2 (when real exit times are known), not approximated during Pass 1.
 See [Engine Design](#one-at-a-time-constraint) below.
+
+### Max entries per day (`max_entries_per_day`)
+
+`entry.max_entries_per_day` caps the total number of positions opened for a trade on
+any single calendar day. It is applied after one-at-a-time enforcement and counts all
+positions taken that day — including the first entry, not just re-entries.
+
+```yaml
+entry:
+  window:
+    start: "09:45"
+    end:   "14:30"
+  max_entries_per_day: 1   # one position per day; never re-enter after an early TP exit
+```
+
+Setting `max_entries_per_day: 1` means the strategy takes its first valid entry of the
+day and holds or expires, even if that position closes at 70% TP by 10:30 AM and
+the entry window remains open for another four hours.
+
+**Use case:** The vectorized backtest scans every 1-minute bar and re-enters
+immediately after each exit, accumulating more positions per day than a live system
+typically does. This inflates the total position count (and aggregate P&L) relative to
+live execution. Capping at the observed live re-entry rate closes this gap without
+changing per-trade economics.
+
+`None` (default) means no cap — the engine re-enters as many times as the one-at-a-time
+constraint and entry window allow.
 
 **Design note:** A fixed `time` field was considered but rejected in favour of a
 `window` to support strategies where signals can fire multiple times per session. The
@@ -732,6 +773,47 @@ profitability that is more consistent with live results for illiquid 0-DTE optio
 and represents general market impact / spread cost on both sides of the trade.
 `liquidity.slippage_model: spread` adds a separate, bar-specific cost only to exits.
 They model different phenomena and can be used simultaneously.
+
+---
+
+## TP Confirmation Bars
+
+`take_profit.confirmation_bars` requires the TP condition to hold for N **consecutive**
+1-minute bars before the exit fires. The default of 1 preserves the original behaviour
+(exit immediately when the mark first crosses the TP threshold).
+
+```yaml
+exit:
+  take_profit:
+    pct: 0.70
+    confirmation_bars: 2   # require 2 consecutive bars at/below TP level before exiting
+  stop_loss: 5.00
+  expiry_exit: true
+```
+
+`confirmation_bars` only applies to the regular close-based TP check
+(`position_mark <= tp_price`). Gap-open TP (`spread_open_mark <= tp_price` at bar
+open) is instantaneous and bypasses confirmation, since a gap past the TP level
+is a resolved event, not a brief touch.
+
+**Use case:** The backtest engine evaluates every 1-minute bar and captures
+*fleeting TP touches* — moments where the spread mark dips to the TP threshold for
+a single bar then rebounds — that a live trading system with scanning latency and
+order-routing delays would miss. These single-bar touches are captured as TP exits
+in the backtest but result in expiry-worthless outcomes in live execution. Since an
+expiry-worthless exit and a near-zero TP exit produce nearly identical P&L, the
+difference shows up in exit composition (high backtest TP rate, high live expiry rate)
+but not in per-trade return bias.
+
+Setting `confirmation_bars: 2` filters out almost all single-bar TP touches while
+still allowing genuine, sustained TP conditions to fire on the second consecutive bar.
+This closes the exit composition gap without disturbing per-trade P&L calibration.
+
+**Interaction with other exit controls:** Confirmation is applied after all other
+`_price_ok` guards (session window, volume gate, pre-expiry lock). A bar where the
+TP condition is met but the position is locked or out-of-session does not count toward
+the confirmation streak — the streak only accumulates on bars where the TP would
+otherwise be valid.
 
 ---
 
