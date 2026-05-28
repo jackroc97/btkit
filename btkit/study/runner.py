@@ -158,8 +158,8 @@ class StudyRunner:
                         pbar.update(1)
 
             OutputMerger().merge(
-                worker_db_paths=worker_db_paths,
-                output_db_path=self._output_db_path,
+                source_db_paths=worker_db_paths,
+                target_db_path=self._output_db_path,
                 cleanup=True,
                 tmp_dir=tmp_dir,
             )
@@ -170,9 +170,8 @@ class StudyRunner:
             if completed_paths:
                 try:
                     OutputMerger().merge(
-                        worker_db_paths=completed_paths,
-                        output_db_path=self._output_db_path,
-                        cleanup=False,
+                        source_db_paths=completed_paths,
+                        target_db_path=self._output_db_path,
                     )
                 except Exception:
                     pass

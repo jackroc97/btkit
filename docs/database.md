@@ -490,7 +490,7 @@ CREATE TABLE position_leg (
 
 ## Output Database Utilities
 
-### `btkit db merge` — Combine output databases
+### `btkit db extend` — Extend a database with additional runs
 
 Merges two or more output databases into a single target file. Each backtest and study
 remains completely independent after the merge — rows are appended with re-sequenced
@@ -508,7 +508,7 @@ parameters. Common cases:
 - Archiving multiple study runs into a single file
 
 ```
-btkit db merge --sources jan.db feb.db mar.db --target q1.db
+btkit db extend --sources jan.db feb.db mar.db --target q1.db
 ```
 
 | Option | Description |

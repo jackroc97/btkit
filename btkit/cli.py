@@ -20,7 +20,7 @@ Usage:
     btkit serve       --output-db DB [--backtest-id N] [--port 8050]
     btkit study run   --study YAML --input-db DB --output-db DB
                       [--workers N] [--max-combinations N] [--initial-equity N]
-    btkit db merge    --sources a.db b.db ... --target combined.db
+    btkit db extend   --sources a.db b.db ... --target combined.db
 """
 
 from __future__ import annotations
@@ -381,18 +381,18 @@ def study_run(
 # ---------------------------------------------------------------------------
 
 
-@db_app.command("merge")
-def db_merge(
+@db_app.command("extend")
+def db_extend(
     sources: list[str] = typer.Option(
-        ..., help="One or more source output database paths to merge."
+        ..., help="One or more source output database paths to append."
     ),
     target: str = typer.Option(..., help="Target output database path (created if absent)."),
 ) -> None:
     """
-    Merge two or more output databases into one.
+    Extend a target database with the contents of one or more source databases.
 
     Example:
-        btkit db merge --sources jan.db feb.db mar.db --target q1.db
+        btkit db extend --sources jan.db feb.db mar.db --target q1.db
     """
     from btkit.study.merger import OutputMerger
 
