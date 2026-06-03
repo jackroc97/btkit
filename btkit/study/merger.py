@@ -103,12 +103,20 @@ class OutputMerger:
             "SELECT COALESCE(MAX(id), 0) FROM backtest"
         ).fetchone()[0]
 
+        # Worker DBs have no study rows — their study_id is pre-created in the
+        # target (so no offset needed). Only add study_offset when the source
+        # actually contains study rows (general-purpose DB merge).
+        if src_study_count > 0:
+            bt_study_id_sql = f"study_id + {study_offset}"
+        else:
+            bt_study_id_sql = "study_id"
+
         con.execute(f"""
             INSERT INTO backtest
             SELECT
                 id + {bt_offset},
                 CASE WHEN study_id IS NULL THEN NULL
-                     ELSE study_id + {study_offset} END,
+                     ELSE {bt_study_id_sql} END,
                 combination_id,
                 strategy_name,
                 strategy_version,
