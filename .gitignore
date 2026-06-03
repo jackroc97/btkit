@@ -47,4 +47,7 @@ htmlcov/
 .ipynb_checkpoints/
 
 # Frontend
-ui/node_modules/
+node_modules/
+
+# Claude Code memory
+.claude/
