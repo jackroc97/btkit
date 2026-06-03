@@ -45,3 +45,9 @@ htmlcov/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Frontend
+node_modules/
+
+# Claude Code memory
+.claude/
