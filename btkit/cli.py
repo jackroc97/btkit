@@ -6,7 +6,7 @@ Commands:
     btkit run           Run a backtest from a strategy YAML (single scalar run).
     btkit analyze       Compute metrics and print results to terminal.
     btkit pipeline      Full pipeline: build (if needed) → run → analyze.
-    btkit serve         Launch the interactive Dash dashboard for a backtest run.
+    btkit dashboard     Launch the interactive dashboard for a backtest run.
     btkit study run     Run a study: expand parameterized strategies and execute
                         all combinations in parallel.
     btkit db merge      Merge two or more output databases into one.
@@ -17,7 +17,9 @@ Usage:
     btkit analyze     --output-db DB [--backtest-id N | --study-id N]
     btkit pipeline    --data-path DATA --strategy YAML --db-path DB --output-db DB
                       [--indicators SCRIPT ...] [--initial-equity N] [--rebuild]
-    btkit serve       --output-db DB [--backtest-id N] [--port 8050]
+    btkit dashboard   --output-db DB [--backtest-id N] [--port 8050]
+                      [--background]  launch server in the background
+                      [--kill]        stop a background server
     btkit study run   --study YAML --input-db DB --output-db DB
                       [--workers N] [--max-combinations N] [--initial-equity N]
     btkit db extend   --sources a.db b.db ... --target combined.db
@@ -25,6 +27,10 @@ Usage:
 
 from __future__ import annotations
 
+import os
+import signal
+import sys
+import time
 from pathlib import Path
 
 import duckdb
@@ -58,6 +64,71 @@ db_app = typer.Typer(
     add_completion=False,
 )
 app.add_typer(db_app, name="db")
+
+
+_DASHBOARD_PID_FILE = Path.home() / ".btkit" / "dashboard.pid"
+
+
+def _pid_on_port(port: int) -> int | None:
+    """Return the PID listening on *port*, or None if the port is free."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["lsof", "-ti", f"TCP:{port}", "-sTCP:LISTEN"],
+            capture_output=True, text=True,
+        )
+        pids = [int(p) for p in r.stdout.split() if p.strip().isdigit()]
+        return pids[0] if pids else None
+    except Exception:
+        return None
+
+
+def _kill_dashboard(port: int = 8050) -> None:
+    """Stop a dashboard process — targets both the PID file and the port holder."""
+    killed_any = False
+
+    # Kill the process recorded in the PID file.
+    if _DASHBOARD_PID_FILE.exists():
+        pid = int(_DASHBOARD_PID_FILE.read_text().strip())
+        _DASHBOARD_PID_FILE.unlink(missing_ok=True)
+        try:
+            os.kill(pid, signal.SIGTERM)
+            typer.echo(f"Dashboard stopped (PID {pid}).")
+            killed_any = True
+        except ProcessLookupError:
+            typer.echo(f"PID {pid} was not running — stale PID file removed.")
+        except PermissionError:
+            typer.echo(f"Error: permission denied stopping PID {pid}.", err=True)
+            raise typer.Exit(code=1)
+
+    # Also kill anything still holding the port (catches sessions started outside --background).
+    port_pid = _pid_on_port(port)
+    if port_pid:
+        try:
+            os.kill(port_pid, signal.SIGTERM)
+            typer.echo(f"Killed stale process on port {port} (PID {port_pid}).")
+            killed_any = True
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    if not killed_any:
+        typer.echo("No running dashboard found.")
+
+
+def _fmt_duration(seconds: float) -> str:
+    """Format a duration in seconds into a human-readable string."""
+    ms = seconds * 1000
+    if ms < 1000:
+        return f"{ms:.0f}ms"
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes = int(seconds // 60)
+    secs = seconds % 60
+    if minutes < 60:
+        return f"{minutes}m {secs:.0f}s"
+    hours = int(minutes // 60)
+    minutes = minutes % 60
+    return f"{hours}h {minutes}m {int(secs)}s"
 
 
 def _require_output_db(path: str) -> None:
@@ -190,9 +261,11 @@ def run(
             initial_equity=initial_equity,
             note=note,
         )
+        _t0 = time.perf_counter()
         backtest_id = engine.run()
+        _elapsed = time.perf_counter() - _t0
 
-    typer.echo(f"Backtest complete. backtest_id={backtest_id}")
+    typer.echo(f"Backtest (id={backtest_id}) completed in {_fmt_duration(_elapsed)}")
 
 
 @app.command()
@@ -272,9 +345,11 @@ def pipeline(
             strategy=definition,
             initial_equity=initial_equity,
         )
+        _t0 = time.perf_counter()
         backtest_id = engine.run()
+        _elapsed = time.perf_counter() - _t0
 
-    typer.echo(f"Backtest complete. backtest_id={backtest_id}")
+    typer.echo(f"Backtest (id={backtest_id}) completed in {_fmt_duration(_elapsed)}")
 
     with OutputDatabase(output_db) as odb:
         processor = PostProcessor(odb, backtest_id=backtest_id)
@@ -284,30 +359,86 @@ def pipeline(
 
 
 @app.command()
-def serve(
-    output_db: str = typer.Option(..., help="Path to the output database."),
+def dashboard(
+    output_db: str = typer.Option(
+        default=None, help="Path to the output database. Required unless --kill is used."
+    ),
     input_db: str = typer.Option(
         default=None, help="Path to the input database (enables per-trade candle charts)."
     ),
-    backtest_id: int = typer.Option(
-        default=None, help="Backtest run to display (defaults to most recent)."
-    ),
     port: int = typer.Option(default=8050, help="Port for the dashboard server."),
-    debug: bool = typer.Option(default=False, help="Run Dash in debug mode (enables hot-reload)."),
+    debug: bool = typer.Option(default=False, help="Enable auto-reload (development mode)."),
+    background: bool = typer.Option(
+        False, "--background", help="Start the server in the background and return immediately."
+    ),
+    kill: bool = typer.Option(
+        False, "--kill", help="Stop a dashboard previously started with --background."
+    ),
 ) -> None:
-    """Launch the interactive dashboard for a backtest run."""
+    """Launch the React dashboard for a backtest run."""
+    if kill:
+        _kill_dashboard(port)
+        return
+
+    if output_db is None:
+        typer.echo("Error: --output-db is required.", err=True)
+        raise typer.Exit(code=1)
+
     _require_output_db(output_db)
+
     try:
-        from btkit.analysis.dashboard import run_dashboard
+        import uvicorn
     except ImportError as exc:
-        typer.echo(
-            "Dashboard dependencies not installed. Run: pip install btkit[viz]",
-            err=True,
-        )
+        typer.echo("uvicorn is not installed. Run: pip install btkit[api]", err=True)
         raise typer.Exit(code=1) from exc
 
-    run_dashboard(
-        output_db, input_db_path=input_db, backtest_id=backtest_id, port=port, debug=debug
+    # Set database paths before uvicorn imports the application module.
+    os.environ["BTKIT_DB"] = str(Path(output_db).resolve())
+    if input_db:
+        os.environ["BTKIT_INPUT_DB"] = str(Path(input_db).resolve())
+
+    # Refuse to start if the port is already bound — catches both background and
+    # foreground cases before uvicorn tries and fails silently.
+    existing_pid = _pid_on_port(port)
+    if existing_pid:
+        typer.echo(
+            f"Error: port {port} is already in use by PID {existing_pid}. "
+            f"Run 'btkit dashboard --kill --port {port}' to stop it.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if background:
+        if not hasattr(os, "fork"):
+            typer.echo("Error: --background is not supported on this platform.", err=True)
+            raise typer.Exit(code=1)
+
+        pid = os.fork()
+        if pid != 0:
+            # Parent: record the child PID and exit.
+            # Use os._exit() — the only safe exit after fork(); raise/sys.exit
+            # would run atexit handlers and flush shared file descriptors in
+            # both processes, corrupting the child's stdio state.
+            _DASHBOARD_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _DASHBOARD_PID_FILE.write_text(str(pid))
+            typer.echo(f"Dashboard started in background (PID {pid})")
+            typer.echo(f"  http://localhost:{port}")
+            typer.echo(f"  Stop with:  btkit dashboard --kill")
+            os._exit(0)
+
+        # Child: detach from the terminal and silence stdio.
+        os.setsid()
+        devnull_fd = os.open(os.devnull, os.O_RDWR)
+        for fd in (sys.stdin.fileno(), sys.stdout.fileno(), sys.stderr.fileno()):
+            os.dup2(devnull_fd, fd)
+        os.close(devnull_fd)
+
+    uvicorn.run(
+        "btkit.analysis.api.app:app",
+        host="::",
+        port=port,
+        reload=debug,
+        log_level="info" if debug else "warning",
     )
 
 

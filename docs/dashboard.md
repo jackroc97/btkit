@@ -2,10 +2,18 @@
 
 ## Overview
 
-The btkit dashboard is a Dash web application launched with `btkit serve`:
+The btkit dashboard is a React single-page application served by a FastAPI backend,
+launched with `btkit dashboard`:
 
 ```
-btkit serve --output-db <path> [--input-db <path>] [--backtest-id N] [--port 8050]
+btkit dashboard --output-db <path> [--input-db <path>] [--port 8050]
+```
+
+To run the server in the background and return to the shell immediately:
+
+```
+btkit dashboard --output-db <path> --background
+btkit dashboard --kill          # stop it later
 ```
 
 There are two top-level views:
@@ -99,5 +107,5 @@ opens `/chart/<position_id>` — a full-screen Lightweight Charts page showing:
 - Hypothetical post-exit P&L (grey dashed line)
 - TP/SL dollar levels on the P&L pane
 
-Trade charts require `--input-db` to be passed to `btkit serve`. Without it, a
+Trade charts require `--input-db` to be passed to `btkit dashboard`. Without it, a
 watermark is shown and the underlying data panel is empty.
