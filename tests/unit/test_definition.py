@@ -225,6 +225,20 @@ class TestExitConfig:
         assert isinstance(cfg.stop_loss, StopLossConfig)
         assert isinstance(cfg.take_profit, TakeProfitConfig)
 
+    def test_leg_out_defaults_false(self):
+        cfg = ExitConfig()
+        assert cfg.leg_out is False
+
+    def test_leg_out_can_be_enabled(self):
+        cfg = ExitConfig(stop_loss=5.0, take_profit_pct=0.50, leg_out=True)
+        assert cfg.leg_out is True
+
+    def test_leg_out_round_trips_via_model_dump(self):
+        cfg = ExitConfig(stop_loss=5.0, take_profit_pct=0.50, leg_out=True)
+        dumped = cfg.model_dump()
+        restored = ExitConfig(**dumped)
+        assert restored.leg_out is True
+
 
 # ---------------------------------------------------------------------------
 # LegConfig

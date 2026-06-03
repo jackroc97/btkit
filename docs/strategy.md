@@ -96,6 +96,7 @@ strategy:
         #   min_exit_volume:  100
         #   lookback_minutes: 3
         #   pre_expiry_lock_minutes: 15
+        #   max_leg_stale_minutes:   5       # suppress TP/SL when any leg's last bar is older than N minutes
         #   slippage_model: spread
 ```
 

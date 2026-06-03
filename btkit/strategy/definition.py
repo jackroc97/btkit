@@ -185,6 +185,15 @@ class LiquidityConfig(BaseModel):
                              expiry close.  Expiry and DTE exits are unaffected.
                              None → lock disabled.
 
+    max_leg_stale_minutes:   Suppress all price-triggered exits (TP, SL, gap)
+                             when any leg's last real bar is older than this many
+                             minutes.  The exit scanner forward-fills stale leg
+                             prices, which creates artificially compressed spread
+                             marks that fire spurious TP exits.  Setting this to
+                             3–5 minutes blocks exits where the position mark is
+                             not a reliable market observation.
+                             None → staleness gate disabled.
+
     slippage_model:          "flat"   – use bar close as fill price (current
                                         behaviour, no extra cost).
                              "spread" – add half the bar's high-low range per
@@ -195,6 +204,7 @@ class LiquidityConfig(BaseModel):
     min_exit_volume: Optional[int] = None
     lookback_minutes: int = 3
     pre_expiry_lock_minutes: Optional[int] = None
+    max_leg_stale_minutes: Optional[int] = None
     slippage_model: Literal["flat", "spread"] = "flat"
 
     @property
@@ -206,9 +216,18 @@ class LiquidityConfig(BaseModel):
         return self.slippage_model == "spread"
 
     @property
+    def needs_staleness(self) -> bool:
+        return self.max_leg_stale_minutes is not None
+
+    @property
     def is_default(self) -> bool:
         """True when no liquidity constraints are active (original engine behaviour)."""
-        return not self.needs_volume and not self.needs_spread and self.pre_expiry_lock_minutes is None
+        return (
+            not self.needs_volume
+            and not self.needs_spread
+            and not self.needs_staleness
+            and self.pre_expiry_lock_minutes is None
+        )
 
 
 class ExitConfig(BaseModel):
@@ -219,6 +238,7 @@ class ExitConfig(BaseModel):
     expiry_exit: bool = True
     conditions: list[str] = []  # OR logic — position closes if any condition is true
     liquidity: LiquidityConfig = LiquidityConfig()
+    leg_out: bool = False  # when True, long leg(s) run to expiry after short leg exits at TP/SL
 
     @model_validator(mode="after")
     def validate_take_profit(self) -> ExitConfig:
