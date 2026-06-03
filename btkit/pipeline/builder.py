@@ -6,22 +6,26 @@ Build sequence:
                                          returns the exact set of instrument_ids
                                          that appear in price data
     1. _ingest_definitions(required_ids) — read all definition files in parallel
-                                           (one worker per zip archive), merge
+                                           (one worker per .dbn.zst file), merge
                                            results into a single instrument map
-    2. _ingest_ohlcv()        — read .dbn OHLCV files, write underlying_bars and
-                                option_bars (with definition metadata pre-joined)
+    2. _ingest_ohlcv()        — read .dbn OHLCV files in parallel batches, write
+                                underlying_bars and option_bars (with definition
+                                metadata pre-joined)
     3. _compute_greeks()      — run GreeksCalculator over option_bars
     4. _run_indicators()      — run each user indicator script via IndicatorRunner
 
 Parallelism strategy:
-    - Definition ingest: one ThreadPoolExecutor worker per zip archive. Each worker
-      opens its zip once, reads every *.definition.dbn.zst file sequentially, and
-      returns a partial {instrument_id → _InstrumentInfo} dict. Results are merged
-      in the main thread (first-seen wins; metadata is static so any snapshot gives
-      the correct values). This scales to multi-year datasets where the early-stop
-      optimisation saves very few files in practice.
+    - Definition ingest: one ThreadPoolExecutor worker per .dbn.zst file (not per
+      zip). Each worker opens its own ZipFile handle, reads one named file,
+      decompresses and parses it. Results are merged in the main thread (first-seen
+      wins). Because option/future metadata is static — strike, expiry, and
+      multiplier never change — any snapshot is equivalent and merge order does not
+      affect correctness.
 
-    - OHLCV ingest: one worker per zip archive, same pattern.
+    - OHLCV ingest: work units are (zip_path, filename) tuples. Files are processed
+      in batches of _OHLCV_BATCH_SIZE with _INGEST_WORKERS threads per batch.
+      After each batch the concatenated DataFrame is written to DuckDB and freed,
+      keeping peak memory to ~_OHLCV_BATCH_SIZE × 75 MB (≈2.4 GB for batch=32).
 
     - Greeks: days are processed in a pipelined ThreadPoolExecutor — the main thread
       reads each day's batch from DuckDB and submits the numba computation to the
@@ -43,7 +47,7 @@ import os
 import time
 import zipfile
 from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -60,10 +64,15 @@ try:
 except ImportError as exc:  # pragma: no cover
     raise ImportError("databento package required: pip install databento") from exc
 
-# Number of threads used to read and convert zip files in parallel.
+# Number of threads used for parallel file parsing.
 # I/O and C-extension work (dbn decompression, ndarray conversion) releases
 # the GIL so threads scale well here without process-spawn overhead.
 _INGEST_WORKERS = min(os.cpu_count() or 4, 8)
+
+# Number of .dbn.zst files parsed per write cycle in _ingest_ohlcv.
+# Peak memory per batch: _OHLCV_BATCH_SIZE × ~75 MB ≈ 2.4 GB at default.
+# Reduce to _INGEST_WORKERS * 2 if memory is tight.
+_OHLCV_BATCH_SIZE: int = _INGEST_WORKERS * 4
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +163,7 @@ class DatabaseBuilder:
         print(f"[timing] total:        {_fmt_elapsed(time.perf_counter() - t_total)}")
 
     # ------------------------------------------------------------------
-    # Step 1: Definitions
+    # Step 0: Pre-scan OHLCV IDs
     # ------------------------------------------------------------------
 
     def _collect_ohlcv_instrument_ids(self) -> set[int]:
@@ -162,42 +171,50 @@ class DatabaseBuilder:
         Lightweight pre-scan: read all OHLCV files and return the complete set of
         instrument_ids that appear in price data.
 
-        This set drives _ingest_definitions — we read definition files only until
-        every id here is resolved, rather than reading all daily snapshots. See the
-        module docstring for the full rationale.
-
-        Uses to_ndarray() (not to_df()) and processes zip files in parallel via
-        ThreadPoolExecutor for a significant speedup over the legacy pandas path.
+        Parallelises at the individual file level — each worker opens its own
+        ZipFile handle and reads exactly one .dbn.zst file.
         """
         zip_files = sorted(self.raw_data_path.glob("*.zip"))
+        work_units: list[tuple[Path, str]] = []
+        for zp in zip_files:
+            work_units.extend(_list_zip_ohlcv_files(zp))
+
         ids: set[int] = set()
         with ThreadPoolExecutor(max_workers=_INGEST_WORKERS) as pool:
-            for partial in pool.map(_scan_zip_for_ids, zip_files):
+            for partial in pool.map(_scan_file_for_ids, work_units):
                 ids.update(partial)
         return ids
 
+    # ------------------------------------------------------------------
+    # Step 1: Definitions
+    # ------------------------------------------------------------------
+
     def _ingest_definitions(self, required_ids: set[int]) -> None:
         """
-        Read all *.definition.dbn.zst files in parallel (one worker per zip archive)
+        Read all *.definition.dbn.zst files in parallel (one worker per file)
         and build self._instrument_map: instrument_id → _InstrumentInfo.
 
-        Each worker opens its zip once, reads every definition file inside it, and
-        returns a partial {instrument_id: _InstrumentInfo} dict. The main thread
-        merges all partial dicts (first-seen wins). Because option/future metadata
-        is static — strike, expiry, and multiplier never change — any snapshot is
-        equivalent and the merge order does not affect correctness.
+        Each worker opens its own ZipFile handle and reads exactly one file.
+        Results are merged in the main thread (first-seen wins). Because
+        option/future metadata is static any snapshot is equivalent.
 
         Only instrument_class F (future), C (call), and P (put) are kept.
-        Spreads, calendar spreads, and strategy instruments are filtered out.
         """
         zip_files = sorted(self.raw_data_path.glob("*.zip"))
         if not zip_files:
             raise FileNotFoundError(f"No zip files found in {self.raw_data_path}")
 
-        total_files = 0
+        work_units: list[tuple[Path, str]] = []
+        for zp in zip_files:
+            work_units.extend(_list_zip_definition_files(zp))
+
+        if not work_units:
+            raise FileNotFoundError(
+                f"No definition files found in zip archives under {self.raw_data_path}"
+            )
+
         with ThreadPoolExecutor(max_workers=_INGEST_WORKERS) as pool:
-            for partial_map, files_read in pool.map(_scan_zip_for_definitions, zip_files):
-                total_files += files_read
+            for partial_map in pool.map(_scan_definition_file, work_units):
                 for iid, info in partial_map.items():
                     if iid not in self._instrument_map:
                         self._instrument_map[iid] = info
@@ -211,7 +228,7 @@ class DatabaseBuilder:
 
         print(
             f"[ingest] Loaded {len(self._instrument_map):,} instruments "
-            f"from {total_files} definition file(s) across {len(zip_files)} zip(s)"
+            f"from {len(work_units)} definition file(s) across {len(zip_files)} zip(s)"
         )
 
     # ------------------------------------------------------------------
@@ -220,17 +237,17 @@ class DatabaseBuilder:
 
     def _ingest_ohlcv(self) -> None:
         """
-        Read all *.ohlcv-*.dbn.zst files one at a time, split rows into
-        underlying_bars and option_bars using the instrument_map built in
-        _ingest_definitions(), and write each file's rows immediately.
+        Read all *.ohlcv-*.dbn.zst files in parallel batches of _OHLCV_BATCH_SIZE,
+        split rows into underlying_bars and option_bars using the instrument_map,
+        and write each batch immediately before freeing it.
 
-        Processing per file avoids loading all files into memory at once,
-        which would be prohibitive for multi-month datasets.
+        Batched writes keep peak memory bounded: each batch holds at most
+        _OHLCV_BATCH_SIZE × ~75 MB of decompressed data at once.
         """
         if not self._instrument_map:
             raise RuntimeError("_ingest_ohlcv() called before _ingest_definitions()")
 
-        # Build metadata lookup DataFrames once — reused for every zip file.
+        # Build metadata lookup DataFrames once — reused for every batch.
         futures_meta = pl.DataFrame(
             [
                 {"instrument_id": iid, "expiration": info.expiration}
@@ -268,8 +285,16 @@ class DatabaseBuilder:
         if not zip_files:
             raise FileNotFoundError(f"No zip files found in {self.raw_data_path}")
 
+        # Pre-scan → flat (zip_path, filename) work units, sorted chronologically.
+        work_units: list[tuple[Path, str]] = []
+        for zp in zip_files:
+            work_units.extend(_list_zip_ohlcv_files(zp))
+
+        if not work_units:
+            print("[ingest] No OHLCV files found — nothing to write")
+            return
+
         # Pre-compute the max timestamp already in each table (once, before the loop).
-        # Rows strictly after this cutoff are unambiguously new and skip NOT EXISTS.
         if self.append:
             from datetime import timezone as _tz
             ub_cutoff = self._con.execute(
@@ -278,7 +303,6 @@ class DatabaseBuilder:
             ob_cutoff = self._con.execute(
                 "SELECT MAX(ts_event) FROM option_bars"
             ).fetchone()[0]
-            # Normalise to UTC so Polars can compare against Datetime("us", "UTC") columns.
             if ub_cutoff is not None:
                 ub_cutoff = ub_cutoff.astimezone(_tz.utc)
             if ob_cutoff is not None:
@@ -289,8 +313,6 @@ class DatabaseBuilder:
         else:
             ub_cutoff = ob_cutoff = None
 
-        # Symbol lookup — _dbn_to_polars no longer reads symbol from the store
-        # (to_ndarray() doesn't expose it). Join here from the instrument map instead.
         symbol_df = pl.DataFrame(
             {
                 "instrument_id": pl.Series(
@@ -305,20 +327,29 @@ class DatabaseBuilder:
 
         total_ub = total_ob = 0
         completed = 0
+
         with ThreadPoolExecutor(max_workers=_INGEST_WORKERS) as pool:
-            futures_zip = {
-                pool.submit(_process_zip_to_polars, zp): zp for zp in zip_files
-            }
-            for future in as_completed(futures_zip):
-                ohlcv = future.result()
-                completed += 1
-                if ohlcv is None:
+            for batch_start in range(0, len(work_units), _OHLCV_BATCH_SIZE):
+                batch = work_units[batch_start : batch_start + _OHLCV_BATCH_SIZE]
+                frames = [f for f in pool.map(_parse_ohlcv_file, batch) if f is not None]
+                completed += len(batch)
+
+                if not frames:
+                    print(
+                        f"\r[ingest] {completed}/{len(work_units)}  "
+                        f"ub={total_ub:,}  ob={total_ob:,}",
+                        end="", flush=True,
+                    )
                     continue
 
-                # Re-attach symbol from the instrument map.
+                ohlcv = pl.concat(frames).unique(
+                    subset=["ts_event", "instrument_id"], keep="first"
+                )
+                del frames
+
                 ohlcv = ohlcv.join(symbol_df, on="instrument_id", how="left")
 
-                # ── Underlying bars ────────────────────────────────────────────
+                # ── Underlying bars ────────────────────────────────────────
                 ub_raw = ohlcv.filter(
                     pl.col("instrument_id").is_in(underlying_ids)
                 ).select(
@@ -330,7 +361,7 @@ class DatabaseBuilder:
                      "open", "high", "low", "close", "volume"]
                 )
 
-                # ── Option bars ────────────────────────────────────────────────
+                # ── Option bars ────────────────────────────────────────────
                 opt_raw = ohlcv.filter(pl.col("instrument_id").is_in(option_ids))
                 if not opt_raw.is_empty():
                     ob = opt_raw.join(opt_meta, on="instrument_id", how="left").select(
@@ -348,18 +379,20 @@ class DatabaseBuilder:
                         "close": pl.Float64, "volume": pl.Int64,
                     })
 
+                del ohlcv, opt_raw
+
                 _write_df(self._con, "underlying_bars", ub,
                           skip_existing=self.append, cutoff_ts=ub_cutoff)
                 _write_df(self._con, "option_bars", ob,
                           skip_existing=self.append, cutoff_ts=ob_cutoff)
                 total_ub += len(ub)
                 total_ob += len(ob)
+                del ub, ob
 
                 print(
-                    f"\r[ingest] {completed}/{len(zip_files)}  "
+                    f"\r[ingest] {completed}/{len(work_units)}  "
                     f"ub={total_ub:,}  ob={total_ob:,}",
-                    end="",
-                    flush=True,
+                    end="", flush=True,
                 )
 
         print(f"\n[ingest] Wrote {total_ub:,} underlying bars, {total_ob:,} option bars")
@@ -389,7 +422,6 @@ class DatabaseBuilder:
         if not self.indicator_scripts:
             return
 
-        # Re-open a writable connection for indicator writes.
         con = duckdb.connect(str(self.db_path))
         try:
             underlyings = con.execute(
@@ -428,7 +460,100 @@ class DatabaseBuilder:
 
 
 # ---------------------------------------------------------------------------
-# Module-level helpers
+# Module-level helpers — pre-scan
+# ---------------------------------------------------------------------------
+
+
+def _list_zip_ohlcv_files(zip_path: Path) -> list[tuple[Path, str]]:
+    """Return sorted (zip_path, filename) tuples for OHLCV files within one zip."""
+    with zipfile.ZipFile(zip_path) as zf:
+        return [
+            (zip_path, name)
+            for name in sorted(zf.namelist())
+            if name.endswith(".dbn.zst") and ".ohlcv-" in name
+        ]
+
+
+def _list_zip_definition_files(zip_path: Path) -> list[tuple[Path, str]]:
+    """Return sorted (zip_path, filename) tuples for definition files within one zip."""
+    with zipfile.ZipFile(zip_path) as zf:
+        return [
+            (zip_path, name)
+            for name in sorted(zf.namelist())
+            if name.endswith(".dbn.zst") and ".definition." in name
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers — per-file workers (called via ThreadPoolExecutor.map)
+# ---------------------------------------------------------------------------
+
+
+def _scan_file_for_ids(work: tuple[Path, str]) -> set[int]:
+    """Return all instrument_ids found in one OHLCV .dbn.zst file."""
+    zip_path, filename = work
+    with zipfile.ZipFile(zip_path) as zf:
+        store = db_sdk.DBNStore.from_bytes(zf.read(filename))
+    return set(store.to_ndarray()["instrument_id"].tolist())
+
+
+def _scan_definition_file(work: tuple[Path, str]) -> dict[int, _InstrumentInfo]:
+    """
+    Parse one *.definition.dbn.zst file and return a partial instrument map.
+
+    Each call opens its own ZipFile handle (thread-safe independent descriptor).
+    from_bytes() (ZST decompression) is C-extension work that releases the GIL,
+    so workers on different files run truly in parallel.
+    """
+    zip_path, filename = work
+    with zipfile.ZipFile(zip_path) as zf:
+        arr = db_sdk.DBNStore.from_bytes(zf.read(filename)).to_ndarray()
+
+    result: dict[int, _InstrumentInfo] = {}
+    fcp_mask = np.isin(arr["instrument_class"], [b"F", b"C", b"P"])
+    for row in arr[fcp_mask]:
+        iid = int(row["instrument_id"])
+        if iid in result:
+            continue
+        icls = row["instrument_class"].decode("ascii")
+        exp_ns = int(row["expiration"])
+        exp_date = (
+            datetime.fromtimestamp(exp_ns / 1_000_000_000, tz=timezone.utc).date()
+            if 0 < exp_ns < 9_000_000_000_000_000_000
+            else None
+        )
+        right = icls if icls in ("C", "P") else None
+        strike = float(row["strike_price"]) / 1e9 if icls in ("C", "P") else None
+        uom = int(row["unit_of_measure_qty"])
+        result[iid] = _InstrumentInfo(
+            instrument_class=icls,
+            raw_symbol=row["raw_symbol"].decode("ascii").rstrip("\x00"),
+            expiration=exp_date,
+            strike_price=strike,
+            right=right,
+            multiplier=round(uom / 1e9) if uom > 0 else 50,
+            underlying_id=int(row["underlying_id"]),
+        )
+    return result
+
+
+def _parse_ohlcv_file(work: tuple[Path, str]) -> pl.DataFrame | None:
+    """
+    Parse one *.ohlcv-*.dbn.zst file and return a Polars DataFrame.
+    Returns None if the file contains no rows.
+
+    Each call opens its own ZipFile handle (thread-safe). No 'symbol' column is
+    included; the caller joins it from the instrument map after concatenation.
+    """
+    zip_path, filename = work
+    with zipfile.ZipFile(zip_path) as zf:
+        store = db_sdk.DBNStore.from_bytes(zf.read(filename))
+    df = _dbn_to_polars(store)
+    return df if not df.is_empty() else None
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
 # ---------------------------------------------------------------------------
 
 
@@ -441,7 +566,7 @@ def _dbn_to_polars(store) -> pl.DataFrame:
 
     Returns columns: ts_event, instrument_id, open, high, low, close, volume.
     'symbol' is intentionally omitted — to_ndarray() does not expose it. The
-    caller (DatabaseBuilder._ingest_ohlcv) joins symbol from the instrument map.
+    caller joins symbol from the instrument map.
 
     Price fields in the DBN format are fixed-point int64 scaled by 1e9; dividing
     by 1e9 recovers the floating-point price. ts_event is nanoseconds since the
@@ -463,91 +588,6 @@ def _dbn_to_polars(store) -> pl.DataFrame:
             "volume": pl.Series(arr["volume"].astype(np.int64)),
         }
     )
-
-
-
-def _scan_zip_for_definitions(
-    zip_path: Path,
-) -> tuple[dict[int, _InstrumentInfo], int]:
-    """
-    Read every *.definition.dbn.zst file inside one zip archive.
-
-    Returns (partial_map, files_read) where partial_map maps instrument_id →
-    _InstrumentInfo for all F/C/P instruments found. First occurrence per iid
-    is kept (files are sorted, so first occurrence is chronologically earliest).
-
-    Iterates rows with an early-exit dict check (if iid in result: continue).
-    After the first file all ~19k unique instruments are known, so subsequent
-    files become nearly 100% fast hash-lookup skips with no object allocation.
-    This is faster than a vectorised concat+unique approach, which accumulates
-    ~100 MB of intermediate arrays across a 95-file zip and incurs GC pressure.
-
-    from_bytes() (ZST decompression) is C-extension work that releases the GIL,
-    so workers on different zip files run truly in parallel.
-    """
-    result: dict[int, _InstrumentInfo] = {}
-    files_read = 0
-    with zipfile.ZipFile(zip_path) as zf:
-        for name in sorted(zf.namelist()):
-            if name.endswith(".dbn.zst") and ".definition." in name:
-                files_read += 1
-                arr = db_sdk.DBNStore.from_bytes(zf.read(name)).to_ndarray()
-                fcp_mask = np.isin(arr["instrument_class"], [b"F", b"C", b"P"])
-                for row in arr[fcp_mask]:
-                    iid = int(row["instrument_id"])
-                    if iid in result:
-                        continue
-                    icls = row["instrument_class"].decode("ascii")
-                    exp_ns = int(row["expiration"])
-                    exp_date = (
-                        datetime.fromtimestamp(exp_ns / 1_000_000_000, tz=timezone.utc).date()
-                        if 0 < exp_ns < 9_000_000_000_000_000_000
-                        else None
-                    )
-                    right = icls if icls in ("C", "P") else None
-                    strike = float(row["strike_price"]) / 1e9 if icls in ("C", "P") else None
-                    uom = int(row["unit_of_measure_qty"])
-                    result[iid] = _InstrumentInfo(
-                        instrument_class=icls,
-                        raw_symbol=row["raw_symbol"].decode("ascii").rstrip("\x00"),
-                        expiration=exp_date,
-                        strike_price=strike,
-                        right=right,
-                        multiplier=round(uom / 1e9) if uom > 0 else 50,
-                        underlying_id=int(row["underlying_id"]),
-                    )
-    return result, files_read
-
-
-def _scan_zip_for_ids(zip_path: Path) -> set[int]:
-    """Return all instrument_ids found in OHLCV files within one zip archive."""
-    ids: set[int] = set()
-    with zipfile.ZipFile(zip_path) as zf:
-        for name in sorted(zf.namelist()):
-            if name.endswith(".dbn.zst") and ".ohlcv-" in name:
-                store = db_sdk.DBNStore.from_bytes(zf.read(name))
-                ids.update(store.to_ndarray()["instrument_id"].tolist())
-    return ids
-
-
-def _process_zip_to_polars(zip_path: Path) -> pl.DataFrame | None:
-    """
-    Read one zip archive, convert all OHLCV .dbn.zst files to Polars, and
-    return a single deduplicated frame. Returns None if the zip has no OHLCV files.
-
-    Designed to run inside a ThreadPoolExecutor — all work is C-extension or I/O
-    that releases the GIL. The returned frame has no 'symbol' column; the caller
-    joins it from the instrument map.
-    """
-    frames: list[pl.DataFrame] = []
-    with zipfile.ZipFile(zip_path) as zf:
-        for name in sorted(zf.namelist()):
-            if name.endswith(".dbn.zst") and ".ohlcv-" in name:
-                store = db_sdk.DBNStore.from_bytes(zf.read(name))
-                frames.append(_dbn_to_polars(store))
-    if not frames:
-        return None
-    return pl.concat(frames).unique(subset=["ts_event", "instrument_id"], keep="first")
 
 
 def _fmt_elapsed(seconds: float) -> str:
@@ -573,8 +613,6 @@ def _write_df(
     When cutoff_ts is provided, rows strictly after that timestamp are
     unambiguously new and bypass the NOT EXISTS check entirely. Only rows at or
     before the cutoff (the potential overlap window) go through NOT EXISTS.
-    This avoids redundant index lookups for the bulk of new data in a typical
-    append where new dates extend well beyond existing coverage.
     """
     if df.is_empty():
         return
@@ -609,7 +647,6 @@ def _write_df(
             )
             con.unregister("_write_tmp")
     else:
-        # No cutoff info — check every row (safe fallback).
         con.register("_write_tmp", df)
         con.execute(
             f"""
