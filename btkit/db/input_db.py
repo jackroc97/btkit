@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS option_greeks (
     vega            DOUBLE
 );
 CREATE INDEX IF NOT EXISTS idx_option_greeks_lookup
-    ON option_greeks (underlying_id, ts_event, dte);
+    ON option_greeks (underlying_id, dte, ts_event);
 
 CREATE TABLE IF NOT EXISTS indicator_definition (
     id                  INTEGER PRIMARY KEY,
@@ -154,25 +154,22 @@ class InputDatabase:
         """
         Batch-loads bars for a set of option instrument IDs over [start, end].
         Used by ExitScanner to load all open-position legs in a single query.
-        Returns the same columns as option_bars.
+        Returns columns: ts_event, instrument_id, open, high, low, close, volume.
+
+        Intentionally omits columns not consumed by _compute_position_marks /
+        _adjust_leg_out_exits to reduce Arrow-transfer overhead. ORDER BY is
+        also omitted — callers sort by [entry_id, ts_event] in Polars anyway.
         """
-        ids_df = pl.DataFrame({"instrument_id": instrument_ids})
-        self._con.register("_leg_ids", ids_df)
-        try:
-            return self._con.execute(
-                """
-                SELECT ob.ts_event, ob.instrument_id, ob.underlying_id, ob.symbol,
-                       ob.expiration, ob.strike_price, ob."right", ob.multiplier,
-                       ob.open, ob.high, ob.low, ob.close, ob.volume
-                FROM option_bars ob
-                JOIN _leg_ids li ON ob.instrument_id = li.instrument_id
-                WHERE ob.ts_event >= ? AND ob.ts_event <= ?
-                ORDER BY ob.instrument_id, ob.ts_event
-                """,
-                [start, end],
-            ).pl()
-        finally:
-            self._con.unregister("_leg_ids")
+        id_list = ", ".join(str(int(x)) for x in instrument_ids)
+        return self._con.execute(
+            f"""
+            SELECT ts_event, instrument_id, open, high, low, close, volume
+            FROM option_bars
+            WHERE instrument_id IN ({id_list})
+              AND ts_event >= ? AND ts_event <= ?
+            """,
+            [start, end],
+        ).pl()
 
     # ------------------------------------------------------------------
     # Greeks / leg selection
@@ -248,60 +245,121 @@ class InputDatabase:
         per-leg, sourced from LegConfig.delta_tolerance / LegConfig.dte_tolerance.
         Returns one DataFrame for all legs tagged with a leg_name column; caller
         partitions by leg_name and picks the best match per ts_event.
+
+        Uses a two-phase approach so DuckDB can apply idx_option_greeks_lookup on
+        scalar underlying_id predicates, then the greeks result drives the
+        option_bars join as the build side.
         """
         ts_events = [t for t, _ in ts_event_underlying]
-        underlying_ids = [u for _, u in ts_event_underlying]
-
-        ts_df = pl.DataFrame(
-            {
-                "ts_event": pl.Series(ts_events, dtype=pl.Datetime("us", "UTC")),
-                "underlying_id": pl.Series(underlying_ids, dtype=pl.Int64),
-            }
-        )
-        params_df = pl.DataFrame(
-            {
-                "leg_name": [s["name"] for s in leg_specs],
-                "leg_right": [s["right"] for s in leg_specs],
-                "delta_lo": [
-                    float(s["target_delta"]) - float(s["delta_tolerance"]) for s in leg_specs
-                ],
-                "delta_hi": [
-                    float(s["target_delta"]) + float(s["delta_tolerance"]) for s in leg_specs
-                ],
-                "dte_lo": [int(s["target_dte"]) - int(s["dte_tolerance"]) for s in leg_specs],
-                "dte_hi": [int(s["target_dte"]) + int(s["dte_tolerance"]) for s in leg_specs],
-            }
-        )
-        self._con.register("_entry_ts", ts_df)
-        self._con.register("_leg_params", params_df)
         ts_min = min(ts_events)
         ts_max = max(ts_events)
-        try:
-            return self._con.execute(
+
+        # Global dte/delta bounds across all legs.
+        dte_lo = min(int(s["target_dte"]) - int(s["dte_tolerance"]) for s in leg_specs)
+        dte_hi = max(int(s["target_dte"]) + int(s["dte_tolerance"]) for s in leg_specs)
+        delta_lo = min(float(s["target_delta"]) - float(s["delta_tolerance"]) for s in leg_specs)
+        delta_hi = max(float(s["target_delta"]) + float(s["delta_tolerance"]) for s in leg_specs)
+
+        # Build per-underlying time ranges.
+        uid_ts_range: dict[int, list] = {}
+        for ts, uid in ts_event_underlying:
+            if uid not in uid_ts_range:
+                uid_ts_range[uid] = [ts, ts]
+            else:
+                if ts < uid_ts_range[uid][0]:
+                    uid_ts_range[uid][0] = ts
+                if ts > uid_ts_range[uid][1]:
+                    uid_ts_range[uid][1] = ts
+
+        # --- Phase 1: option_greeks only, per underlying_id ---
+        # Scalar `og.underlying_id = ?` lets DuckDB use idx_option_greeks_lookup.
+        # No Arrow-scan join here — a plain WHERE range scan is ~2.5× faster than
+        # the _uid_ts hash-join approach because DuckDB doesn't need to build or
+        # probe a large ts_event hash table.
+        greeks_frames: list[pl.DataFrame] = []
+        for uid, (uid_min, uid_max) in uid_ts_range.items():
+            df = self._con.execute(
                 """
-                SELECT lp.leg_name, og.ts_event, og.instrument_id, og.underlying_id,
-                       og.dte, og.iv, og.delta, og.gamma, og.theta, og.vega,
+                SELECT og.ts_event,
+                       og.instrument_id,
+                       CAST(og.underlying_id AS BIGINT) AS underlying_id,
+                       og.dte, og.iv, og.delta, og.gamma, og.theta, og.vega
+                FROM option_greeks og
+                WHERE og.underlying_id = ?
+                  AND og.dte          BETWEEN ? AND ?
+                  AND og.delta        BETWEEN ? AND ?
+                  AND og.ts_event    >= ?
+                  AND og.ts_event    <= ?
+                """,
+                [uid, dte_lo, dte_hi, delta_lo, delta_hi, uid_min, uid_max],
+            ).pl()
+            if not df.is_empty():
+                greeks_frames.append(df)
+
+        if not greeks_frames:
+            return pl.DataFrame()
+
+        greeks_df = pl.concat(greeks_frames)
+        if greeks_df.is_empty():
+            return pl.DataFrame()
+
+        # --- Phase 2: option_bars join with greeks as the build side ---
+        self._con.register("_greeks_df", greeks_df)
+        try:
+            combined = self._con.execute(
+                """
+                SELECT g.ts_event, g.instrument_id, g.underlying_id,
+                       g.dte, g.iv, g.delta, g.gamma, g.theta, g.vega,
                        ob.strike_price, ob.expiration, ob."right", ob.multiplier,
                        ob.symbol, ob.close
-                FROM option_greeks og
+                FROM _greeks_df g
                 JOIN option_bars ob
-                  ON og.instrument_id = ob.instrument_id
-                 AND og.ts_event      = ob.ts_event
-                JOIN _entry_ts et
-                  ON og.ts_event      = et.ts_event
-                 AND og.underlying_id = et.underlying_id
-                JOIN _leg_params lp
-                  ON ob."right"  = lp.leg_right
-                 AND og.dte     BETWEEN lp.dte_lo   AND lp.dte_hi
-                 AND og.delta   BETWEEN lp.delta_lo AND lp.delta_hi
-                WHERE og.ts_event BETWEEN ? AND ?
-                  AND ob.close IS NOT NULL
+                  ON ob.instrument_id = g.instrument_id
+                 AND ob.ts_event      = g.ts_event
+                 AND ob.close IS NOT NULL
+                WHERE ob.ts_event >= ? AND ob.ts_event <= ?
                 """,
                 [ts_min, ts_max],
             ).pl()
         finally:
-            self._con.unregister("_entry_ts")
-            self._con.unregister("_leg_params")
+            self._con.unregister("_greeks_df")
+
+        if combined.is_empty():
+            return pl.DataFrame()
+
+        # --- Phase 3: per-leg delta / right filter, tag with leg_name ---
+        leg_results: list[pl.DataFrame] = []
+        for spec in leg_specs:
+            dte_lo_l = int(spec["target_dte"]) - int(spec["dte_tolerance"])
+            dte_hi_l = int(spec["target_dte"]) + int(spec["dte_tolerance"])
+            d_lo = float(spec["target_delta"]) - float(spec["delta_tolerance"])
+            d_hi = float(spec["target_delta"]) + float(spec["delta_tolerance"])
+
+            leg_df = (
+                combined
+                .filter(
+                    (pl.col("right") == spec["right"])
+                    & (pl.col("dte") >= dte_lo_l)
+                    & (pl.col("dte") <= dte_hi_l)
+                    & (pl.col("delta") >= d_lo)
+                    & (pl.col("delta") <= d_hi)
+                )
+                .with_columns(pl.lit(spec["name"]).alias("leg_name"))
+            )
+            if not leg_df.is_empty():
+                leg_results.append(leg_df)
+
+        if not leg_results:
+            return pl.DataFrame()
+
+        return pl.concat(leg_results).select(
+            [
+                "leg_name", "ts_event", "instrument_id", "underlying_id",
+                "dte", "iv", "delta", "gamma", "theta", "vega",
+                "strike_price", "expiration", "right", "multiplier",
+                "symbol", "close",
+            ]
+        )
 
     def greeks_for_strike_legs(
         self,
@@ -319,14 +377,26 @@ class InputDatabase:
         scopes the search to the correct front-month futures contract at each bar.
 
         Returns the same column set as greeks_for_all_legs().
+
+        Uses the same two-phase per-underlying approach as greeks_for_all_legs()
+        to avoid Arrow-scan hash-join overhead. DTE bounds are derived from the
+        (ts_event, reference_expiration) pairs in strike_targets so the greeks
+        scan is as tight as greeks_for_all_legs().
         """
         ts_min = strike_targets["ts_event"].min()
         ts_max = strike_targets["ts_event"].max()
+
+        # Single query: the strike_targets Arrow scan (~150K rows) acts as the
+        # build side; its hash fits comfortably in L3 cache. DuckDB probes
+        # option_greeks and option_bars with zone-map pruning on ts_event.
         self._con.register("_strike_targets", strike_targets)
         try:
-            return self._con.execute(
+            result = self._con.execute(
                 """
-                SELECT st.leg_name, og.ts_event, og.instrument_id, og.underlying_id,
+                SELECT st.leg_name,
+                       og.ts_event,
+                       og.instrument_id,
+                       CAST(og.underlying_id AS BIGINT) AS underlying_id,
                        og.dte, og.iv, og.delta, og.gamma, og.theta, og.vega,
                        ob.strike_price, ob.expiration, ob."right", ob.multiplier,
                        ob.symbol, ob.close
@@ -340,13 +410,25 @@ class InputDatabase:
                  AND ob."right"                = st.right
                  AND ob.expiration             = st.reference_expiration
                  AND abs(ob.strike_price - st.target_strike) <= ?
+                 AND ob.close IS NOT NULL
                 WHERE og.ts_event BETWEEN ? AND ?
-                  AND ob.close IS NOT NULL
                 """,
                 [strike_tolerance, ts_min, ts_max],
             ).pl()
         finally:
             self._con.unregister("_strike_targets")
+
+        if result.is_empty():
+            return pl.DataFrame()
+
+        return result.select(
+            [
+                "leg_name", "ts_event", "instrument_id", "underlying_id",
+                "dte", "iv", "delta", "gamma", "theta", "vega",
+                "strike_price", "expiration", "right", "multiplier",
+                "symbol", "close",
+            ]
+        )
 
     # ------------------------------------------------------------------
     # Indicators
