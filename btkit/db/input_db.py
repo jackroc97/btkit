@@ -171,6 +171,108 @@ class InputDatabase:
             [start, end],
         ).pl()
 
+    def option_greeks_for_legs(
+        self,
+        instrument_ids: list[int],
+        start: datetime,
+        end: datetime,
+    ) -> pl.DataFrame:
+        """
+        Batch-loads greeks for a set of option instrument IDs over [start, end].
+        Used by ExitScanner to compute spread net vega for vega_exit conditions.
+        Returns columns: ts_event, instrument_id, vega.
+        """
+        id_list = ", ".join(str(int(x)) for x in instrument_ids)
+        return self._con.execute(
+            f"""
+            SELECT ts_event, instrument_id, vega
+            FROM option_greeks
+            WHERE instrument_id IN ({id_list})
+              AND ts_event >= ? AND ts_event <= ?
+            """,
+            [start, end],
+        ).pl()
+
+    def underlying_ids_for_options(
+        self,
+        instrument_ids: list[int],
+    ) -> dict[int, int]:
+        """
+        Return {option_instrument_id: underlying_instrument_id} for the given
+        option instrument IDs.  A single query against option_bars resolves the
+        exact futures contract each option settles against, as recorded by the
+        data vendor — more reliable than a roll-schedule heuristic near roll dates.
+        """
+        if not instrument_ids:
+            return {}
+        id_list = ", ".join(str(int(x)) for x in instrument_ids)
+        rows = self._con.execute(
+            f"""
+            SELECT DISTINCT instrument_id, underlying_id
+            FROM option_bars
+            WHERE instrument_id IN ({id_list})
+            """
+        ).fetchall()
+        return {int(row[0]): int(row[1]) for row in rows}
+
+    def settlement_closes_for_underlyings(
+        self,
+        underlying_ids: list[int],
+        start: datetime,
+        end: datetime,
+        tz_str: str,
+        close_time,
+    ) -> pl.DataFrame:
+        """
+        Return [underlying_id, exp_date, settlement_close] — one row per
+        (underlying, trading day) with the last bar close at or before
+        close_time (local time in tz_str) on each day.
+
+        Called once per scan() to pre-load all settlement prices for the
+        entire backtest window, eliminating per-cohort DB queries.
+        Returns an empty DataFrame when underlying_ids is empty or no bars exist.
+        """
+        if not underlying_ids:
+            return pl.DataFrame({
+                "underlying_id": pl.Series([], dtype=pl.Int64),
+                "exp_date": pl.Series([], dtype=pl.Date),
+                "settlement_close": pl.Series([], dtype=pl.Float64),
+            })
+        close_minutes = close_time.hour * 60 + close_time.minute
+        id_list = ", ".join(str(int(x)) for x in underlying_ids)
+        bars = self._con.execute(
+            f"""
+            SELECT ts_event, instrument_id, close
+            FROM underlying_bars
+            WHERE instrument_id IN ({id_list})
+              AND ts_event >= ? AND ts_event <= ?
+            """,
+            [start, end],
+        ).pl()
+        if bars.is_empty():
+            return pl.DataFrame({
+                "underlying_id": pl.Series([], dtype=pl.Int64),
+                "exp_date": pl.Series([], dtype=pl.Date),
+                "settlement_close": pl.Series([], dtype=pl.Float64),
+            })
+        return (
+            bars
+            .with_columns(pl.col("ts_event").dt.convert_time_zone(tz_str).alias("ts_local"))
+            .with_columns([
+                pl.col("ts_local").dt.date().alias("exp_date"),
+                (
+                    pl.col("ts_local").dt.hour().cast(pl.Int32) * 60
+                    + pl.col("ts_local").dt.minute().cast(pl.Int32)
+                ).alias("_minutes"),
+            ])
+            .filter(pl.col("_minutes") <= pl.lit(close_minutes))
+            .sort(["instrument_id", "ts_event"])
+            .group_by(["instrument_id", "exp_date"])
+            .agg(pl.col("close").last().alias("settlement_close"))
+            .rename({"instrument_id": "underlying_id"})
+            .select(["underlying_id", "exp_date", "settlement_close"])
+        )
+
     # ------------------------------------------------------------------
     # Greeks / leg selection
     # ------------------------------------------------------------------
