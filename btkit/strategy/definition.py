@@ -344,6 +344,23 @@ class TableCombinations(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Roll block — close and re-open position when threshold is crossed
+# ---------------------------------------------------------------------------
+
+
+class RollConfig(BaseModel):
+    window: EntryWindowConfig | None = None  # roll only within this time window; None = use trade entry window
+    dte: IntSweep | None = None              # roll when remaining DTE <= this value
+    vega: NumericSweep | None = None         # roll when spread net vega < this value
+
+    @model_validator(mode="after")
+    def at_least_one_trigger(self) -> RollConfig:
+        if self.dte is None and self.vega is None:
+            raise ValueError("roll requires at least one trigger: dte or vega")
+        return self
+
+
+# ---------------------------------------------------------------------------
 # Trade definition — one per independent position structure
 # ---------------------------------------------------------------------------
 
@@ -354,6 +371,7 @@ class TradeDefinition(BaseModel):
     entry: EntryConfig
     legs: list[LegConfig]
     exit: ExitConfig
+    roll: RollConfig | None = None
 
     @model_validator(mode="after")
     def leg_names_unique(self) -> TradeDefinition:
