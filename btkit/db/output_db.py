@@ -92,6 +92,46 @@ class OutputDatabase:
                 entry_dte       INTEGER
             )
         """)
+        self._con.execute("""
+            CREATE TABLE IF NOT EXISTS tag (
+                id      INTEGER PRIMARY KEY,
+                name    VARCHAR NOT NULL UNIQUE,
+                color   VARCHAR NOT NULL
+            )
+        """)
+        self._con.execute("""
+            CREATE TABLE IF NOT EXISTS backtest_tag (
+                backtest_id  INTEGER NOT NULL REFERENCES backtest(id),
+                tag_id       INTEGER NOT NULL REFERENCES tag(id),
+                PRIMARY KEY (backtest_id, tag_id)
+            )
+        """)
+        self._con.execute("""
+            CREATE TABLE IF NOT EXISTS position_continuation (
+                id                       INTEGER PRIMARY KEY,
+                position_id              INTEGER NOT NULL REFERENCES position(id),
+                continuation_entry_price DOUBLE  NOT NULL,
+                continuation_exit_time   TIMESTAMPTZ NOT NULL,
+                continuation_exit_price  DOUBLE  NOT NULL,
+                continuation_exit_reason VARCHAR NOT NULL,
+                continuation_pnl         DOUBLE  NOT NULL
+            )
+        """)
+        self._con.execute("""
+            CREATE TABLE IF NOT EXISTS api_cache (
+                cache_key   VARCHAR PRIMARY KEY,
+                result_json VARCHAR NOT NULL,
+                fingerprint VARCHAR NOT NULL,
+                cached_at   TIMESTAMPTZ DEFAULT now()
+            )
+        """)
+        self._con.execute("""
+            CREATE TABLE IF NOT EXISTS ui_preference (
+                pref_key   VARCHAR PRIMARY KEY,
+                value_json VARCHAR NOT NULL,
+                updated_at TIMESTAMPTZ DEFAULT now()
+            )
+        """)
 
     # ------------------------------------------------------------------
     # Study
@@ -192,6 +232,7 @@ class OutputDatabase:
         backtest_id: int,
         positions: pl.DataFrame,
         legs: pl.DataFrame,
+        continuations: pl.DataFrame | None = None,
     ) -> None:
         """
         Write position and position_leg rows for a completed backtest in a single
@@ -277,22 +318,55 @@ class OutputDatabase:
             self._con.execute("INSERT INTO position_leg SELECT * FROM _legs")
             self._con.unregister("_legs")
 
+        # Write continuations.
+        if continuations is not None and not continuations.is_empty():
+            cont_start = self._next_id("position_continuation")
+            cont_ids = list(range(cont_start, cont_start + len(continuations)))
+            position_ids_for_cont = [id_map[eid] for eid in continuations["entry_id"].to_list()]
+            cont_rows = continuations.with_columns(
+                pl.Series("id", cont_ids),
+                pl.Series("position_id", position_ids_for_cont),
+            ).select([
+                "id",
+                "position_id",
+                "continuation_entry_price",
+                "continuation_exit_time",
+                "continuation_exit_price",
+                "continuation_exit_reason",
+                "continuation_pnl",
+            ])
+            self._con.register("_continuations", cont_rows)
+            self._con.execute("INSERT INTO position_continuation SELECT * FROM _continuations")
+            self._con.unregister("_continuations")
+
     # ------------------------------------------------------------------
     # Delete
     # ------------------------------------------------------------------
 
     def delete_backtest(self, backtest_id: int) -> None:
-        """Permanently delete a backtest and all its positions and legs."""
+        """Permanently delete a backtest and all its positions, legs, and tags."""
+        self._con.execute(
+            "DELETE FROM position_continuation WHERE position_id IN "
+            "(SELECT id FROM position WHERE backtest_id = ?)",
+            [backtest_id],
+        )
         self._con.execute(
             "DELETE FROM position_leg WHERE position_id IN "
             "(SELECT id FROM position WHERE backtest_id = ?)",
             [backtest_id],
         )
         self._con.execute("DELETE FROM position WHERE backtest_id = ?", [backtest_id])
+        self._con.execute("DELETE FROM backtest_tag WHERE backtest_id = ?", [backtest_id])
         self._con.execute("DELETE FROM backtest WHERE id = ?", [backtest_id])
 
     def delete_study(self, study_id: int) -> None:
-        """Permanently delete a study and all its backtests, positions, and legs."""
+        """Permanently delete a study and all its backtests, positions, legs, and tags."""
+        self._con.execute(
+            "DELETE FROM position_continuation WHERE position_id IN "
+            "(SELECT id FROM position WHERE backtest_id IN "
+            "(SELECT id FROM backtest WHERE study_id = ?))",
+            [study_id],
+        )
         self._con.execute(
             "DELETE FROM position_leg WHERE position_id IN "
             "(SELECT id FROM position WHERE backtest_id IN "
@@ -301,6 +375,11 @@ class OutputDatabase:
         )
         self._con.execute(
             "DELETE FROM position WHERE backtest_id IN "
+            "(SELECT id FROM backtest WHERE study_id = ?)",
+            [study_id],
+        )
+        self._con.execute(
+            "DELETE FROM backtest_tag WHERE backtest_id IN "
             "(SELECT id FROM backtest WHERE study_id = ?)",
             [study_id],
         )
@@ -348,6 +427,52 @@ class OutputDatabase:
             }
             if "note" not in st_cols:
                 self._con.execute("ALTER TABLE study ADD COLUMN note VARCHAR")
+
+        if "tag" not in tables:
+            self._con.execute("""
+                CREATE TABLE IF NOT EXISTS tag (
+                    id      INTEGER PRIMARY KEY,
+                    name    VARCHAR NOT NULL UNIQUE,
+                    color   VARCHAR NOT NULL
+                )
+            """)
+        if "backtest_tag" not in tables:
+            self._con.execute("""
+                CREATE TABLE IF NOT EXISTS backtest_tag (
+                    backtest_id  INTEGER NOT NULL REFERENCES backtest(id),
+                    tag_id       INTEGER NOT NULL REFERENCES tag(id),
+                    PRIMARY KEY (backtest_id, tag_id)
+                )
+            """)
+        if "position_continuation" not in tables and "position" in tables:
+            self._con.execute("""
+                CREATE TABLE IF NOT EXISTS position_continuation (
+                    id                       INTEGER PRIMARY KEY,
+                    position_id              INTEGER NOT NULL REFERENCES position(id),
+                    continuation_entry_price DOUBLE  NOT NULL,
+                    continuation_exit_time   TIMESTAMPTZ NOT NULL,
+                    continuation_exit_price  DOUBLE  NOT NULL,
+                    continuation_exit_reason VARCHAR NOT NULL,
+                    continuation_pnl         DOUBLE  NOT NULL
+                )
+            """)
+        if "api_cache" not in tables:
+            self._con.execute("""
+                CREATE TABLE IF NOT EXISTS api_cache (
+                    cache_key   VARCHAR PRIMARY KEY,
+                    result_json VARCHAR NOT NULL,
+                    fingerprint VARCHAR NOT NULL,
+                    cached_at   TIMESTAMPTZ DEFAULT now()
+                )
+            """)
+        if "ui_preference" not in tables:
+            self._con.execute("""
+                CREATE TABLE IF NOT EXISTS ui_preference (
+                    pref_key   VARCHAR PRIMARY KEY,
+                    value_json VARCHAR NOT NULL,
+                    updated_at TIMESTAMPTZ DEFAULT now()
+                )
+            """)
 
     # ------------------------------------------------------------------
     # Lifecycle

@@ -99,6 +99,7 @@ class EntryConfig(BaseModel):
     min_credit: NumericSweep | None = None  # skip entry if open_mark < this
     max_debit: NumericSweep | None = None  # skip entry if open_mark > this
     max_entries_per_day: int | None = None  # cap re-entries per calendar day (None = unlimited)
+    no_reentry_after_loss: bool = False     # block same-day re-entry after a stop-loss exit
 
 
 # ---------------------------------------------------------------------------
@@ -235,10 +236,14 @@ class ExitConfig(BaseModel):
     take_profit: NumericSweep | TakeProfitConfig | None = None
     take_profit_pct: NumericSweep | None = None  # legacy top-level form; use take_profit.pct for new configs
     dte_exit: IntSweep | None = None
+    vega_exit: NumericSweep | None = None  # exit when spread net vega < this value
     expiry_exit: bool = True
     conditions: list[str] = []  # OR logic — position closes if any condition is true
     liquidity: LiquidityConfig = LiquidityConfig()
     leg_out: bool = False  # when True, long leg(s) run to expiry after short leg exits at TP/SL
+    allow_after_hours_exits: bool = False  # when True, TP/SL can trigger outside the session window
+    on_sl_long_continuation: bool = False  # when True, long leg runs under trailing stop after SL
+    long_trailing_stop_pct: float = 0.50   # trailing stop: exit if price pulls back this fraction from peak
 
     @model_validator(mode="after")
     def validate_take_profit(self) -> ExitConfig:
@@ -246,6 +251,16 @@ class ExitConfig(BaseModel):
         has_tp_pct = self.take_profit_pct is not None
         if has_tp and has_tp_pct:
             raise ValueError("take_profit and take_profit_pct are mutually exclusive")
+        return self
+
+    @model_validator(mode="after")
+    def validate_continuation(self) -> ExitConfig:
+        if self.on_sl_long_continuation and self.leg_out:
+            raise ValueError("on_sl_long_continuation and leg_out are mutually exclusive")
+        if self.on_sl_long_continuation and self.stop_loss is None:
+            raise ValueError("on_sl_long_continuation requires stop_loss to be configured")
+        if self.on_sl_long_continuation and not (0.0 < self.long_trailing_stop_pct < 1.0):
+            raise ValueError("long_trailing_stop_pct must be between 0 and 1 (exclusive)")
         return self
 
 
