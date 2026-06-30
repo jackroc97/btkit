@@ -123,9 +123,9 @@ class EntryScanner:
         if bars.is_empty():
             return _empty_entries_df()
 
-        # Indicators: use the front-month at the start of the universe.
-        start_underlying_id = self.db.front_future_id(root_symbol, universe.start_date, roll_days)
-        indicators = self._get_indicators(start_underlying_id, start_dt, end_dt)
+        # Indicators: query each distinct front-month contract so coverage is
+        # continuous across quarterly rolls (not just the first contract).
+        indicators = self._get_indicators_for_schedule(schedule, start_dt, end_dt)
 
         candidates = self._apply_window_filters(bars)
         if candidates.is_empty():
@@ -438,27 +438,38 @@ class EntryScanner:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _get_indicators(
+    def _get_indicators_for_schedule(
         self,
-        underlying_id: int | None,
+        schedule: pl.DataFrame,
         start_dt: datetime,
         end_dt: datetime,
     ) -> pl.DataFrame:
         """
         Return the indicators DataFrame to use for condition evaluation.
 
-        If the engine pre-loaded indicators, use those. Otherwise, fetch from DB
-        only when the trade actually has entry conditions that might reference
-        indicator columns. Returns an empty DataFrame when indicators are
-        definitely not needed or underlying_id is unknown.
+        Queries db.indicators() for every distinct underlying_id in the roll
+        schedule and concatenates the results, so indicator coverage is
+        continuous across quarterly contract rolls. If the engine pre-loaded
+        indicators those are used as-is (the caller already handled stitching).
+        Returns an empty DataFrame when no conditions are configured or no
+        indicators exist in the DB.
         """
         if self._preloaded_indicators is not None:
             return self._preloaded_indicators
 
-        if not self.trade.entry.conditions or underlying_id is None:
+        if not self.trade.entry.conditions:
             return pl.DataFrame()
 
-        return self.db.indicators(underlying_id, start_dt, end_dt)
+        frames = [
+            self.db.indicators(uid, start_dt, end_dt)
+            for uid in schedule["underlying_id"].unique().to_list()
+        ]
+        non_empty = [f for f in frames if not f.is_empty() and len(f.columns) > 1]
+        if not non_empty:
+            return pl.DataFrame()
+        if len(non_empty) == 1:
+            return non_empty[0].sort("ts_event")
+        return pl.concat(non_empty, how="diagonal").sort("ts_event")
 
 
 # ---------------------------------------------------------------------------
