@@ -805,6 +805,8 @@ always available when evaluating `exit.conditions`:
 | `open_mark` | Spread mark at entry time |
 | `spread_open_mark` | Spread mark at current bar open (gap detection) |
 | `_dte_now` | Remaining calendar days to expiration at this bar |
+| `_spread_vega` | Current bar net spread vega (Σ signed_qty × leg_vega); `null` when `vega_exit` / `roll.vega` is not configured |
+| `open_vega` | Spread vega at entry time; constant per position; `null` when vega is not computed (see above) |
 
 ### Arithmetic operators
 
@@ -906,6 +908,35 @@ study sweeps:
 ```yaml
 exit:
   vega_exit: [0.05, 0.10, 0.15, 0.20]   # 4-point sweep
+```
+
+### Relative vega thresholds via exit conditions
+
+When the desired exit threshold is a **fraction of the entry vega** rather than a fixed
+absolute value, use `open_vega` in `exit.conditions` instead of `vega_exit`:
+
+```yaml
+exit:
+  conditions:
+    # Exit when spread vega has decayed to 30% of entry vega
+    - "_spread_vega < 0.3 * open_vega"
+```
+
+`open_vega` is the spread net vega captured at the first greeks bar at or after entry
+time. It is a constant per position, so `0.3 * open_vega` evaluates to a fixed dollar
+amount for each trade and the comparison with the current `_spread_vega` works correctly.
+
+Both `_spread_vega` and `open_vega` are only populated when vega computation is active.
+The engine automatically activates the greeks fetch when any of the following are true:
+`exit.vega_exit` is set, `roll.vega` is set, **or** any condition string contains
+`_spread_vega` or `open_vega`. So using them in a condition is self-contained — no
+extra configuration required:
+
+```yaml
+exit:
+  dte_exit: 3
+  conditions:
+    - "_spread_vega < 0.3 * open_vega"
 ```
 
 ---

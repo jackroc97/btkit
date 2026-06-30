@@ -500,8 +500,10 @@ class ExitScanner:
         # Compute net vega = Σ(signed_qty × vega) per (entry_id, ts_event).
         # Required when vega_exit or roll.vega is configured. Fetched from
         # option_greeks over the cohort window; one query per cohort.
-        _need_vega = exit_cfg.vega_exit is not None or (
-            self.trade.roll is not None and self.trade.roll.vega is not None
+        _need_vega = (
+            exit_cfg.vega_exit is not None
+            or (self.trade.roll is not None and self.trade.roll.vega is not None)
+            or any("_spread_vega" in c or "open_vega" in c for c in exit_cfg.conditions)
         )
         if _need_vega:
             cohort_start = m["ts_event"].min()
@@ -547,6 +549,20 @@ class ExitScanner:
                             .agg(pl.col("_leg_vega_contrib").sum().alias("_spread_vega"))
                         )
                         m = m.join(spread_vega, on=["entry_id", "ts_event"], how="left")
+
+                        # open_vega: spread vega at the first bar at or after entry_time.
+                        # Exposed to exit conditions as a per-entry constant so users can
+                        # write relative thresholds, e.g. "_spread_vega < 0.3 * open_vega".
+                        open_vega_df = (
+                            m.filter(
+                                pl.col("_spread_vega").is_not_null()
+                                & (pl.col("ts_event") >= pl.col("entry_time"))
+                            )
+                            .sort(["entry_id", "ts_event"])
+                            .group_by("entry_id", maintain_order=True)
+                            .agg(pl.col("_spread_vega").first().alias("open_vega"))
+                        )
+                        m = m.join(open_vega_df, on="entry_id", how="left")
 
         m = m.with_columns(
             (
