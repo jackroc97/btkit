@@ -168,13 +168,6 @@ class BacktestEngine:
 
         universe = self.strategy.universe
         trade0 = self.strategy.trades[0]
-        underlying_id = self.input_db.front_future_id(
-            trade0.instrument.root_symbol,
-            universe.start_date,
-            trade0.instrument.roll_days_before_expiry,
-        )
-        if underlying_id is None:
-            return pl.DataFrame()
         tz = ZoneInfo(universe.session.timezone)
         start_dt = datetime(
             universe.start_date.year,
@@ -195,7 +188,28 @@ class BacktestEngine:
         ).astimezone(UTC)
         end_dt = base_end + timedelta(days=max_dte + 10)
 
-        return self.input_db.indicators(underlying_id, start_dt, end_dt)
+        # Build a roll schedule extended by the DTE buffer so positions that
+        # expire after universe.end_date still have indicator coverage.
+        end_date_buffered = end_dt.astimezone(tz).date()
+        schedule = self.input_db.front_future_schedule(
+            trade0.instrument.root_symbol,
+            universe.start_date,
+            end_date_buffered,
+            trade0.instrument.roll_days_before_expiry,
+        )
+        if schedule.is_empty():
+            return pl.DataFrame()
+
+        frames = [
+            self.input_db.indicators(uid, start_dt, end_dt)
+            for uid in schedule["underlying_id"].unique().to_list()
+        ]
+        non_empty = [f for f in frames if not f.is_empty() and len(f.columns) > 1]
+        if not non_empty:
+            return pl.DataFrame()
+        if len(non_empty) == 1:
+            return non_empty[0].sort("ts_event")
+        return pl.concat(non_empty, how="diagonal").sort("ts_event")
 
     def _next_trading_day_open(self, after: datetime) -> datetime:
         """

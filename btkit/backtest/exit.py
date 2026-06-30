@@ -1407,15 +1407,25 @@ class ExitScanner:
         if not self.trade.exit.conditions:
             return pl.DataFrame()
 
-        underlying_id = self.db.front_future_id(
+        schedule = self.db.front_future_schedule(
             self.trade.instrument.root_symbol,
             min_entry.date(),
+            end_dt.date(),
             self.trade.instrument.roll_days_before_expiry,
         )
-        if underlying_id is None:
+        if schedule.is_empty():
             return pl.DataFrame()
 
-        return self.db.indicators(underlying_id, min_entry, end_dt)
+        frames = [
+            self.db.indicators(uid, min_entry, end_dt)
+            for uid in schedule["underlying_id"].unique().to_list()
+        ]
+        non_empty = [f for f in frames if not f.is_empty() and len(f.columns) > 1]
+        if not non_empty:
+            return pl.DataFrame()
+        if len(non_empty) == 1:
+            return non_empty[0].sort("ts_event")
+        return pl.concat(non_empty, how="diagonal").sort("ts_event")
 
 
 # ---------------------------------------------------------------------------
