@@ -36,6 +36,14 @@ interface Leg {
   entry_dte: number | null
 }
 
+interface Continuation {
+  continuation_entry_price: number
+  continuation_exit_time:   string
+  continuation_exit_price:  number
+  continuation_exit_reason: string
+  continuation_pnl:         number
+}
+
 interface Position {
   id: number
   backtest_id: number
@@ -54,6 +62,7 @@ interface Position {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   params: Record<string, any>
   legs: Leg[]
+  continuation: Continuation | null
 }
 
 interface ChartData {
@@ -70,6 +79,26 @@ interface ChartData {
   exit_ts: number
   leg_mode: boolean
 }
+
+interface IndicatorMeta {
+  id: number
+  name: string
+}
+
+interface ActiveIndicator {
+  id: number
+  name: string
+  data: { time: number; value: number }[]
+  placement: 'overlay' | 'panel'
+  color: string
+}
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+const IND_COLORS = [
+  '#60a5fa', '#f59e0b', '#a78bfa', '#34d399',
+  '#fb923c', '#e879f9', '#2dd4bf', '#f472b6',
+]
 
 // ── Shared chart theme ────────────────────────────────────────────────────────
 
@@ -185,18 +214,21 @@ function Navbar() {
 
 export default function Trade() {
   const { id, tradeId } = useParams()
-  const [position, setPosition]         = useState<Position | null>(null)
-  const [chartData, setChartData]       = useState<ChartData | null>(null)
-  const [loading, setLoading]           = useState(true)
-  const [chartLoading, setChartLoading] = useState(false)
-  const [error, setError]               = useState<string | null>(null)
-  const [selectedLeg, setSelectedLeg]   = useState<'spread' | number>('spread')
-  const isFirstLegEffect                = useRef(true)
+  const [position, setPosition]               = useState<Position | null>(null)
+  const [chartData, setChartData]             = useState<ChartData | null>(null)
+  const [loading, setLoading]                 = useState(true)
+  const [chartLoading, setChartLoading]       = useState(false)
+  const [error, setError]                     = useState<string | null>(null)
+  const [selectedLeg, setSelectedLeg]         = useState<'spread' | number>('spread')
+  const [availableIndicators, setAvailableIndicators] = useState<IndicatorMeta[]>([])
+  const [activeIndicators, setActiveIndicators]       = useState<ActiveIndicator[]>([])
+  const isFirstLegEffect                      = useRef(true)
 
-  const priceRef = useRef<HTMLDivElement>(null)
-  const pnlRef   = useRef<HTMLDivElement>(null)
+  const priceRef          = useRef<HTMLDivElement>(null)
+  const pnlRef            = useRef<HTMLDivElement>(null)
+  const indicatorPanelRef = useRef<HTMLDivElement>(null)
 
-  // ── Initial load: position + default chart in parallel ───────────────────
+  // ── Initial load: position + chart + available indicators in parallel ─────
   useEffect(() => {
     if (!tradeId) return
     Promise.all([
@@ -208,10 +240,15 @@ export default function Trade() {
         if (!r.ok) throw new Error(`HTTP ${r.status}`)
         return r.json()
       }),
+      fetch(`/api/positions/${tradeId}/indicators`).then(r => {
+        if (!r.ok) return { indicators: [] }
+        return r.json()
+      }),
     ])
-      .then(([pos, chart]) => {
+      .then(([pos, chart, indList]) => {
         setPosition(pos)
         setChartData(chart)
+        setAvailableIndicators(indList.indicators ?? [])
       })
       .catch(e => setError(String(e)))
       .finally(() => setLoading(false))
@@ -231,16 +268,56 @@ export default function Trade() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedLeg])
 
+  // ── Indicator management ─────────────────────────────────────────────────
+  function handleAddIndicator(meta: IndicatorMeta) {
+    if (!tradeId || activeIndicators.find(a => a.id === meta.id)) return
+    const color = IND_COLORS[activeIndicators.length % IND_COLORS.length]
+    fetch(`/api/positions/${tradeId}/indicators/${meta.id}`)
+      .then(r => r.json())
+      .then((data: { time: number; value: number }[]) => {
+        setActiveIndicators(prev => [
+          ...prev,
+          { id: meta.id, name: meta.name, data, placement: 'overlay', color },
+        ])
+      })
+  }
+
+  function handleRemoveIndicator(indicatorId: number) {
+    setActiveIndicators(prev => prev.filter(a => a.id !== indicatorId))
+  }
+
+  function handleSetPlacement(indicatorId: number, placement: 'overlay' | 'panel') {
+    setActiveIndicators(prev =>
+      prev.map(a => a.id === indicatorId ? { ...a, placement } : a)
+    )
+  }
+
   // ── LWC chart effect ─────────────────────────────────────────────────────
   useEffect(() => {
     if (!chartData?.has_data || !priceRef.current || !pnlRef.current) return
     const priceEl = priceRef.current
     const pnlEl   = pnlRef.current
 
+    const estFormatter = (time: number) =>
+      new Date(time * 1000).toLocaleString('en-US', {
+        timeZone: 'America/New_York',
+        month:    'numeric',
+        day:      'numeric',
+        hour:     '2-digit',
+        minute:   '2-digit',
+        hour12:   false,
+      })
+
+    const hasOverlays = activeIndicators.some(i => i.placement === 'overlay')
+    const panelInds   = activeIndicators.filter(i => i.placement === 'panel')
+
     const priceChart = createChart(priceEl, {
       ...THEME,
       width:  priceEl.offsetWidth,
       height: 320,
+      localization: { timeFormatter: estFormatter },
+      // Show left scale only when there are overlay indicators on it
+      leftPriceScale: { visible: hasOverlays, borderColor: '#2a3245' },
       timeScale: {
         borderColor:    '#2a3245',
         visible:        false,
@@ -253,10 +330,13 @@ export default function Trade() {
       ...THEME,
       width:  pnlEl.offsetWidth,
       height: 180,
+      localization: { timeFormatter: estFormatter },
       timeScale: {
         borderColor:    '#2a3245',
         timeVisible:    true,
         secondsVisible: false,
+        // Hide time scale when indicator panel will be below (it shows its own)
+        visible: panelInds.length === 0,
       },
     })
 
@@ -299,6 +379,19 @@ export default function Trade() {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     createSeriesMarkers(candleSeries, chartData.markers.map(m => ({ ...m, time: m.time as any })) as any)
 
+    // ── Overlay indicators on the price chart (left scale) ───────────────
+    for (const ind of activeIndicators.filter(i => i.placement === 'overlay')) {
+      const s = priceChart.addSeries(LineSeries, {
+        color:            ind.color,
+        lineWidth:        1,
+        priceScaleId:     'left',
+        lastValueVisible: true,
+        priceLineVisible: false,
+      })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      s.setData(ind.data.map(p => ({ ...p, time: p.time as any })))
+    }
+
     // ── P&L series — baseline (green above 0, red below 0) ──────────────
     const fmtPnlLabel = (p: number) => `${p >= 0 ? '+' : ''}$${Math.abs(p).toFixed(0)}`
     const pnlSeries = pnlChart.addSeries(BaselineSeries, {
@@ -338,22 +431,48 @@ export default function Trade() {
       })
     }
 
-    // ── Sync time scales 1:1 ─────────────────────────────────────────────
-    let syncing = false
-    priceChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
-      if (syncing || !range) return
-      syncing = true
-      pnlChart.timeScale().setVisibleLogicalRange(range)
-      syncing = false
-    })
-    pnlChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
-      if (syncing || !range) return
-      syncing = true
-      priceChart.timeScale().setVisibleLogicalRange(range)
-      syncing = false
-    })
+    // ── Indicator panel chart ────────────────────────────────────────────
+    let indicatorChart: ReturnType<typeof createChart> | null = null
+    if (panelInds.length > 0 && indicatorPanelRef.current) {
+      const panelEl = indicatorPanelRef.current
+      indicatorChart = createChart(panelEl, {
+        ...THEME,
+        width:  panelEl.offsetWidth,
+        height: 120,
+        localization: { timeFormatter: estFormatter },
+        timeScale: {
+          borderColor:    '#2a3245',
+          timeVisible:    true,
+          secondsVisible: false,
+        },
+      })
+      for (const ind of panelInds) {
+        const s = indicatorChart.addSeries(LineSeries, {
+          color:            ind.color,
+          lineWidth:        1,
+          lastValueVisible: true,
+          priceLineVisible: false,
+        })
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        s.setData(ind.data.map(p => ({ ...p, time: p.time as any })))
+      }
+    }
 
-    // Sync crosshair
+    // ── Unified time-scale sync across all active charts ─────────────────
+    const charts = [priceChart, pnlChart, ...(indicatorChart ? [indicatorChart] : [])]
+    let syncing = false
+    for (const src of charts) {
+      src.timeScale().subscribeVisibleLogicalRangeChange(range => {
+        if (syncing || !range) return
+        syncing = true
+        for (const tgt of charts) {
+          if (tgt !== src) tgt.timeScale().setVisibleLogicalRange(range)
+        }
+        syncing = false
+      })
+    }
+
+    // Crosshair sync: price → P&L
     priceChart.subscribeCrosshairMove(param => {
       if (!param.time || !param.point) { pnlChart.clearCrosshairPosition(); return }
       const pnlVal = chartData.pnl.find(p => p.time === param.time)?.value ?? 0
@@ -374,6 +493,9 @@ export default function Trade() {
     const ro = new ResizeObserver(() => {
       priceChart.applyOptions({ width: priceEl.offsetWidth })
       pnlChart.applyOptions({ width: pnlEl.offsetWidth })
+      if (indicatorChart && indicatorPanelRef.current) {
+        indicatorChart.applyOptions({ width: indicatorPanelRef.current.offsetWidth })
+      }
     })
     ro.observe(priceEl)
 
@@ -381,9 +503,10 @@ export default function Trade() {
       ro.disconnect()
       priceChart.remove()
       pnlChart.remove()
+      indicatorChart?.remove()
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chartData])
+  }, [chartData, activeIndicators])
 
   // ── Render ───────────────────────────────────────────────────────────────
   if (loading) {
@@ -427,7 +550,9 @@ export default function Trade() {
       })()
     : null
 
-  const chartTitle = selectedLegLabel ? `${selectedLegLabel} · 1m` : `${underlying} · 1m`
+  const chartTitle  = selectedLegLabel ? `${selectedLegLabel} · 1m` : `${underlying} · 1m`
+  const panelInds   = activeIndicators.filter(i => i.placement === 'panel')
+  const overlayInds = activeIndicators.filter(i => i.placement === 'overlay')
 
   return (
     <div data-bs-theme="dark" style={{ minHeight: '100vh', background: '#0f1117' }}>
@@ -514,11 +639,68 @@ export default function Trade() {
               </div>
             </div>
           )}
+          {position.legs[0]?.entry_dte != null && (
+            <div className="col-6 col-sm-4 col-lg-2" style={{ minWidth: 100 }}>
+              <div className="btk-metric-card">
+                <div className="btk-metric-label">DTE</div>
+                <div className="btk-metric-value neutral">{position.legs[0].entry_dte}</div>
+              </div>
+            </div>
+          )}
         </div>
 
-        {/* Leg selector — sits above the chart card */}
-        {position.legs.length > 0 && (
-          <div className="d-flex align-items-center mb-2" style={{ gap: 8 }}>
+        {/* Long-leg continuation breakdown */}
+        {position.continuation && (
+          <div className="btk-chart-card mb-3 px-3 py-3">
+            <div className="btk-chart-title mb-2">Long Leg Continuation</div>
+            <div className="row g-2">
+              <div className="col-6 col-sm-4 col-lg-2" style={{ minWidth: 100 }}>
+                <div className="btk-metric-card">
+                  <div className="btk-metric-label">Entry Price</div>
+                  <div className="btk-metric-value neutral">${position.continuation.continuation_entry_price.toFixed(2)}</div>
+                </div>
+              </div>
+              <div className="col-6 col-sm-4 col-lg-2" style={{ minWidth: 100 }}>
+                <div className="btk-metric-card">
+                  <div className="btk-metric-label">Exit Price</div>
+                  <div className="btk-metric-value neutral">${position.continuation.continuation_exit_price.toFixed(2)}</div>
+                </div>
+              </div>
+              <div className="col-6 col-sm-4 col-lg-2" style={{ minWidth: 100 }}>
+                <div className="btk-metric-card">
+                  <div className="btk-metric-label">Exit</div>
+                  <div style={{ marginTop: 4 }}>
+                    <span className={`btk-exit-badge ${position.continuation.continuation_exit_reason.toLowerCase().replace(/\s+/g, '-')}`}>
+                      {position.continuation.continuation_exit_reason}
+                    </span>
+                  </div>
+                </div>
+              </div>
+              <div className="col-6 col-sm-4 col-lg-2" style={{ minWidth: 100 }}>
+                <div className="btk-metric-card">
+                  <div className="btk-metric-label">Cont. P&amp;L</div>
+                  <div className={`btk-metric-value ${position.continuation.continuation_pnl >= 0 ? 'positive' : 'negative'}`}>
+                    {fmtPnl(position.continuation.continuation_pnl)}
+                  </div>
+                </div>
+              </div>
+              <div className="col-6 col-sm-4 col-lg-2" style={{ minWidth: 100 }}>
+                <div className="btk-metric-card">
+                  <div className="btk-metric-label">Combined P&amp;L</div>
+                  <div className={`btk-metric-value ${(position.net_pnl + position.continuation.continuation_pnl) >= 0 ? 'positive' : 'negative'}`}>
+                    {fmtPnl(position.net_pnl + position.continuation.continuation_pnl)}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Chart controls row: leg selector + indicator selector */}
+        <div className="d-flex align-items-center flex-wrap mb-2" style={{ gap: 8 }}>
+
+          {/* Leg selector */}
+          {position.legs.length > 0 && (
             <div className="d-flex" style={{ background: '#1e2535', borderRadius: 6, padding: 2, gap: 2 }}>
               <button
                 onClick={() => setSelectedLeg('spread')}
@@ -548,8 +730,97 @@ export default function Trade() {
                 </button>
               ))}
             </div>
-          </div>
-        )}
+          )}
+
+          {/* Indicator selector + active indicator pills — only shown when chart has data */}
+          {hasChart && availableIndicators.length > 0 && (
+            <>
+              {/* Divider */}
+              <div style={{ width: 1, height: 24, background: '#2a3245' }} />
+
+              {/* Dropdown to add an indicator */}
+              <select
+                value=""
+                onChange={e => {
+                  const idNum = parseInt(e.target.value)
+                  if (!isNaN(idNum)) {
+                    const meta = availableIndicators.find(a => a.id === idNum)
+                    if (meta) handleAddIndicator(meta)
+                  }
+                  e.currentTarget.value = ''
+                }}
+                style={{
+                  background: '#1e2535', border: '1px solid #2a3245', borderRadius: 6,
+                  color: activeIndicators.length === 0 ? '#64748b' : '#94a3b8',
+                  fontSize: '0.75rem', padding: '4px 8px', cursor: 'pointer',
+                  height: 30,
+                }}
+              >
+                <option value="">+ Indicator…</option>
+                {availableIndicators
+                  .filter(a => !activeIndicators.find(i => i.id === a.id))
+                  .map(a => (
+                    <option key={a.id} value={a.id}>{a.name}</option>
+                  ))}
+              </select>
+
+              {/* Active indicator pills */}
+              {activeIndicators.map(ind => (
+                <div
+                  key={ind.id}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 5,
+                    background: '#1e2535', borderRadius: 6, padding: '3px 6px 3px 8px',
+                    border: '1px solid #2a3245',
+                  }}
+                >
+                  {/* Color dot */}
+                  <span style={{ width: 7, height: 7, borderRadius: '50%', background: ind.color, flexShrink: 0 }} />
+                  {/* Name */}
+                  <span style={{ fontSize: '0.72rem', color: '#94a3b8', fontFamily: 'ui-monospace, monospace' }}>
+                    {ind.name}
+                  </span>
+                  {/* Placement toggle */}
+                  <div
+                    style={{
+                      display: 'flex', background: '#0f1117', borderRadius: 4,
+                      padding: 1, gap: 1, marginLeft: 2,
+                    }}
+                  >
+                    {(['overlay', 'panel'] as const).map(p => (
+                      <button
+                        key={p}
+                        onClick={() => handleSetPlacement(ind.id, p)}
+                        title={p === 'overlay' ? 'Overlay on price chart' : 'Show as sub-chart'}
+                        style={{
+                          background: ind.placement === p ? '#2563eb' : 'transparent',
+                          border: 'none', borderRadius: 3, padding: '2px 5px',
+                          color: ind.placement === p ? '#fff' : '#475569',
+                          cursor: 'pointer', fontSize: '0.65rem', fontWeight: 600,
+                          transition: 'background 0.12s, color 0.12s',
+                          lineHeight: 1.4,
+                        }}
+                      >
+                        {p === 'overlay' ? '⬆' : '⬇'}
+                      </button>
+                    ))}
+                  </div>
+                  {/* Remove */}
+                  <button
+                    onClick={() => handleRemoveIndicator(ind.id)}
+                    style={{
+                      background: 'none', border: 'none', color: '#475569',
+                      cursor: 'pointer', padding: '0 2px', fontSize: '0.85rem', lineHeight: 1,
+                    }}
+                    title="Remove indicator"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </>
+          )}
+        </div>
 
         {/* Chart area */}
         {!hasChart ? (
@@ -581,11 +852,29 @@ export default function Trade() {
             <div className="d-flex align-items-center justify-content-between px-3 pt-3 pb-2">
               <span className="btk-chart-title">{chartTitle}</span>
               <div className="d-flex gap-3 align-items-center" style={{ fontSize: '0.72rem', color: '#64748b' }}>
+                {overlayInds.map(ind => (
+                  <span key={ind.id} style={{ color: ind.color }}>
+                    — {ind.name}
+                  </span>
+                ))}
                 <span><span style={{ color: '#4ade80' }}>▲</span> Entry</span>
                 <span><span style={{ color: chartData?.markers[1]?.color ?? '#94a3b8' }}>▼</span> Exit</span>
               </div>
             </div>
             <div ref={priceRef} />
+
+            {/* Indicator panel pane — always mounted, hidden when empty */}
+            <div style={{ display: panelInds.length > 0 ? 'block' : 'none', borderTop: '1px solid #2a3245' }}>
+              <div
+                className="d-flex align-items-center gap-3 px-3 pt-2 pb-1"
+                style={{ fontSize: '0.68rem', fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#64748b' }}
+              >
+                {panelInds.map(ind => (
+                  <span key={ind.id} style={{ color: ind.color }}>— {ind.name}</span>
+                ))}
+              </div>
+              <div ref={indicatorPanelRef} />
+            </div>
 
             {/* P&L pane */}
             <div style={{ borderTop: '1px solid #2a3245' }}>
