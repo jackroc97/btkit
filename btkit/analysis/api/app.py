@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .routes import home, detail, chart, compare
+from .routes import home, detail, chart, compare, tags, preferences, indicators
 
 STATIC = Path(__file__).parent.parent / "static"
 
@@ -15,15 +15,18 @@ app = FastAPI(title="btkit", version="2.0.0", docs_url="/api/docs")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
 )
 
 # ── API routes ────────────────────────────────────────────────────────────────
-app.include_router(home.router, prefix="/api")
+app.include_router(home.router,   prefix="/api")
 app.include_router(detail.router, prefix="/api")
-app.include_router(chart.router,   prefix="/api")
+app.include_router(chart.router,  prefix="/api")
 app.include_router(compare.router, prefix="/api")
+app.include_router(tags.router,        prefix="/api")
+app.include_router(preferences.router, prefix="/api")
+app.include_router(indicators.router,  prefix="/api")
 
 # ── Static assets (hashed filenames — long-lived) ────────────────────────────
 if (STATIC / "assets").exists():
