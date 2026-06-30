@@ -49,12 +49,15 @@ def parse_condition(expr: str) -> pl.Expr:
     """
     Parse a condition string into a Polars expression.
 
-    Supported syntax (MVP):
+    Supported syntax:
         Simple comparisons:  "rsi_14 < 40"
         Boolean operators:   "rsi_14 < 40 and vix_close < 30"
         Not:                 "not rsi_14 > 60"
         Leg properties:      "short_put.delta > -0.30"  → pl.col("leg_short_put_delta")
                              "short_put.strike < 5800"  → pl.col("leg_short_put_strike_price")
+        Arithmetic:          "position_mark - open_mark >= 2.0 * abs(open_mark)"
+                             "+", "-", "*", "/" all supported
+        abs():               "abs(delta) < 0.30"  (the only supported function call)
 
     Identifiers are resolved to column names. Dotted names (leg.field) are
     converted to underscore form (leg_field) for use in the wide joined DataFrame.
@@ -107,6 +110,28 @@ def _ast_to_polars(node, source: str) -> pl.Expr:
         else:
             raise ValueError(f"Unsupported boolean operator in: {source!r}")
         return result
+
+    if isinstance(node, _ast.BinOp):
+        left  = _ast_to_polars(node.left,  source)
+        right = _ast_to_polars(node.right, source)
+        op = node.op
+        if isinstance(op, _ast.Add):  return left + right
+        if isinstance(op, _ast.Sub):  return left - right
+        if isinstance(op, _ast.Mult): return left * right
+        if isinstance(op, _ast.Div):  return left / right
+        raise ValueError(f"Unsupported arithmetic operator in: {source!r}")
+
+    if isinstance(node, _ast.Call):
+        if (
+            isinstance(node.func, _ast.Name)
+            and node.func.id == "abs"
+            and len(node.args) == 1
+            and not node.keywords
+        ):
+            return _ast_to_polars(node.args[0], source).abs()
+        raise ValueError(
+            f"Only abs() is supported as a function call in: {source!r}"
+        )
 
     if isinstance(node, _ast.UnaryOp):
         if isinstance(node.op, _ast.Not):
