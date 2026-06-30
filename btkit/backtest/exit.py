@@ -11,9 +11,10 @@ Exit priority order (see docs/strategy.md):
     3. Stop loss
     4. Take profit
     5. Indicator condition (exit.conditions, OR logic)
-    6. Vega exit (spread net vega threshold)
-    7. DTE exit
-    8. Expiry
+    6. Roll (close + re-open at fresh delta)
+    7. Vega exit (spread net vega threshold)
+    8. DTE exit
+    9. Expiry
 
 Fill price rules: docs/fill_price_and_costs.md.
 
@@ -497,9 +498,14 @@ class ExitScanner:
 
         # ── Spread vega ───────────────────────────────────────────────────
         # Compute net vega = Σ(signed_qty × vega) per (entry_id, ts_event).
-        # Required when vega_exit is configured. Fetched from option_greeks
-        # over the cohort window to avoid a per-entry DB round-trip.
-        if exit_cfg.vega_exit is not None:
+        # Required when vega_exit or roll.vega is configured. Fetched from
+        # option_greeks over the cohort window; one query per cohort.
+        _need_vega = (
+            exit_cfg.vega_exit is not None
+            or (self.trade.roll is not None and self.trade.roll.vega is not None)
+            or any("_spread_vega" in c or "open_vega" in c for c in exit_cfg.conditions)
+        )
+        if _need_vega:
             cohort_start = m["ts_event"].min()
             cohort_end   = m["ts_event"].max()
             instr_ids: list[int] = []
@@ -543,6 +549,20 @@ class ExitScanner:
                             .agg(pl.col("_leg_vega_contrib").sum().alias("_spread_vega"))
                         )
                         m = m.join(spread_vega, on=["entry_id", "ts_event"], how="left")
+
+                        # open_vega: spread vega at the first bar at or after entry_time.
+                        # Exposed to exit conditions as a per-entry constant so users can
+                        # write relative thresholds, e.g. "_spread_vega < 0.3 * open_vega".
+                        open_vega_df = (
+                            m.filter(
+                                pl.col("_spread_vega").is_not_null()
+                                & (pl.col("ts_event") >= pl.col("entry_time"))
+                            )
+                            .sort(["entry_id", "ts_event"])
+                            .group_by("entry_id", maintain_order=True)
+                            .agg(pl.col("_spread_vega").first().alias("open_vega"))
+                        )
+                        m = m.join(open_vega_df, on="entry_id", how="left")
 
         m = m.with_columns(
             (
@@ -746,6 +766,26 @@ class ExitScanner:
         else:
             m = m.with_columns(pl.lit(False).alias("_vega_exit"))
 
+        roll_cfg = self.trade.roll
+        if roll_cfg is not None:
+            roll_window = roll_cfg.window or self.trade.entry.window
+            roll_start_sec = roll_window.start.hour * 3600 + roll_window.start.minute * 60
+            roll_end_sec   = roll_window.end.hour   * 3600 + roll_window.end.minute   * 60
+            _in_roll_window = (
+                (pl.col("_local_sec") >= pl.lit(roll_start_sec))
+                & (pl.col("_local_sec") <= pl.lit(roll_end_sec))
+            )
+            roll_trigger = pl.lit(False)
+            if roll_cfg.dte is not None:
+                roll_trigger = roll_trigger | (pl.col("_dte_now") <= pl.lit(int(roll_cfg.dte)))
+            if roll_cfg.vega is not None and "_spread_vega" in m.columns:
+                roll_trigger = roll_trigger | (pl.col("_spread_vega") < pl.lit(float(roll_cfg.vega)))
+            m = m.with_columns(
+                (roll_trigger & _in_roll_window).alias("_roll")
+            )
+        else:
+            m = m.with_columns(pl.lit(False).alias("_roll"))
+
         if exit_cfg.expiry_exit:
             expiry_expr = (
                 pl.col("ts_event").dt.convert_time_zone(tz_str).dt.date()
@@ -770,12 +810,14 @@ class ExitScanner:
             .then(pl.lit(4))
             .when(pl.col("_condition"))
             .then(pl.lit(5))
-            .when(pl.col("_vega_exit"))
+            .when(pl.col("_roll"))
             .then(pl.lit(6))
-            .when(pl.col("_dte_exit"))
+            .when(pl.col("_vega_exit"))
             .then(pl.lit(7))
-            .when(pl.col("_expiry"))
+            .when(pl.col("_dte_exit"))
             .then(pl.lit(8))
+            .when(pl.col("_expiry"))
+            .then(pl.lit(9))
             .otherwise(pl.lit(None).cast(pl.Int32))
             .alias("_priority")
         )
@@ -826,7 +868,7 @@ class ExitScanner:
             pl.when(pl.col("_priority").is_in([1, 2]))
             .then(pl.col("spread_open_mark") + slippage)
             .when(
-                (pl.col("_priority") == 8) & pl.col("settlement_mark").is_not_null()
+                (pl.col("_priority") == 9) & pl.col("settlement_mark").is_not_null()
             )
             .then(pl.col("settlement_mark"))
             .otherwise(_bar_mark_clipped)
@@ -843,8 +885,10 @@ class ExitScanner:
                 .when(pl.col("_priority") == 5)
                 .then(pl.lit("condition"))
                 .when(pl.col("_priority") == 6)
-                .then(pl.lit("vega_exit"))
+                .then(pl.lit("roll"))
                 .when(pl.col("_priority") == 7)
+                .then(pl.lit("vega_exit"))
+                .when(pl.col("_priority") == 8)
                 .then(pl.lit("dte_exit"))
                 .otherwise(pl.lit("expiry"))
                 .alias("exit_reason"),
