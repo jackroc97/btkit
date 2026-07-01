@@ -196,6 +196,7 @@ take_profit_pct: [null, 0.70]       # 2 combos: no TP, 70% of open mark
 | `vega_exit` | `exit` |
 | `roll.dte` | `roll` |
 | `roll.vega` | `roll` |
+| `roll.conditions` | `roll` (each element is a string, not swept) |
 
 A strategy with `delta: [0.20, 0.25, 0.30]` and `dte: [30, 45]` expands to
 3 × 2 = 6 combinations. The `matrix.max_combinations` guard raises an error before
@@ -928,9 +929,9 @@ amount for each trade and the comparison with the current `_spread_vega` works c
 
 Both `_spread_vega` and `open_vega` are only populated when vega computation is active.
 The engine automatically activates the greeks fetch when any of the following are true:
-`exit.vega_exit` is set, `roll.vega` is set, **or** any condition string contains
-`_spread_vega` or `open_vega`. So using them in a condition is self-contained — no
-extra configuration required:
+`exit.vega_exit` is set, `roll.vega` is set, **or** any string in `exit.conditions` or
+`roll.conditions` contains `_spread_vega` or `open_vega`. So using them in a condition
+is self-contained — no extra configuration required:
 
 ```yaml
 exit:
@@ -1053,12 +1054,15 @@ condition and DTE exits). The slippage model configured in `exit.liquidity` appl
 
 ### Sweepability
 
-`roll.dte` and `roll.vega` are both sweepable:
+`roll.dte` and `roll.vega` are sweepable. `roll.conditions` is not — condition strings
+are not swept because they contain arbitrary expressions, not scalar values:
 
 ```yaml
 roll:
   dte:  [7, 10, 14]   # 3-point sweep on roll DTE threshold
   vega: 0.15
+  conditions:
+    - "position_mark - open_mark >= 10.0"   # not swept; same string in all combinations
 ```
 
 ### Full example: put-backspread with roll and vega management
