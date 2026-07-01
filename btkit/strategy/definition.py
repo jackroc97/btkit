@@ -352,11 +352,12 @@ class RollConfig(BaseModel):
     window: EntryWindowConfig | None = None  # roll only within this time window; None = use trade entry window
     dte: IntSweep | None = None              # roll when remaining DTE <= this value
     vega: NumericSweep | None = None         # roll when spread net vega < this value
+    conditions: list[str] = []              # roll when any condition expression is true (same namespace as exit.conditions)
 
     @model_validator(mode="after")
     def at_least_one_trigger(self) -> RollConfig:
-        if self.dte is None and self.vega is None:
-            raise ValueError("roll requires at least one trigger: dte or vega")
+        if self.dte is None and self.vega is None and not self.conditions:
+            raise ValueError("roll requires at least one trigger: dte, vega, or conditions")
         return self
 
 

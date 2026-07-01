@@ -504,6 +504,8 @@ class ExitScanner:
             exit_cfg.vega_exit is not None
             or (self.trade.roll is not None and self.trade.roll.vega is not None)
             or any("_spread_vega" in c or "open_vega" in c for c in exit_cfg.conditions)
+            or (self.trade.roll is not None
+                and any("_spread_vega" in c or "open_vega" in c for c in self.trade.roll.conditions))
         )
         if _need_vega:
             cohort_start = m["ts_event"].min()
@@ -780,6 +782,8 @@ class ExitScanner:
                 roll_trigger = roll_trigger | (pl.col("_dte_now") <= pl.lit(int(roll_cfg.dte)))
             if roll_cfg.vega is not None and "_spread_vega" in m.columns:
                 roll_trigger = roll_trigger | (pl.col("_spread_vega") < pl.lit(float(roll_cfg.vega)))
+            for cond_str in roll_cfg.conditions:
+                roll_trigger = roll_trigger | parse_condition(cond_str)
             m = m.with_columns(
                 (roll_trigger & _in_roll_window).alias("_roll")
             )

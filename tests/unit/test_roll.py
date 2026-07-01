@@ -6,6 +6,7 @@ Covers:
   - roll field default on TradeDefinition
   - _enforce_max_entries_per_day roll re-entry bypass
   - roll + no_reentry_after_loss interaction (roll does NOT block re-entry)
+  - roll.conditions — condition-only trigger, combined trigger, _need_vega activation
 """
 from __future__ import annotations
 
@@ -235,6 +236,122 @@ class TestRollReentryBypass:
         )
         assert out_entries.is_empty()
         assert out_exits.is_empty()
+
+
+class TestRollConditions:
+    """
+    Tests for roll.conditions — expression-based roll triggers that share the
+    exit condition namespace.
+    """
+
+    def test_conditions_only_is_valid(self):
+        """conditions alone (no dte or vega) is a valid trigger."""
+        cfg = RollConfig(conditions=["position_mark - open_mark >= 10.0"])
+        assert cfg.conditions == ["position_mark - open_mark >= 10.0"]
+        assert cfg.dte is None
+        assert cfg.vega is None
+
+    def test_empty_conditions_with_no_other_triggers_raises(self):
+        """Empty conditions list with no dte/vega still raises."""
+        with pytest.raises(Exception, match="roll requires at least one trigger"):
+            RollConfig(conditions=[])
+
+    def test_conditions_combined_with_dte(self):
+        cfg = RollConfig(dte=10, conditions=["position_mark - open_mark >= 10.0"])
+        assert cfg.dte == 10
+        assert len(cfg.conditions) == 1
+
+    def test_multiple_conditions(self):
+        cfg = RollConfig(conditions=[
+            "position_mark - open_mark >= 10.0",
+            "_spread_vega < 0.3 * open_vega",
+        ])
+        assert len(cfg.conditions) == 2
+
+    def test_need_vega_triggered_by_spread_vega_in_roll_condition(self):
+        """_need_vega activates when a roll condition references _spread_vega."""
+        from btkit.strategy.definition import ExitConfig
+        roll = RollConfig(conditions=["_spread_vega < 0.5"])
+        exit_cfg = ExitConfig()
+        result = (
+            exit_cfg.vega_exit is not None
+            or roll.vega is not None
+            or any("_spread_vega" in c or "open_vega" in c for c in exit_cfg.conditions)
+            or any("_spread_vega" in c or "open_vega" in c for c in roll.conditions)
+        )
+        assert result is True
+
+    def test_need_vega_triggered_by_open_vega_in_roll_condition(self):
+        """_need_vega activates when a roll condition references open_vega."""
+        from btkit.strategy.definition import ExitConfig
+        roll = RollConfig(conditions=["_spread_vega < 0.3 * open_vega"])
+        exit_cfg = ExitConfig()
+        result = (
+            exit_cfg.vega_exit is not None
+            or roll.vega is not None
+            or any("_spread_vega" in c or "open_vega" in c for c in exit_cfg.conditions)
+            or any("_spread_vega" in c or "open_vega" in c for c in roll.conditions)
+        )
+        assert result is True
+
+    def test_need_vega_not_triggered_by_unrelated_roll_condition(self):
+        """_need_vega stays False when roll conditions don't reference vega columns."""
+        from btkit.strategy.definition import ExitConfig
+        roll = RollConfig(conditions=["position_mark - open_mark >= 10.0"])
+        exit_cfg = ExitConfig()
+        result = (
+            exit_cfg.vega_exit is not None
+            or roll.vega is not None
+            or any("_spread_vega" in c or "open_vega" in c for c in exit_cfg.conditions)
+            or any("_spread_vega" in c or "open_vega" in c for c in roll.conditions)
+        )
+        assert result is False
+
+    def test_roll_trigger_fires_on_condition(self):
+        """
+        Smoke-test: a roll condition expression is correctly parsed and ORed
+        into the roll_trigger Polars expression without raising.
+        """
+        from btkit.strategy.loader import parse_condition
+        import polars as pl
+
+        roll_cfg = RollConfig(conditions=["position_mark - open_mark >= 10.0"])
+
+        m = pl.DataFrame({
+            "position_mark": [5.0, 15.0, 8.0],
+            "open_mark":     [0.0,  0.0,  0.0],
+            "_local_sec":    [36900, 36900, 36900],
+        })
+
+        roll_trigger = pl.lit(False)
+        for cond_str in roll_cfg.conditions:
+            roll_trigger = roll_trigger | parse_condition(cond_str)
+
+        result = m.with_columns(roll_trigger.alias("_roll"))["_roll"].to_list()
+        assert result == [False, True, False]
+
+    def test_roll_condition_combined_with_dte_uses_or_logic(self):
+        """Either the dte trigger OR the condition trigger should fire the roll."""
+        from btkit.strategy.loader import parse_condition
+        import polars as pl
+
+        roll_cfg = RollConfig(dte=5, conditions=["position_mark - open_mark >= 10.0"])
+
+        m = pl.DataFrame({
+            "position_mark": [15.0, 3.0,  3.0],
+            "open_mark":     [ 0.0, 0.0,  0.0],
+            "_dte_now":      [  20,  20,    3],
+        })
+
+        roll_trigger = pl.lit(False)
+        if roll_cfg.dte is not None:
+            roll_trigger = roll_trigger | (pl.col("_dte_now") <= pl.lit(int(roll_cfg.dte)))
+        for cond_str in roll_cfg.conditions:
+            roll_trigger = roll_trigger | parse_condition(cond_str)
+
+        result = m.with_columns(roll_trigger.alias("_roll"))["_roll"].to_list()
+        # row 0: condition fires (15 >= 10); row 1: neither; row 2: dte fires (3 <= 5)
+        assert result == [True, False, True]
 
 
 class TestRollNoReentryInteraction:

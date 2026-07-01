@@ -952,13 +952,15 @@ is closed to capture decay/gain and re-opened at the current market delta.
 roll:
   dte:    10               # roll when ≤ 10 days remain
   vega:   0.15             # roll when spread net vega < 0.15
+  conditions:              # roll when any expression is true (optional)
+    - "position_mark - open_mark >= 10.0"
   window:                  # roll only within this time window (optional)
     start: "09:45"
     end:   "14:30"
 ```
 
-At least one of `dte` or `vega` must be specified. Both may be set simultaneously —
-the roll fires when *either* threshold is crossed (OR logic).
+At least one of `dte`, `vega`, or `conditions` must be specified. All three may be set
+simultaneously — the roll fires when *any* trigger is crossed (OR logic).
 
 ### How a roll works
 
@@ -1013,6 +1015,26 @@ entry and subject to the normal cap.
 A `roll` exit reason is not considered a loss — `no_reentry_after_loss` only blocks
 re-entries after `stop_loss` or `gap_sl` exits. A position that rolls does not trigger
 the loss block, and the roll re-entry proceeds normally even when `no_reentry_after_loss: true`.
+
+### Roll conditions
+
+`roll.conditions` takes the same expression strings as `exit.conditions` and has access
+to the same column namespace: `position_mark`, `open_mark`, `_dte_now`, `_spread_vega`,
+`open_vega`, and any indicator columns.
+
+```yaml
+roll:
+  dte: 12
+  conditions:
+    - "position_mark - open_mark >= 10.0"   # roll on profit target
+    - "_spread_vega < 0.3 * open_vega"      # roll on vega decay (auto-activates greeks fetch)
+```
+
+Conditions are OR-combined with `dte` and `vega` — the roll fires when any trigger is met.
+The `roll.window` gate applies to condition-triggered rolls the same as to `dte`/`vega` triggers.
+
+As with exit conditions, referencing `_spread_vega` or `open_vega` in a roll condition
+automatically activates the greeks fetch — no separate `roll.vega` or `vega_exit` config needed.
 
 ### Interaction with `exit.vega_exit`
 
