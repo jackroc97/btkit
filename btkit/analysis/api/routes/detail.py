@@ -6,16 +6,86 @@ import math
 from datetime import date, datetime
 from typing import Any
 
+import numpy as np
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
-from ..db import query
+from ..db import cache_get, cache_set, query
+from btkit.analysis.metrics import PostProcessor
+
+_BACKTEST_TAGS_SQL = """
+SELECT bt.backtest_id, t.id, t.name, t.color
+FROM backtest_tag bt
+JOIN tag t ON t.id = bt.tag_id
+ORDER BY bt.backtest_id, t.name
+"""
+
+_SINGLE_BACKTEST_TAGS_SQL = """
+SELECT t.id, t.name, t.color
+FROM backtest_tag bt
+JOIN tag t ON t.id = bt.tag_id
+WHERE bt.backtest_id = ?
+ORDER BY t.name
+"""
+
+
+def _load_backtest_tags() -> dict[int, list[dict]]:
+    try:
+        _, rows = query(_BACKTEST_TAGS_SQL)
+    except Exception:
+        return {}
+    tags_by_bt: dict[int, list[dict]] = {}
+    for bt_id, t_id, t_name, t_color in rows:
+        tags_by_bt.setdefault(bt_id, []).append({"id": t_id, "name": t_name, "color": t_color})
+    return tags_by_bt
 
 router = APIRouter()
 
+# ── Cache helpers ─────────────────────────────────────────────────────────────
+
+_STUDY_FP_SQL = """
+SELECT
+    CAST(COUNT(*) AS VARCHAR)                         || ':' ||
+    CAST(COALESCE(MAX(id), 0) AS VARCHAR)             || ':' ||
+    CAST(COALESCE(SUM(initial_equity), 0) AS VARCHAR) AS fp
+FROM backtest WHERE study_id = ?
+"""
+
+_STUDY_TAG_COUNT_SQL = """
+SELECT CAST(COUNT(*) AS VARCHAR)
+FROM backtest_tag bt
+JOIN backtest b ON b.id = bt.backtest_id
+WHERE b.study_id = ?
+"""
+
+
+def _study_fingerprint(study_id: int) -> str:
+    try:
+        _, rows = query(_STUDY_FP_SQL, [study_id])
+        fp = rows[0][0] if rows else "0:0:0"
+    except Exception:
+        fp = "0:0:0"
+    try:
+        _, trows = query(_STUDY_TAG_COUNT_SQL, [study_id])
+        tc = trows[0][0] if trows else "0"
+    except Exception:
+        tc = "0"
+    return f"{fp}:{tc}"
+
+
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
-EXIT_REASON_MAP = {"take_profit": "TP", "stop_loss": "SL", "expiry": "Expiry"}
+EXIT_REASON_MAP = {
+    "take_profit":          "TP",
+    "stop_loss":            "SL",
+    "gap_sl":               "Gap SL",
+    "gap_tp":               "Gap TP",
+    "expiry":               "Expiry",
+    "trailing_stop":        "Trailing Stop",
+    "expiry_continuation":  "Expiry (continuation)",
+    "dte_exit":             "DTE Exit",
+    "condition":            "Condition",
+}
 
 
 def _clean(v: Any) -> Any:
@@ -45,6 +115,7 @@ def _extract_params(params_json: str | None) -> dict:
                 legs[0] if legs else {},
             )
             result["delta"]           = short.get("delta")
+            result["dte"]             = short.get("dte")
             ex = trade.get("exit", {})
             result["take_profit_pct"] = ex.get("take_profit_pct")
             result["stop_loss"]       = ex.get("stop_loss")
@@ -117,7 +188,8 @@ daily AS (
 daily_stats AS (
     SELECT backtest_id,
         AVG(daily_pnl)         AS mean_daily_pnl,
-        STDDEV_SAMP(daily_pnl) AS std_daily_pnl
+        STDDEV_SAMP(daily_pnl) AS std_daily_pnl,
+        STDDEV_SAMP(CASE WHEN daily_pnl < 0 THEN daily_pnl END) AS downside_std
     FROM daily GROUP BY backtest_id
 ),
 trade_stats AS (
@@ -135,6 +207,39 @@ trade_stats AS (
         CAST(MAX(p.exit_time)  AS DATE)                         AS end_date
     FROM position p INNER JOIN completed_ids c ON c.id = p.backtest_id
     GROUP BY p.backtest_id
+),
+equity_curve AS (
+    SELECT
+        p.backtest_id,
+        p.exit_time,
+        p.id AS pos_id,
+        b.initial_equity + SUM(p.net_pnl) OVER (
+            PARTITION BY p.backtest_id
+            ORDER BY p.exit_time, p.id
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS equity
+    FROM position p
+    INNER JOIN completed_ids c ON c.id = p.backtest_id
+    JOIN bt_ids b ON b.id = p.backtest_id
+),
+peak_equity AS (
+    SELECT
+        backtest_id,
+        equity,
+        MAX(equity) OVER (
+            PARTITION BY backtest_id
+            ORDER BY exit_time, pos_id
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS peak
+    FROM equity_curve
+),
+dd_stats AS (
+    SELECT
+        backtest_id,
+        MAX(peak - equity)           AS max_drawdown,
+        ARG_MAX(peak, peak - equity) AS peak_at_max_dd
+    FROM peak_equity
+    GROUP BY backtest_id
 )
 SELECT
     b.id,
@@ -154,15 +259,48 @@ SELECT
     CASE WHEN COALESCE(d.std_daily_pnl, 0.0) > 0
         THEN (d.mean_daily_pnl / d.std_daily_pnl) * SQRT(252.0)
         ELSE NULL END                                           AS sharpe,
+    CASE WHEN COALESCE(d.downside_std, 0.0) > 0
+        THEN (d.mean_daily_pnl / d.downside_std) * SQRT(252.0)
+        ELSE NULL END                                           AS sortino,
     CASE WHEN COALESCE(b.initial_equity, 0) > 0
         THEN (COALESCE(t.total_pnl, 0.0) / b.initial_equity) * 100.0
         ELSE NULL END                                           AS total_return_pct,
     CASE WHEN COALESCE(t.gross_loss, 0.0) > 0
         THEN t.gross_win / t.gross_loss
-        ELSE NULL END                                           AS profit_factor
+        ELSE NULL END                                           AS profit_factor,
+    COALESCE(dd.max_drawdown, 0.0)                             AS max_drawdown,
+    CASE WHEN COALESCE(dd.peak_at_max_dd, 0) > 0
+        THEN dd.max_drawdown / dd.peak_at_max_dd
+        ELSE NULL END                                           AS max_drawdown_pct,
+    CASE WHEN t.start_date IS NOT NULL
+          AND t.end_date IS NOT NULL
+          AND DATEDIFF('day', t.start_date, t.end_date) > 0
+          AND COALESCE(b.initial_equity, 0) > 0
+          AND (b.initial_equity + COALESCE(t.total_pnl, 0.0)) > 0
+        THEN POWER(
+            (b.initial_equity + COALESCE(t.total_pnl, 0.0)) / b.initial_equity,
+            365.25 / DATEDIFF('day', t.start_date, t.end_date)
+        ) - 1.0
+        ELSE NULL END                                           AS cagr,
+    CASE WHEN COALESCE(dd.max_drawdown, 0.0) > 0
+        THEN COALESCE(t.total_pnl, 0.0) / dd.max_drawdown
+        ELSE NULL END                                           AS recovery_factor,
+    CASE WHEN COALESCE(dd.peak_at_max_dd, 0.0) > 0
+          AND t.start_date IS NOT NULL
+          AND t.end_date IS NOT NULL
+          AND DATEDIFF('day', t.start_date, t.end_date) > 0
+          AND COALESCE(b.initial_equity, 0) > 0
+        THEN (
+            POWER(
+                (b.initial_equity + COALESCE(t.total_pnl, 0.0)) / b.initial_equity,
+                365.25 / DATEDIFF('day', t.start_date, t.end_date)
+            ) - 1.0
+        ) * 100.0 / (dd.max_drawdown / dd.peak_at_max_dd * 100.0)
+        ELSE NULL END                                           AS calmar
 FROM bt_ids b
 LEFT JOIN trade_stats  t ON t.backtest_id = b.id
 LEFT JOIN daily_stats  d ON d.backtest_id = b.id
+LEFT JOIN dd_stats     dd ON dd.backtest_id = b.id
 ORDER BY b.combination_id
 """
 
@@ -173,13 +311,21 @@ SELECT
     CAST(p.exit_time AS DATE) AS exit_date,
     SUM(p.net_pnl) OVER (
         PARTITION BY p.backtest_id
-        ORDER BY p.open_time, p.id
+        ORDER BY p.exit_time, p.id
         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
     ) AS cum_pnl
 FROM position p
 JOIN backtest b ON b.id = p.backtest_id
 WHERE b.study_id = ? AND b.status = 'completed'
-ORDER BY p.backtest_id, p.open_time, p.id
+ORDER BY p.backtest_id, p.exit_time, p.id
+"""
+
+_STUDY_PNL_SQL = """
+SELECT p.backtest_id, p.net_pnl
+FROM position p
+JOIN backtest b ON b.id = p.backtest_id
+WHERE b.study_id = ?
+ORDER BY p.backtest_id
 """
 
 _POSITIONS_SQL = """
@@ -190,16 +336,19 @@ SELECT
     CAST(p.open_time AS DATE)                        AS open_date,
     CAST(p.exit_time  AS DATE)                       AS exit_date,
     p.net_pnl,
+    pc.continuation_pnl,
+    pc.continuation_exit_reason,
     DATEDIFF('minute', p.open_time, p.exit_time)     AS duration_min,
     SUM(p.net_pnl) OVER (
-        ORDER BY p.open_time, p.id
+        ORDER BY p.exit_time, p.id
         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
     )                                                AS cum_pnl,
     b.initial_equity
 FROM position p
 JOIN backtest b ON b.id = p.backtest_id
+LEFT JOIN position_continuation pc ON pc.position_id = p.id
 WHERE p.backtest_id = ?
-ORDER BY p.open_time, p.id
+ORDER BY p.exit_time, p.id
 """
 
 # Single-backtest detail (reuses same CTE structure, filtered to one backtest)
@@ -230,7 +379,11 @@ daily AS (
     LEFT JOIN daily_actives a ON a.trade_date = w.trade_date
 ),
 daily_stats AS (
-    SELECT AVG(daily_pnl) AS mean_daily_pnl, STDDEV_SAMP(daily_pnl) AS std_daily_pnl FROM daily
+    SELECT
+        AVG(daily_pnl)         AS mean_daily_pnl,
+        STDDEV_SAMP(daily_pnl) AS std_daily_pnl,
+        STDDEV_SAMP(CASE WHEN daily_pnl < 0 THEN daily_pnl END) AS downside_std
+    FROM daily
 ),
 trade_stats AS (
     SELECT
@@ -248,6 +401,35 @@ trade_stats AS (
         CAST(MIN(open_time) AS DATE)                            AS start_date,
         CAST(MAX(exit_time)  AS DATE)                           AS end_date
     FROM position WHERE backtest_id = ?
+),
+equity_curve AS (
+    SELECT
+        p.exit_time,
+        p.id AS pos_id,
+        COALESCE(b2.initial_equity, 0) + SUM(p.net_pnl) OVER (
+            ORDER BY p.exit_time, p.id
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS equity
+    FROM position p
+    JOIN backtest b2 ON b2.id = p.backtest_id
+    WHERE p.backtest_id = ?
+),
+peak_equity AS (
+    SELECT
+        equity,
+        exit_time,
+        pos_id,
+        MAX(equity) OVER (
+            ORDER BY exit_time, pos_id
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS peak
+    FROM equity_curve
+),
+dd_stats AS (
+    SELECT
+        MAX(peak - equity)                   AS max_drawdown,
+        ARG_MAX(peak, peak - equity)         AS peak_at_max_dd
+    FROM peak_equity
 )
 SELECT
     b.id, b.study_id, b.combination_id, b.strategy_name, b.strategy_params,
@@ -260,15 +442,42 @@ SELECT
     CASE WHEN COALESCE(d.std_daily_pnl, 0.0) > 0
         THEN (d.mean_daily_pnl / d.std_daily_pnl) * SQRT(252.0)
         ELSE NULL END AS sharpe,
+    CASE WHEN COALESCE(d.downside_std, 0.0) > 0
+        THEN (d.mean_daily_pnl / d.downside_std) * SQRT(252.0)
+        ELSE NULL END AS sortino,
     CASE WHEN COALESCE(b.initial_equity, 0) > 0
         THEN (COALESCE(t.total_pnl, 0.0) / b.initial_equity) * 100.0
         ELSE NULL END AS total_return_pct,
     CASE WHEN COALESCE(t.gross_loss, 0.0) > 0
         THEN t.gross_win / t.gross_loss
-        ELSE NULL END AS profit_factor
+        ELSE NULL END AS profit_factor,
+    COALESCE(dd.max_drawdown, 0.0)   AS max_drawdown,
+    CASE WHEN COALESCE(dd.peak_at_max_dd, 0.0) > 0
+        THEN (dd.max_drawdown / dd.peak_at_max_dd) * 100.0
+        ELSE NULL END                AS max_drawdown_pct,
+    CASE WHEN t.start_date IS NOT NULL
+          AND t.end_date IS NOT NULL
+          AND DATEDIFF('day', t.start_date, t.end_date) > 0
+          AND COALESCE(b.initial_equity, 0) > 0
+        THEN (POWER(
+            (b.initial_equity + COALESCE(t.total_pnl, 0.0)) / b.initial_equity,
+            365.25 / DATEDIFF('day', t.start_date, t.end_date)
+        ) - 1.0) * 100.0
+        ELSE NULL END                AS cagr,
+    CASE WHEN COALESCE(dd.peak_at_max_dd, 0.0) > 0
+          AND t.start_date IS NOT NULL
+          AND t.end_date IS NOT NULL
+          AND DATEDIFF('day', t.start_date, t.end_date) > 0
+          AND COALESCE(b.initial_equity, 0) > 0
+        THEN (POWER(
+            (b.initial_equity + COALESCE(t.total_pnl, 0.0)) / b.initial_equity,
+            365.25 / DATEDIFF('day', t.start_date, t.end_date)
+        ) - 1.0) * 100.0 / (dd.max_drawdown / dd.peak_at_max_dd * 100.0)
+        ELSE NULL END                AS calmar
 FROM backtest b
 CROSS JOIN trade_stats t
 CROSS JOIN daily_stats d
+CROSS JOIN dd_stats dd
 WHERE b.id = ?
 """
 
@@ -322,7 +531,13 @@ ORDER BY l.id
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.get("/studies/{study_id}")
-def study_detail(study_id: int) -> JSONResponse:
+def study_detail(study_id: int) -> Response:
+    fp = _study_fingerprint(study_id)
+    cache_key = f"study.{study_id}"
+    cached = cache_get(cache_key, fp)
+    if cached is not None:
+        return Response(content=cached, media_type="application/json")
+
     # Study row
     s_cols, s_rows = query(_STUDY_ROW_SQL, [study_id])
     if not s_rows:
@@ -331,6 +546,7 @@ def study_detail(study_id: int) -> JSONResponse:
 
     # All backtests with metrics
     bt_cols, bt_rows = query(_STUDY_BACKTESTS_SQL, [study_id])
+    tags_by_bt = _load_backtest_tags()
     backtests = []
     params_list: list[dict] = []
     strategies: set[str] = set()
@@ -345,6 +561,7 @@ def study_detail(study_id: int) -> JSONResponse:
         params = _extract_params(d.pop("strategy_params"))
         d["params"]          = params
         d["strategy_label"]  = _strategy_label(d["strategy_name"])
+        d["tags"]            = tags_by_bt.get(d["id"], [])
         backtests.append(d)
 
         if d["status"] == "completed":
@@ -362,10 +579,35 @@ def study_detail(study_id: int) -> JSONResponse:
             if d["end_date"] is not None:
                 data_end = d["end_date"] if data_end is None else max(data_end, d["end_date"])
 
+    # Bootstrap CI for mean P&L + Wilson CI for win rate — one query for all backtests
+    pnl_cols, pnl_rows = query(_STUDY_PNL_SQL, [study_id])
+    pnl_by_bt: dict[int, list[float]] = {}
+    for row in pnl_rows:
+        d = _row_to_dict(pnl_cols, row)
+        bid = d["backtest_id"]
+        if bid not in pnl_by_bt:
+            pnl_by_bt[bid] = []
+        pnl_by_bt[bid].append(d["net_pnl"])
+
+    rng = np.random.default_rng(0)
+    for bt in backtests:
+        bid = bt["id"]
+        pnl_arr = np.array(pnl_by_bt.get(bid, []), dtype=float)
+        ci_lo, ci_hi = PostProcessor._bootstrap_mean_ci(pnl_arr, n_boot=2000, rng=rng)
+        bt["mean_pnl_ci_lower"] = round(ci_lo, 2)
+        bt["mean_pnl_ci_upper"] = round(ci_hi, 2)
+
+        n_total = bt.get("n_trades") or 0
+        win_rate = bt.get("win_rate")
+        n_wins = round((win_rate or 0.0) * n_total)
+        wr_lo, wr_hi = PostProcessor._wilson_win_rate_ci(n_wins, n_total)
+        bt["win_rate_ci_lower"] = round(wr_lo, 4)
+        bt["win_rate_ci_upper"] = round(wr_hi, 4)
+
     strats = sorted(strategies)
     sweep_axes = _detect_sweep_axes(params_list)
 
-    return JSONResponse({
+    payload = {
         **study,
         "strategies":      strats,
         "strategy_labels": [_strategy_label(n) for n in strats],
@@ -376,7 +618,10 @@ def study_detail(study_id: int) -> JSONResponse:
         "best_sharpe":     best_sharpe,
         "best_return_pct": best_return,
         "backtests":       backtests,
-    })
+    }
+    body = json.dumps(payload)
+    cache_set(cache_key, body, fp)
+    return Response(content=body, media_type="application/json")
 
 
 @router.get("/studies/{study_id}/equity")
@@ -398,14 +643,38 @@ def study_equity(study_id: int) -> JSONResponse:
     return JSONResponse(list(curves.values()))
 
 
+_STUDY_DAILY_PNL_SQL = """
+SELECT
+    CAST(CAST(p.open_time AS DATE) AS VARCHAR) AS trade_date,
+    SUM(p.net_pnl)                AS total_pnl,
+    COUNT(DISTINCT p.backtest_id) AS n_backtests,
+    COUNT(*)                      AS n_trades
+FROM position p
+JOIN backtest b ON b.id = p.backtest_id
+WHERE b.study_id = ? AND b.status = 'completed'
+GROUP BY CAST(p.open_time AS DATE)
+ORDER BY trade_date ASC
+"""
+
+@router.get("/studies/{study_id}/daily-pnl")
+def study_daily_pnl(study_id: int) -> JSONResponse:
+    cols, rows = query(_STUDY_DAILY_PNL_SQL, [study_id])
+    return JSONResponse([dict(zip(cols, r)) for r in rows])
+
+
 @router.get("/backtests/{backtest_id}")
 def backtest_detail(backtest_id: int) -> JSONResponse:
-    cols, rows = query(_BACKTEST_DETAIL_SQL, [backtest_id, backtest_id, backtest_id, backtest_id])
+    cols, rows = query(_BACKTEST_DETAIL_SQL, [backtest_id, backtest_id, backtest_id, backtest_id, backtest_id])
     if not rows:
         raise HTTPException(status_code=404, detail="Backtest not found")
     d = _row_to_dict(cols, rows[0])
     d["params"]         = _extract_params(d.pop("strategy_params"))
     d["strategy_label"] = _strategy_label(d["strategy_name"])
+    try:
+        tag_cols, tag_rows = query(_SINGLE_BACKTEST_TAGS_SQL, [backtest_id])
+        d["tags"] = [dict(zip(tag_cols, r)) for r in tag_rows]
+    except Exception:
+        d["tags"] = []
     return JSONResponse(d)
 
 
@@ -416,6 +685,10 @@ def backtest_positions(backtest_id: int) -> JSONResponse:
     for row in rows:
         d = _row_to_dict(cols, row)
         d["exit_reason"] = EXIT_REASON_MAP.get(d["exit_reason"], d["exit_reason"])
+        if d.get("continuation_exit_reason"):
+            d["continuation_exit_reason"] = EXIT_REASON_MAP.get(
+                d["continuation_exit_reason"], d["continuation_exit_reason"]
+            )
         d["return_pct"]  = (
             round(d["net_pnl"] / d["initial_equity"] * 100, 4)
             if d["initial_equity"] else None
@@ -459,5 +732,24 @@ def position_detail(position_id: int) -> JSONResponse:
         -abs(params["stop_loss"])
         if params.get("stop_loss") else None
     )
+
+    # Continuation (populated when on_sl_long_continuation strategy was used)
+    try:
+        cont_cols, cont_rows = query(
+            "SELECT continuation_entry_price, continuation_exit_time, "
+            "continuation_exit_price, continuation_exit_reason, continuation_pnl "
+            "FROM position_continuation WHERE position_id = ?",
+            [position_id],
+        )
+        if cont_rows:
+            cont = _row_to_dict(cont_cols, cont_rows[0])
+            cont["continuation_exit_reason"] = EXIT_REASON_MAP.get(
+                cont["continuation_exit_reason"], cont["continuation_exit_reason"]
+            )
+            d["continuation"] = cont
+        else:
+            d["continuation"] = None
+    except Exception:
+        d["continuation"] = None
 
     return JSONResponse(d)
