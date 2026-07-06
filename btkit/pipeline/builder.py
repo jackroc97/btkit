@@ -17,12 +17,14 @@ Build sequence:
 Parallelism strategy:
     - Definition ingest: one ThreadPoolExecutor worker per .dbn.zst file (not per
       zip). Each worker opens its own ZipFile handle, reads one named file,
-      decompresses and parses it. Results are merged in the main thread using a
-      later-expiration-wins rule: when the same instrument_id appears in multiple
-      definition files (because the data vendor recycled an ID from an expired
-      instrument to a new one), the definition with the more recent expiration date
-      takes precedence. This correctly resolves cases such as an expired option ID
-      being reused years later for a quarterly futures contract.
+      decompresses and parses it. Because the data vendor (Databento GLBX MDP3)
+      recycles numeric instrument_ids — an expired instrument's ID is later
+      reassigned to a new one — each ID is kept as a *list of validity segments*
+      keyed by the definition's [activation, expiration] window, NOT collapsed to a
+      single winner. OHLCV bars are then routed per-segment: a bar is classified by
+      the definition whose validity window contains the bar's ts_event. This
+      correctly separates, e.g., a June-2020 future and a 2023 call that share one
+      recycled ID, filing each contract's bars in the right table for the right span.
 
     - OHLCV ingest: work units are (zip_path, filename) tuples. Files are processed
       in batches of _OHLCV_BATCH_SIZE with _INGEST_WORKERS threads per batch.
@@ -50,7 +52,7 @@ import time
 import zipfile
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import duckdb
@@ -86,6 +88,7 @@ class _InstrumentInfo:
     __slots__ = (
         "instrument_class",
         "raw_symbol",
+        "activation",
         "expiration",
         "strike_price",
         "right",
@@ -97,7 +100,8 @@ class _InstrumentInfo:
         self,
         instrument_class: str,
         raw_symbol: str,
-        expiration,  # datetime.date or None
+        activation,  # datetime.date or None — first valid date of this definition
+        expiration,  # datetime.date or None — last valid date of this definition
         strike_price: float | None,
         right: str | None,  # 'C', 'P', or None for futures
         multiplier: int,
@@ -105,6 +109,7 @@ class _InstrumentInfo:
     ) -> None:
         self.instrument_class = instrument_class
         self.raw_symbol = raw_symbol
+        self.activation = activation
         self.expiration = expiration
         self.strike_price = strike_price
         self.right = right
@@ -129,7 +134,10 @@ class DatabaseBuilder:
         self.db_path = Path(db_path)
         self.indicator_scripts = [Path(p) for p in (indicator_scripts or [])]
         self.append = append
-        self._instrument_map: dict[int, _InstrumentInfo] = {}
+        # instrument_id → list of validity segments (sorted by activation). Each
+        # segment is one definition of that (possibly recycled) ID for a distinct
+        # [activation, expiration] window.
+        self._instrument_map: dict[int, list[_InstrumentInfo]] = {}
 
     def build(self) -> None:
         """
@@ -195,15 +203,15 @@ class DatabaseBuilder:
 
     def _ingest_definitions(self, required_ids: set[int]) -> None:
         """
-        Read all *.definition.dbn.zst files in parallel (one worker per file)
-        and build self._instrument_map: instrument_id → _InstrumentInfo.
+        Read all *.definition.dbn.zst files in parallel (one worker per file) and
+        build self._instrument_map: instrument_id → list of validity segments.
 
-        Each worker opens its own ZipFile handle and reads exactly one file.
-        Results are merged in the main thread using later-expiration-wins: when
-        the same instrument_id appears in multiple definition files, the definition
-        with the more recent expiration date is used. This handles Databento ID
-        recycling where a numeric ID previously assigned to an expired option is
-        reused for a new futures contract.
+        Each worker opens its own ZipFile handle and reads exactly one file and
+        returns, per instrument_id, the distinct definitions it saw keyed by their
+        [activation, expiration] window. The main thread unions these across all
+        files, so a recycled ID that was (say) a future in 2020 and an option in
+        2023 is kept as TWO segments rather than collapsed to one.  _ingest_ohlcv
+        then routes each bar to the segment whose window contains it.
 
         Only instrument_class F (future), C (call), and P (put) are kept.
         """
@@ -220,19 +228,22 @@ class DatabaseBuilder:
                 f"No definition files found in zip archives under {self.raw_data_path}"
             )
 
+        # instrument_id → {(activation, expiration): _InstrumentInfo}. Keying by the
+        # validity window de-duplicates the same definition reported across many
+        # daily snapshot files while preserving genuinely distinct (recycled) ones.
+        seg_maps: dict[int, dict[tuple, _InstrumentInfo]] = {}
         with ThreadPoolExecutor(max_workers=_INGEST_WORKERS) as pool:
             for partial_map in pool.map(_scan_definition_file, work_units):
-                for iid, info in partial_map.items():
-                    existing = self._instrument_map.get(iid)
-                    if existing is None:
-                        self._instrument_map[iid] = info
-                    elif info.expiration is not None and (
-                        existing.expiration is None or info.expiration > existing.expiration
-                    ):
-                        # Later-expiration wins: handles Databento instrument ID
-                        # recycling where an expired option's ID is reused for a
-                        # new futures contract years later.
-                        self._instrument_map[iid] = info
+                for iid, segs in partial_map.items():
+                    seg_maps.setdefault(iid, {}).update(segs)
+
+        self._instrument_map = {
+            iid: sorted(segs.values(), key=_segment_sort_key)
+            for iid, segs in seg_maps.items()
+        }
+
+        n_segments = sum(len(v) for v in self._instrument_map.values())
+        n_recycled = sum(1 for v in self._instrument_map.values() if len(v) > 1)
 
         missing = required_ids - set(self._instrument_map)
         if missing:
@@ -240,10 +251,16 @@ class DatabaseBuilder:
                 f"[ingest] Warning: {len(missing)} instrument IDs found in OHLCV "
                 f"data have no matching definition record and will be dropped."
             )
+        if n_recycled:
+            print(
+                f"[ingest] {n_recycled:,} instrument IDs were recycled across "
+                f"multiple validity windows — bars routed per-window."
+            )
 
         print(
             f"[ingest] Loaded {len(self._instrument_map):,} instruments "
-            f"from {len(work_units)} definition file(s) across {len(zip_files)} zip(s)"
+            f"({n_segments:,} validity segments) from {len(work_units)} "
+            f"definition file(s) across {len(zip_files)} zip(s)"
         )
 
     # ------------------------------------------------------------------
@@ -253,8 +270,9 @@ class DatabaseBuilder:
     def _ingest_ohlcv(self) -> None:
         """
         Read all *.ohlcv-*.dbn.zst files in parallel batches of _OHLCV_BATCH_SIZE,
-        split rows into underlying_bars and option_bars using the instrument_map,
-        and write each batch immediately before freeing it.
+        route each bar to the definition whose validity window contains it, split
+        into underlying_bars and option_bars, and write each batch immediately
+        before freeing it.
 
         Batched writes keep peak memory bounded: each batch holds at most
         _OHLCV_BATCH_SIZE × ~75 MB of decompressed data at once.
@@ -262,39 +280,42 @@ class DatabaseBuilder:
         if not self._instrument_map:
             raise RuntimeError("_ingest_ohlcv() called before _ingest_definitions()")
 
-        # Build metadata lookup DataFrames once — reused for every batch.
-        futures_meta = pl.DataFrame(
-            [
-                {"instrument_id": iid, "expiration": info.expiration}
-                for iid, info in self._instrument_map.items()
-                if info.instrument_class == "F"
-            ],
-            schema={"instrument_id": pl.Int64, "expiration": pl.Date},
-        )
-        opt_meta = pl.DataFrame(
+        # Build the segment lookup table once — one row per (instrument_id,
+        # validity window). Each bar is routed to the segment whose window contains
+        # it (see _route_bars_to_segments). Routing bounds (_act / _exp_route) are
+        # sentinel-filled so a missing activation/expiration never excludes an
+        # otherwise-valid bar; the real (possibly null) expiration is carried
+        # separately (seg_expiration) for the output row.
+        segments = pl.DataFrame(
             [
                 {
                     "instrument_id": iid,
-                    "underlying_id": info.underlying_id,
-                    "expiration": info.expiration,
-                    "strike_price": info.strike_price,
-                    "right": info.right,
-                    "multiplier": info.multiplier,
+                    "instrument_class": seg.instrument_class,
+                    "symbol": seg.raw_symbol,
+                    "seg_expiration": seg.expiration,
+                    "underlying_id": seg.underlying_id,
+                    "strike_price": seg.strike_price,
+                    "right": seg.right,
+                    "multiplier": seg.multiplier,
+                    "_act": seg.activation or date(1970, 1, 1),
+                    "_exp_route": seg.expiration or date(9999, 12, 31),
                 }
-                for iid, info in self._instrument_map.items()
-                if info.instrument_class in ("C", "P")
+                for iid, segs in self._instrument_map.items()
+                for seg in segs
             ],
             schema={
                 "instrument_id": pl.Int64,
+                "instrument_class": pl.Utf8,
+                "symbol": pl.Utf8,
+                "seg_expiration": pl.Date,
                 "underlying_id": pl.Int64,
-                "expiration": pl.Date,
                 "strike_price": pl.Float64,
                 "right": pl.Utf8,
                 "multiplier": pl.Int64,
+                "_act": pl.Date,
+                "_exp_route": pl.Date,
             },
         )
-        underlying_ids = set(futures_meta["instrument_id"].to_list())
-        option_ids = set(opt_meta["instrument_id"].to_list())
 
         zip_files = sorted(self.raw_data_path.glob("*.zip"))
         if not zip_files:
@@ -325,17 +346,8 @@ class DatabaseBuilder:
         else:
             ub_cutoff = ob_cutoff = None
 
-        symbol_df = pl.DataFrame(
-            {
-                "instrument_id": pl.Series(list(self._instrument_map.keys()), dtype=pl.Int64),
-                "symbol": pl.Series(
-                    [info.raw_symbol for info in self._instrument_map.values()],
-                    dtype=pl.Utf8,
-                ),
-            }
-        )
-
         total_ub = total_ob = 0
+        total_gap = total_overlap = 0
         completed = 0
 
         with ThreadPoolExecutor(max_workers=_INGEST_WORKERS) as pool:
@@ -356,27 +368,19 @@ class DatabaseBuilder:
                 ohlcv = pl.concat(frames).unique(subset=["ts_event", "instrument_id"], keep="first")
                 del frames
 
-                ohlcv = ohlcv.join(symbol_df, on="instrument_id", how="left")
+                # Time-aware routing: attach each bar's covering segment.
+                resolved, n_overlap = _route_bars_to_segments(ohlcv, segments)
+                del ohlcv
+                total_gap += resolved.filter(~pl.col("_contained")).height
+                total_overlap += n_overlap
 
-                # ── Underlying bars ────────────────────────────────────────
-                ub_raw = ohlcv.filter(pl.col("instrument_id").is_in(underlying_ids)).select(
+                # ── Underlying bars (futures) ──────────────────────────────
+                ub = resolved.filter(pl.col("instrument_class") == "F").select(
                     [
                         "ts_event",
                         "instrument_id",
                         "symbol",
-                        "open",
-                        "high",
-                        "low",
-                        "close",
-                        "volume",
-                    ]
-                )
-                ub = ub_raw.join(futures_meta, on="instrument_id", how="left").select(
-                    [
-                        "ts_event",
-                        "instrument_id",
-                        "symbol",
-                        "expiration",
+                        pl.col("seg_expiration").alias("expiration"),
                         "open",
                         "high",
                         "low",
@@ -385,46 +389,25 @@ class DatabaseBuilder:
                     ]
                 )
 
-                # ── Option bars ────────────────────────────────────────────
-                opt_raw = ohlcv.filter(pl.col("instrument_id").is_in(option_ids))
-                if not opt_raw.is_empty():
-                    ob = opt_raw.join(opt_meta, on="instrument_id", how="left").select(
-                        [
-                            "ts_event",
-                            "instrument_id",
-                            "underlying_id",
-                            "symbol",
-                            "expiration",
-                            "strike_price",
-                            "right",
-                            "multiplier",
-                            "open",
-                            "high",
-                            "low",
-                            "close",
-                            "volume",
-                        ]
-                    )
-                else:
-                    ob = pl.DataFrame(
-                        schema={
-                            "ts_event": pl.Datetime("us", "UTC"),
-                            "instrument_id": pl.Int64,
-                            "underlying_id": pl.Int64,
-                            "symbol": pl.Utf8,
-                            "expiration": pl.Date,
-                            "strike_price": pl.Float64,
-                            "right": pl.Utf8,
-                            "multiplier": pl.Int64,
-                            "open": pl.Float64,
-                            "high": pl.Float64,
-                            "low": pl.Float64,
-                            "close": pl.Float64,
-                            "volume": pl.Int64,
-                        }
-                    )
-
-                del ohlcv, opt_raw
+                # ── Option bars (calls / puts) ─────────────────────────────
+                ob = resolved.filter(pl.col("instrument_class").is_in(["C", "P"])).select(
+                    [
+                        "ts_event",
+                        "instrument_id",
+                        "underlying_id",
+                        "symbol",
+                        pl.col("seg_expiration").alias("expiration"),
+                        "strike_price",
+                        "right",
+                        "multiplier",
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                        "volume",
+                    ]
+                )
+                del resolved
 
                 _write_df(
                     self._con, "underlying_bars", ub, skip_existing=self.append, cutoff_ts=ub_cutoff
@@ -443,6 +426,12 @@ class DatabaseBuilder:
                 )
 
         print(f"\n[ingest] Wrote {total_ub:,} underlying bars, {total_ob:,} option bars")
+        if total_gap or total_overlap:
+            print(
+                f"[ingest] Segment routing: {total_gap:,} bars fell in a validity-window "
+                f"gap (reclassified to nearest segment), {total_overlap:,} bars matched "
+                f"overlapping windows (tightest window kept)."
+            )
 
     # ------------------------------------------------------------------
     # Step 3: Greeks
@@ -544,9 +533,36 @@ def _scan_file_for_ids(work: tuple[Path, str]) -> set[int]:
     return set(store.to_ndarray()["instrument_id"].tolist())
 
 
-def _scan_definition_file(work: tuple[Path, str]) -> dict[int, _InstrumentInfo]:
+def _ns_to_date(ns: int) -> date | None:
+    """Convert a Databento ns UNIX timestamp to a UTC date, or None if unset.
+
+    Databento marks undefined timestamps with UINT64_MAX (and sometimes 0); the
+    finite-range guard rejects both.
     """
-    Parse one *.definition.dbn.zst file and return a partial instrument map.
+    return (
+        datetime.fromtimestamp(ns / 1_000_000_000, tz=UTC).date()
+        if 0 < ns < 9_000_000_000_000_000_000
+        else None
+    )
+
+
+def _segment_sort_key(seg: _InstrumentInfo) -> tuple[date, date]:
+    """Sort validity segments chronologically (None sorts first)."""
+    return (seg.activation or date.min, seg.expiration or date.min)
+
+
+def _scan_definition_file(
+    work: tuple[Path, str],
+) -> dict[int, dict[tuple, _InstrumentInfo]]:
+    """
+    Parse one *.definition.dbn.zst file and return, per instrument_id, the
+    distinct definitions it contains keyed by their (activation, expiration)
+    validity window.
+
+    Returning per-window segments (not a single winner) is what lets the main
+    thread reconstruct a recycled ID's full timeline: an ID that was a future in
+    one window and an option in another yields two entries here, unioned across
+    files by _ingest_definitions.
 
     Each call opens its own ZipFile handle (thread-safe independent descriptor).
     from_bytes() (ZST decompression) is C-extension work that releases the GIL,
@@ -556,25 +572,24 @@ def _scan_definition_file(work: tuple[Path, str]) -> dict[int, _InstrumentInfo]:
     with zipfile.ZipFile(zip_path) as zf:
         arr = db_sdk.DBNStore.from_bytes(zf.read(filename)).to_ndarray()
 
-    result: dict[int, _InstrumentInfo] = {}
+    result: dict[int, dict[tuple, _InstrumentInfo]] = {}
     fcp_mask = np.isin(arr["instrument_class"], [b"F", b"C", b"P"])
     for row in arr[fcp_mask]:
         iid = int(row["instrument_id"])
-        if iid in result:
-            continue
         icls = row["instrument_class"].decode("ascii")
-        exp_ns = int(row["expiration"])
-        exp_date = (
-            datetime.fromtimestamp(exp_ns / 1_000_000_000, tz=UTC).date()
-            if 0 < exp_ns < 9_000_000_000_000_000_000
-            else None
-        )
+        act_date = _ns_to_date(int(row["activation"]))
+        exp_date = _ns_to_date(int(row["expiration"]))
+        key = (act_date, exp_date)
+        segs = result.setdefault(iid, {})
+        if key in segs:
+            continue
         right = icls if icls in ("C", "P") else None
         strike = float(row["strike_price"]) / 1e9 if icls in ("C", "P") else None
         uom = int(row["unit_of_measure_qty"])
-        result[iid] = _InstrumentInfo(
+        segs[key] = _InstrumentInfo(
             instrument_class=icls,
             raw_symbol=row["raw_symbol"].decode("ascii").rstrip("\x00"),
+            activation=act_date,
             expiration=exp_date,
             strike_price=strike,
             right=right,
@@ -602,6 +617,64 @@ def _parse_ohlcv_file(work: tuple[Path, str]) -> pl.DataFrame | None:
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
+
+def _route_bars_to_segments(
+    ohlcv: pl.DataFrame,
+    segments: pl.DataFrame,
+) -> tuple[pl.DataFrame, int]:
+    """
+    Resolve each OHLCV bar to the instrument definition (segment) whose validity
+    window contains the bar's ts_event date.
+
+    Because the data vendor recycles instrument_ids, a single ID may map to
+    several definitions over time (e.g. a future, then an option). Bars are
+    inner-joined to segments on instrument_id (bars whose ID has no definition are
+    dropped, matching the original routing) and, per bar, the best segment is
+    chosen:
+      * a segment that CONTAINS the bar beats one that does not;
+      * among containing segments (overlap — a rare data anomaly) the tightest
+        window wins;
+      * when NO segment contains the bar (a gap between windows — also rare) the
+        nearest segment by date distance wins, so the bar is reclassified rather
+        than dropped (row conservation).
+
+    Returns (resolved, n_overlap):
+      resolved  — one row per input bar with the winning segment's columns and a
+                  boolean `_contained` (False ⇒ a gap fallback was used).
+      n_overlap — number of bars that matched more than one containing segment.
+    """
+    cand = ohlcv.with_columns(
+        pl.col("ts_event").dt.date().alias("_bar_date")
+    ).join(segments, on="instrument_id", how="inner")
+
+    cand = cand.with_columns(
+        (
+            (pl.col("_bar_date") >= pl.col("_act")) & (pl.col("_bar_date") <= pl.col("_exp_route"))
+        ).alias("_contained"),
+        (pl.col("_exp_route") - pl.col("_act")).dt.total_days().alias("_win"),
+        pl.max_horizontal(
+            (pl.col("_act") - pl.col("_bar_date")).dt.total_days(),
+            (pl.col("_bar_date") - pl.col("_exp_route")).dt.total_days(),
+            pl.lit(0, dtype=pl.Int64),
+        ).alias("_dist"),
+    )
+
+    n_overlap = (
+        cand.filter(pl.col("_contained"))
+        .group_by(["ts_event", "instrument_id"])
+        .len()
+        .filter(pl.col("len") > 1)
+        .height
+    )
+
+    # Winner per (ts_event, instrument_id): _dist asc puts a containing segment
+    # (dist 0) first — or the nearest gap segment otherwise — and _win asc breaks
+    # ties in favour of the tightest window.
+    resolved = cand.sort(["ts_event", "instrument_id", "_dist", "_win"]).unique(
+        subset=["ts_event", "instrument_id"], keep="first"
+    )
+    return resolved, n_overlap
 
 
 def _dbn_to_polars(store) -> pl.DataFrame:

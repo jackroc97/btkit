@@ -208,12 +208,14 @@ class DatabaseBuilder:
 
     def _ingest_definitions(self, required_ids: set[int]) -> None:
         """
-        Reads *.definition.dbn.zst files in chronological order and builds
-        the internal instrument map (instrument_id → _InstrumentInfo).
+        Reads *.definition.dbn.zst files and builds the internal instrument map
+        (instrument_id → list of validity segments).
 
-        Stops as soon as every id in required_ids is resolved. Remaining daily
-        snapshots are not read — they contain the same static metadata for
-        instruments already mapped.
+        Databento recycles numeric instrument_ids, so each id is kept as a LIST of
+        _InstrumentInfo segments — one per distinct [activation, expiration]
+        window — rather than collapsed to a single winner. This preserves the time
+        dimension needed to route a recycled id's bars correctly (e.g. a future in
+        one window, an option in another).
 
         Only instrument_class F (future), C (call), and P (put) are kept.
         Emits a warning if any required_id has no definition record.
@@ -222,7 +224,9 @@ class DatabaseBuilder:
 
     def _ingest_ohlcv(self) -> None:
         """
-        Reads .dbn OHLCV files one zip at a time. Splits rows into
+        Reads .dbn OHLCV files in parallel batches. Routes each bar to the
+        definition segment whose [activation, expiration] window contains the
+        bar's ts_event (see _route_bars_to_segments), then splits into
         underlying_bars and option_bars, pre-joining definition metadata into
         option_bars at write time so no joins are required at backtest runtime.
 
