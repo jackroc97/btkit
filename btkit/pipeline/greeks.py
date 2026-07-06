@@ -1,8 +1,10 @@
 """
 GreeksCalculator — batch Black-76 IV and Greeks computation using numba JIT.
 
-Reads option_bars (joined with underlying_bars for the underlying close price)
-and writes iv, delta, gamma, theta, vega to option_greeks.
+Reads option_bars and writes iv, delta, gamma, theta, vega to option_greeks. The
+spot price F is taken from the underlying future via a backward ASOF join (nearest
+underlying bar at or before each option bar, within a staleness tolerance), so
+options that traded a minute the future did not print still get greeks.
 
 Takes a writable DuckDB connection so it can both read OHLCV tables and write
 the option_greeks table within the same build transaction.
@@ -183,10 +185,17 @@ class GreeksCalculator:
         con: duckdb.DuckDBPyConnection,
         risk_free_rate: float = 0.01,
         batch_size: int = 50_000,
+        underlying_max_staleness_minutes: int = 15,
     ) -> None:
         self.con = con
         self.risk_free_rate = risk_free_rate
         self.batch_size = batch_size
+        # Max age of the nearest-prior underlying bar used as the spot price F for
+        # an option bar. The underlying future does not print every minute the
+        # option does; an ASOF join within this window supplies F from the last
+        # underlying bar instead of dropping the option. 0 = require an exact
+        # same-minute underlying bar (legacy behaviour).
+        self.underlying_max_staleness_minutes = int(underlying_max_staleness_minutes)
 
     def run(self, skip_existing: bool = False) -> None:
         """
@@ -216,6 +225,16 @@ class GreeksCalculator:
 
         # Step 1: Materialise pending rows once (expensive NOT EXISTS runs here,
         # not once per batch).
+        #
+        # The spot price F comes from the underlying future via a backward ASOF
+        # join: for each option bar, the nearest underlying bar at or before the
+        # option's ts_event. The future does not print every minute the option
+        # does, so an exact-equality join silently drops those options and leaves
+        # them with no greeks. The staleness filter bounds how old the borrowed
+        # underlying bar may be (0 minutes ⇒ exact same-minute match, the legacy
+        # behaviour); a small window keeps the match within the same session
+        # because the only intraday gaps larger than it are hours-long.
+        stale_minutes = self.underlying_max_staleness_minutes
         self.con.execute("DROP TABLE IF EXISTS _greek_pending")
         self.con.execute(
             f"""
@@ -228,12 +247,14 @@ class GreeksCalculator:
                 ob.strike_price,
                 ob."right",
                 ob.close        AS option_close,
-                ub.close        AS underlying_close
+                ub.close        AS underlying_close,
+                ub.ts_event     AS underlying_ts_event
             FROM option_bars ob
-            JOIN underlying_bars ub
-              ON ub.instrument_id = ob.underlying_id
-             AND ub.ts_event     = ob.ts_event
+            ASOF JOIN underlying_bars ub
+              ON ob.underlying_id = ub.instrument_id
+             AND ob.ts_event >= ub.ts_event
             WHERE ob.close IS NOT NULL
+              AND ob.ts_event - ub.ts_event <= INTERVAL '{stale_minutes} minutes'
             {new_only_filter}
             ORDER BY ob.ts_event, ob.instrument_id
             """
@@ -325,14 +346,21 @@ class GreeksCalculator:
         """
         Receive a batch DataFrame with columns:
             ts_event, instrument_id, underlying_id, expiration, strike_price,
-            right, option_close, underlying_close
+            right, option_close, underlying_close, underlying_ts_event
 
         Returns a DataFrame matching the option_greeks schema:
             ts_event, instrument_id, underlying_id, dte, T,
-            iv, delta, gamma, theta, vega
+            iv, delta, gamma, theta, vega, underlying_lag_s
         """
         today = df["ts_event"].dt.date()
         dte = (df["expiration"] - today).dt.total_days().cast(pl.Int32)
+
+        # Seconds between the option bar and the underlying bar that supplied F
+        # (0 when the same-minute underlying bar was used). Non-negative because
+        # the ASOF join only borrows prior underlying bars.
+        underlying_lag_s = (
+            (df["ts_event"] - df["underlying_ts_event"]).dt.total_seconds().cast(pl.Int32)
+        )
 
         # Use actual fractional time-to-expiry so 0DTE options get T > 0.
         # Integer-day DTE gives T=0 for same-day expiry, which produces NaN IV/greeks.
@@ -372,5 +400,6 @@ class GreeksCalculator:
                 "gamma": pl.Series(gamma_arr).cast(pl.Float64),
                 "theta": pl.Series(theta_arr).cast(pl.Float64),
                 "vega": pl.Series(vega_arr).cast(pl.Float64),
+                "underlying_lag_s": underlying_lag_s,
             }
         )

@@ -81,7 +81,8 @@ CREATE TABLE option_greeks (
     delta           DOUBLE,
     gamma           DOUBLE,
     theta           DOUBLE,
-    vega            DOUBLE
+    vega            DOUBLE,
+    underlying_lag_s INTEGER                     -- seconds between this bar and the underlying bar used for F
 );
 
 CREATE INDEX idx_option_greeks_lookup
@@ -94,6 +95,13 @@ CREATE INDEX idx_option_greeks_lookup
   in `option_bars` and storing them here would be pure duplication.
 - `underlying_close` and `option_close` are also omitted — they are the `close` columns of
   `underlying_bars` and `option_bars` respectively.
+- The spot price `F` is taken from the underlying future via a **backward ASOF join** —
+  the nearest underlying bar at or before each option bar, bounded by the build's
+  `--underlying-staleness-minutes` window (default 15; `0` = exact same-minute match).
+  This recovers greeks for option minutes the future did not print. `underlying_lag_s`
+  records how stale that borrowed bar was, in seconds (`0` for an exact match) — useful for
+  auditing/filtering greeks derived from a stale spot. The column is added by an automatic
+  `ADD COLUMN IF NOT EXISTS` migration to input DBs built before it existed.
 - `dte` and `T` are kept despite being derivable from `ts_event` and `expiration`. The leg
   selection query at entry time filters on `dte` as its primary range constraint
   (`WHERE dte BETWEEN 40 AND 50`). Keeping `dte` in `option_greeks` makes this a
