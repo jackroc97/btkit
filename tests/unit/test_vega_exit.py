@@ -62,7 +62,7 @@ class TestVegaExitPriority:
             instrument=InstrumentConfig(root_symbol="ES", asset_class="future"),
             entry=EntryConfig(window=EntryWindowConfig(start=time(9, 30), end=time(16, 0))),
             legs=[
-                LegConfig(name="short", right="put", action="sell_to_open", dte=0, delta=-0.16),
+                LegConfig(name="short", right="put", action="sell_to_open", dte=0, delta={"target": -0.16}),
                 LegConfig(name="long", right="put", action="buy_to_open", dte=0, strike_offset=-50.0, reference_leg="short"),
             ],
             exit=ExitConfig(vega_exit=vega_exit, dte_exit=dte_exit),

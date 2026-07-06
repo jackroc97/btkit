@@ -15,6 +15,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+import numpy as np
 import polars as pl
 
 from btkit.db.output_db import OutputDatabase
@@ -40,7 +41,11 @@ class PostProcessor:
         self.backtest_id = backtest_id
         self.study_id = effective_study_id
 
-    def metrics(self) -> dict[str, Any]:
+    def metrics(
+        self,
+        n_boot: int = 10_000,
+        seed: int | None = None,
+    ) -> dict[str, Any]:
         """
         Compute and return standard backtest metrics.
 
@@ -50,10 +55,15 @@ class PostProcessor:
             max_drawdown, max_drawdown_pct, cagr, mar,
             sharpe_ratio, sortino_ratio, calmar_ratio,
             premium_capture_rate,
-            avg_mae, median_mae, worst_mae
+            avg_mae, median_mae, worst_mae,
+            mean_pnl_ci_lower, mean_pnl_ci_upper,
+            win_rate_ci_lower, win_rate_ci_upper
 
         MAE metrics derived from: abs(worst_mark - open_mark) per position.
         Only valid when initialised with backtest_id (single run).
+
+        n_boot: number of bootstrap resamples for mean_pnl CI (default 10 000).
+        seed: optional RNG seed for reproducible CI results.
         """
         positions = self._load_positions()
         if positions.is_empty():
@@ -131,6 +141,11 @@ class PostProcessor:
         std_down = float(downside.std()) if len(downside) > 1 else 0.0
         sortino_ratio = (mean_daily / std_down * ann_factor) if std_down > 0 else float("inf")
 
+        rng = np.random.default_rng(seed)
+        pnl_arr = net_pnl.to_numpy()
+        ci_lo, ci_hi = self._bootstrap_mean_ci(pnl_arr, n_boot, rng=rng)
+        wr_lo, wr_hi = self._wilson_win_rate_ci(n_wins, total_trades)
+
         return {
             "net_profit": round(net_profit, 2),
             "total_trades": total_trades,
@@ -154,6 +169,10 @@ class PostProcessor:
             "avg_mae": round(avg_mae, 2),
             "median_mae": round(median_mae, 2),
             "worst_mae": round(worst_mae, 2),
+            "mean_pnl_ci_lower": round(ci_lo, 2),
+            "mean_pnl_ci_upper": round(ci_hi, 2),
+            "win_rate_ci_lower": round(wr_lo, 4),
+            "win_rate_ci_upper": round(wr_hi, 4),
         }
 
     def equity_curve(self) -> pl.DataFrame:
@@ -274,6 +293,8 @@ class PostProcessor:
             f"  Avg MAE:              ${m['avg_mae']:>10.2f}",
             f"  Median MAE:           ${m['median_mae']:>10.2f}",
             f"  Worst MAE:            ${m['worst_mae']:>10.2f}",
+            f"  Mean PnL 95% CI:      [${m['mean_pnl_ci_lower']:>8.2f}, ${m['mean_pnl_ci_upper']:>8.2f}]",
+            f"  Win Rate 95% CI:      [{m['win_rate_ci_lower'] * 100:>7.1f}%, {m['win_rate_ci_upper'] * 100:>7.1f}%]",
         ]
         return "\n".join(lines)
 
@@ -350,6 +371,51 @@ class PostProcessor:
         return max_dd, max_dd_pct
 
     @staticmethod
+    def _bootstrap_mean_ci(
+        pnl: np.ndarray,
+        n_boot: int = 10_000,
+        confidence: float = 0.95,
+        rng: np.random.Generator | None = None,
+    ) -> tuple[float, float]:
+        """Percentile bootstrap CI for mean P&L.
+
+        Resamples the trade P&L array with replacement n_boot times and
+        returns the (alpha/2, 1-alpha/2) percentiles of the bootstrap
+        distribution of sample means.
+        """
+        if len(pnl) == 0:
+            return (0.0, 0.0)
+        rng = rng or np.random.default_rng()
+        idx = rng.integers(0, len(pnl), size=(n_boot, len(pnl)))
+        boot_means = pnl[idx].mean(axis=1)
+        alpha = (1.0 - confidence) / 2.0
+        lo, hi = np.percentile(boot_means, [alpha * 100, (1.0 - alpha) * 100])
+        return (float(lo), float(hi))
+
+    @staticmethod
+    def _wilson_win_rate_ci(
+        n_wins: int,
+        n_total: int,
+        confidence: float = 0.95,
+    ) -> tuple[float, float]:
+        """Wilson score interval for win rate.
+
+        Preferred over the Wald (normal-approximation) interval because it
+        stays within [0, 1] and has correct nominal coverage near 0 and 1.
+        z-scores for common confidence levels are hardcoded to avoid a scipy
+        dependency.
+        """
+        if n_total == 0:
+            return (0.0, 0.0)
+        _z = {0.90: 1.644854, 0.95: 1.959964, 0.99: 2.575829}
+        z = _z.get(confidence, 1.959964)
+        p = n_wins / n_total
+        denom = 1.0 + z**2 / n_total
+        center = (p + z**2 / (2.0 * n_total)) / denom
+        half_w = z * math.sqrt(p * (1.0 - p) / n_total + z**2 / (4.0 * n_total**2)) / denom
+        return (max(0.0, center - half_w), min(1.0, center + half_w))
+
+    @staticmethod
     def _empty_metrics() -> dict[str, Any]:
         return {
             "net_profit": 0.0,
@@ -370,4 +436,8 @@ class PostProcessor:
             "avg_mae": 0.0,
             "median_mae": 0.0,
             "worst_mae": 0.0,
+            "mean_pnl_ci_lower": 0.0,
+            "mean_pnl_ci_upper": 0.0,
+            "win_rate_ci_lower": 0.0,
+            "win_rate_ci_upper": 0.0,
         }

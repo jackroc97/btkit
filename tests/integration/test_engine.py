@@ -6,9 +6,23 @@ verifies structural and semantic correctness of the output.
 
 from __future__ import annotations
 
+from datetime import date, time
 from pathlib import Path
 
 from btkit.backtest.engine import BacktestEngine
+from btkit.strategy.definition import (
+    DeltaStep,
+    EntryConfig,
+    EntryWindowConfig,
+    ExitConfig,
+    InstrumentConfig,
+    LegConfig,
+    SimpleDeltaConfig,
+    SteppedDeltaConfig,
+    StrategyDefinition,
+    TradeDefinition,
+    UniverseConfig,
+)
 from btkit.strategy.loader import load_strategy
 
 STRATEGIES_DIR = Path(__file__).parent.parent / "fixtures" / "strategies"
@@ -165,6 +179,20 @@ class TestExitReasons:
         }
         assert reasons == {"expiry"}
 
+    def test_expiry_exit_marks_non_negative(self, input_db, output_db):
+        """
+        Credit-spread expiry marks must be >= 0.  A negative exit_mark is
+        physically impossible (lower-strike option cannot be worth less than
+        the higher-strike option of the same type/expiry) and indicates a
+        stale forward-fill contaminating the mark.  Settlement-based expiry
+        marks are computed from underlying intrinsic values and are always >= 0.
+        """
+        _run("exit_expiry", input_db, output_db)
+        bad = _con(output_db).execute(
+            "SELECT COUNT(*) FROM position WHERE exit_reason = 'expiry' AND exit_mark < 0"
+        ).fetchone()[0]
+        assert bad == 0, f"{bad} expiry exits have negative exit_mark"
+
 
 # ---------------------------------------------------------------------------
 # Indicator conditions
@@ -239,3 +267,249 @@ class TestMultiTrade:
                         f"Overlap in {trade_name}: position {i} exits at {prev_exit} "
                         f"but position {i + 1} opens at {next_open}"
                     )
+
+
+# ---------------------------------------------------------------------------
+# Stepped delta
+# ---------------------------------------------------------------------------
+
+
+def _make_stepped_strategy(steps: list[DeltaStep]) -> StrategyDefinition:
+    """Strategy with a single short-put delta leg driven by sma_5 steps; no conditions."""
+    return StrategyDefinition(
+        name="stepped_delta_test",
+        universe=UniverseConfig(
+            start_date=date(2026, 4, 22),
+            end_date=date(2026, 5, 21),
+        ),
+        trades=[
+            TradeDefinition(
+                name="short_put",
+                instrument=InstrumentConfig(root_symbol="ES", asset_class="future"),
+                entry=EntryConfig(
+                    window=EntryWindowConfig(start=time(10, 0), end=time(12, 0)),
+                ),
+                legs=[
+                    LegConfig(
+                        name="sp",
+                        right="put",
+                        action="sell_to_open",
+                        dte=21,
+                        delta=SteppedDeltaConfig(
+                            step_source="sma_5",
+                            tolerance=0.15,
+                            steps=steps,
+                        ),
+                    )
+                ],
+                exit=ExitConfig(stop_loss=2.0, take_profit=1.0),
+            )
+        ],
+    )
+
+
+class TestSteppedDelta:
+    """
+    Regression and correctness tests for IV-stepped delta leg selection.
+
+    Uses the sma_5 indicator (5-bar SMA of ES close) which ranges from
+    ~7150 to ~7540 during the test universe window.
+    """
+
+    def test_no_crash_when_no_conditions(self, input_db, output_db):
+        """
+        Regression: _load_indicators_once() must fetch indicators for stepped-delta
+        legs even when entry.conditions and exit.conditions are both empty.
+        Before the fix this raised ColumnNotFoundError inside _select_legs.
+        """
+        strat = _make_stepped_strategy(
+            steps=[DeltaStep(target=-0.25, tolerance=0.10)]  # catch-all only
+        )
+        engine = BacktestEngine(input_db, output_db, strat)
+        engine.run()
+        n = output_db._con.execute("SELECT COUNT(*) FROM position").fetchone()[0]
+        assert n > 0, "Should produce at least one position with a catch-all step"
+
+    def test_catch_all_matches_flat_delta(self, input_db, output_db):
+        """
+        A catch-all stepped config (single step, no below) with the same target and
+        tolerance as a flat SimpleDeltaConfig should produce identical positions.
+        """
+        stepped_strat = _make_stepped_strategy(
+            steps=[DeltaStep(target=-0.25, tolerance=0.10)]
+        )
+        flat_strat = StrategyDefinition(
+            name="flat_delta_test",
+            universe=stepped_strat.universe,
+            trades=[
+                TradeDefinition(
+                    name="short_put",
+                    instrument=stepped_strat.trades[0].instrument,
+                    entry=stepped_strat.trades[0].entry,
+                    legs=[
+                        LegConfig(
+                            name="sp",
+                            right="put",
+                            action="sell_to_open",
+                            dte=21,
+                            delta=SimpleDeltaConfig(target=-0.25, tolerance=0.10),
+                        )
+                    ],
+                    exit=stepped_strat.trades[0].exit,
+                )
+            ],
+        )
+
+        from btkit.db.output_db import OutputDatabase
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as tmp:
+            flat_out = OutputDatabase(str(pathlib.Path(tmp) / "flat.db"))
+            flat_out.create_schema()
+            BacktestEngine(input_db, flat_out, flat_strat).run()
+            BacktestEngine(input_db, output_db, stepped_strat).run()
+
+            n_flat = flat_out._con.execute("SELECT COUNT(*) FROM position").fetchone()[0]
+            n_stepped = output_db._con.execute("SELECT COUNT(*) FROM position").fetchone()[0]
+
+        assert n_stepped == n_flat, (
+            f"Catch-all stepped config produced {n_stepped} positions vs {n_flat} for flat delta"
+        )
+
+    def test_two_steps_both_fire(self, input_db, output_db):
+        """
+        With a threshold of 7300 the sma_5 values during the entry window split
+        roughly evenly (below: ~1200 bars, above: ~1440 bars), so both steps
+        should produce positions.
+
+        Step 1 (sma_5 < 7300): target -0.10  — shallower delta
+        Catch-all (sma_5 >= 7300): target -0.25 — deeper delta
+
+        Verify that entry_delta values from both steps appear in the results.
+        The midpoint -0.175 separates the two targets; both sides should be populated.
+        """
+        strat = _make_stepped_strategy(
+            steps=[
+                DeltaStep(below=7300.0, target=-0.10, tolerance=0.15),
+                DeltaStep(target=-0.25, tolerance=0.15),  # catch-all
+            ]
+        )
+        engine = BacktestEngine(input_db, output_db, strat)
+        engine.run()
+
+        deltas = [
+            row[0]
+            for row in output_db._con.execute(
+                "SELECT entry_delta FROM position_leg"
+            ).fetchall()
+            if row[0] is not None
+        ]
+        assert len(deltas) > 0, "No positions with delta data"
+
+        midpoint = -0.175
+        near_shallow = sum(1 for d in deltas if d > midpoint)   # closer to -0.10
+        near_deep = sum(1 for d in deltas if d <= midpoint)     # closer to -0.25
+
+        assert near_shallow > 0, (
+            "No positions from step 1 (sma_5 < 7300, target -0.10). "
+            f"All {len(deltas)} deltas: {sorted(deltas)[:5]}..."
+        )
+        assert near_deep > 0, (
+            "No positions from catch-all (sma_5 >= 7300, target -0.25). "
+            f"All {len(deltas)} deltas: {sorted(deltas)[:5]}..."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Forward-contract visibility (quarterly roll gap)
+# ---------------------------------------------------------------------------
+
+
+class TestForwardContractVisibility:
+    """
+    Regression for the bug where options listed under the *next* quarterly
+    futures contract were invisible when target DTE exceeded the front-month's
+    remaining life.
+
+    Test DB facts used here:
+      - ESM6 (id=42140864) expires 2026-06-18; its option chain ends 2026-06-17.
+      - ESU6 (id=42140870) option chain starts 2026-06-18.
+      - For a 45-DTE ± 10 strategy, ESM6 has qualifying options only through
+        ~2026-05-13. From 2026-05-14 onward ALL 35-55 DTE options are on ESU6.
+      - Before the fix, entries were absent for 2026-05-14 to 2026-05-21
+        because ts_event_underlying contained only ESM6 pairs.
+    """
+
+    def _make_45dte_strategy(self) -> StrategyDefinition:
+        return StrategyDefinition(
+            name="forward_contract_test",
+            universe=UniverseConfig(
+                start_date=date(2026, 4, 22),
+                end_date=date(2026, 5, 21),
+            ),
+            trades=[
+                TradeDefinition(
+                    name="short_put",
+                    instrument=InstrumentConfig(root_symbol="ES", asset_class="future"),
+                    entry=EntryConfig(
+                        window=EntryWindowConfig(start=time(9, 30), end=time(15, 0)),
+                    ),
+                    legs=[
+                        LegConfig(
+                            name="sp",
+                            right="put",
+                            action="sell_to_open",
+                            dte=45,
+                            dte_tolerance=10,
+                            delta=SimpleDeltaConfig(target=-0.25, tolerance=0.20),
+                        )
+                    ],
+                    exit=ExitConfig(stop_loss=3.0, take_profit=0.5),
+                )
+            ],
+        )
+
+    def test_entries_found_during_next_contract_window(self, input_db, output_db):
+        """
+        Entries must be produced during 2026-05-14 to 2026-05-21 — the period
+        where all 35-55 DTE puts are under ESU6, not ESM6.  Before the fix,
+        zero positions opened in this window.
+        """
+        strat = self._make_45dte_strategy()
+        engine = BacktestEngine(input_db, output_db, strat)
+        engine.run()
+
+        positions = output_db._con.execute(
+            "SELECT COUNT(*) FROM position "
+            "WHERE open_time >= '2026-05-14' AND open_time < '2026-05-22'"
+        ).fetchone()[0]
+
+        assert positions > 0, (
+            "No positions opened during 2026-05-14 to 2026-05-21. "
+            "The forward-contract visibility fix may be broken: options on ESU6 "
+            "are invisible when ts_event_underlying only contains ESM6 pairs."
+        )
+
+    def test_entries_span_full_period(self, input_db, output_db):
+        """
+        Positions should be found across the whole test window, not just the
+        ESM6-only period.  Total count with fix should exceed that of a strategy
+        artificially restricted to ESM6-covered dates.
+        """
+        import tempfile, pathlib
+        from btkit.db.output_db import OutputDatabase
+
+        strat = self._make_45dte_strategy()
+        engine = BacktestEngine(input_db, output_db, strat)
+        engine.run()
+
+        n_early = output_db._con.execute(
+            "SELECT COUNT(*) FROM position "
+            "WHERE open_time >= '2026-04-22' AND open_time < '2026-05-14'"
+        ).fetchone()[0]
+        n_late = output_db._con.execute(
+            "SELECT COUNT(*) FROM position "
+            "WHERE open_time >= '2026-05-14' AND open_time < '2026-05-22'"
+        ).fetchone()[0]
+
+        assert n_early > 0, "No positions in ESM6-only window (expected entries here regardless)"
+        assert n_late > 0, "No positions in ESU6 window (forward-contract visibility fix required)"

@@ -65,13 +65,15 @@ strategy:
         max_debit:   2.00           # skip entry if open_mark > this (optional)
         max_entries_per_day: 1      # cap total positions opened per calendar day (optional)
         no_reentry_after_loss: true # block same-day re-entry after a stop-loss exit (optional)
+        time_tolerance: 300         # seconds; allow greeks timestamps to differ from bar by up to this (optional, default 0)
 
       # Leg definitions — numeric fields accept scalar, list, or range (see Sweep Parameters)
       legs:
         - name:     short_put
           right:    put
           action:   sell_to_open
-          delta:    [-0.20, -0.25, -0.30]   # list sweep
+          delta:
+            target: [-0.20, -0.25, -0.30]  # list sweep
           dte:
             start: 30
             stop:  60
@@ -134,7 +136,7 @@ strategy:
         window: {start: "09:30", end: "14:00"}
         conditions: ["vix_close < 30", "rsi_14 < 40"]
       legs:
-        - {name: short_put, right: put,  action: sell_to_open, delta: -0.20, dte: 45, quantity: 1}
+        - {name: short_put, right: put,  action: sell_to_open, delta: {target: -0.20}, dte: 45, quantity: 1}
         - {name: long_put,  right: put,  action: buy_to_open,  reference_leg: short_put, strike_offset: -25.0, quantity: 1}
       exit:
         stop_loss:   2.0
@@ -149,7 +151,7 @@ strategy:
         window: {start: "09:30", end: "14:00"}
         conditions: ["vix_close < 30", "rsi_14 > 60"]
       legs:
-        - {name: short_call, right: call, action: sell_to_open, delta: 0.20, dte: 45, quantity: 1}
+        - {name: short_call, right: call, action: sell_to_open, delta: {target: 0.20}, dte: 45, quantity: 1}
         - {name: long_call,  right: call, action: buy_to_open,  reference_leg: short_call, strike_offset: 25.0, quantity: 1}
       exit:
         stop_loss:   2.0
@@ -166,16 +168,19 @@ range. The cartesian product of all non-scalar parameters forms the matrix.
 
 ```yaml
 # Scalar — single value, fixed across all combinations
-delta: -0.30
+delta:
+  target: -0.30
 
 # List — one combination per value
-delta: [-0.20, -0.25, -0.30]
+delta:
+  target: [-0.20, -0.25, -0.30]
 
 # Range — generates values from start to stop inclusive at the given step
 delta:
-  start: -0.20
-  stop:  -0.35
-  step:  -0.05              # generates [-0.20, -0.25, -0.30, -0.35]
+  target:
+    start: -0.20
+    stop:  -0.35
+    step:  -0.05            # generates [-0.20, -0.25, -0.30, -0.35]
 
 # List with null — include "exit disabled" as one combination
 # (valid for exit fields only; null is not meaningful for delta or dte)
@@ -188,7 +193,7 @@ take_profit_pct: [null, 0.70]       # 2 combos: no TP, 70% of open mark
 
 | Parameter | Location |
 |---|---|
-| `delta` | `legs[n]` |
+| `delta.target` | `legs[n]` |
 | `dte` | `legs[n]` |
 | `take_profit` | `exit` |
 | `stop_loss` | `exit` |
@@ -198,7 +203,7 @@ take_profit_pct: [null, 0.70]       # 2 combos: no TP, 70% of open mark
 | `roll.vega` | `roll` |
 | `roll.conditions` | `roll` (each element is a string, not swept) |
 
-A strategy with `delta: [0.20, 0.25, 0.30]` and `dte: [30, 45]` expands to
+A strategy with `delta.target: [0.20, 0.25, 0.30]` and `dte: [30, 45]` expands to
 3 × 2 = 6 combinations. The `matrix.max_combinations` guard raises an error before
 any backtest runs if the expansion exceeds the configured limit, forcing the user to
 either reduce the parameter space or explicitly raise the cap.
@@ -224,19 +229,19 @@ definition. Only the parameters that differ need to be specified per combination
 ```yaml
   combinations:
     - short_put:
-        delta: -0.20
+        delta: {target: -0.20}
         dte:   30
       exit:
         stop_loss: 1.50
 
     - short_put:
-        delta: -0.25
+        delta: {target: -0.25}
         dte:   45
       exit:
         stop_loss: 2.00
 
     - short_put:
-        delta: -0.30
+        delta: {target: -0.30}
         dte:   45
       exit:
         stop_loss: 2.50
@@ -246,10 +251,10 @@ definition. Only the parameters that differ need to be specified per combination
 Multi-leg combinations are written naturally by including multiple leg names:
 
 ```yaml
-    - short_put: {delta: -0.30, dte: 45}
-      long_put:  {delta: -0.15, dte: 45}
-    - short_put: {delta: -0.25, dte: 30}
-      long_put:  {delta: -0.10, dte: 30}
+    - short_put: {delta: {target: -0.30}, dte: 45}
+      long_put:  {delta: {target: -0.15}, dte: 45}
+    - short_put: {delta: {target: -0.25}, dte: 30}
+      long_put:  {delta: {target: -0.10}, dte: 30}
 ```
 
 ### Table Mode
@@ -261,7 +266,7 @@ syntax is available. Column headers use dot-path notation (`leg_name.param` or
 ```yaml
   combinations:
     mode: table
-    columns: [short_put.delta, short_put.dte, exit.stop_loss]
+    columns: [short_put.delta.target, short_put.dte, exit.stop_loss]
     rows:
       - [-0.20, 30, 1.50]
       - [-0.25, 45, 2.00]
@@ -359,7 +364,42 @@ class EntryConfig(BaseModel):
     max_debit:           NumericSweep | None = None  # enter only if open_mark <= this value
     max_entries_per_day: int | None = None           # None = unlimited re-entries per day
     no_reentry_after_loss: bool = False              # block same-day re-entry after a stop-loss exit
+    time_tolerance: int = 0                          # seconds; 0 = exact timestamp match (legacy); see Greeks Timestamp Tolerance
 
+
+class SimpleDeltaConfig(BaseModel):
+    target:    NumericSweep   # e.g. -0.25 or [-0.20, -0.25] for sweep
+    tolerance: float = 0.10  # ±band around target for candidate search
+
+class DeltaStep(BaseModel):
+    below:     float | None   # fire when source < below; None = catch-all (must be last)
+    target:    float
+    tolerance: float | None   # None → inherit SteppedDeltaConfig.tolerance
+
+class SteppedDeltaConfig(BaseModel):
+    step_source: str           # indicator column name (e.g. "ves1d_close")
+    tolerance:   float = 0.10  # fallback tolerance for steps without an explicit value
+    steps:       list[DeltaStep]
+
+class SteppedStep(BaseModel):            # one bucket of a unified stepped: block
+    below:           float | None        # fire when source < below; None = catch-all (must be last)
+    dte:             int                 # required
+    delta:           float               # required
+    delta_tolerance: float | None = None # None → 0.10
+    dte_tolerance:   int | None = None   # None → leg-level dte_tolerance
+
+class SteppedLegConfig(BaseModel):
+    source: str                          # indicator column name (e.g. "iv_percentile")
+    steps:  list[SteppedStep]
+
+class LegTarget(BaseModel):              # one named conditional selection
+    priority:        int | None          # required for non-default; forbidden for default
+    condition:       str | None          # required for non-default; forbidden for default
+    dte:             int                  # required
+    delta:           float                # required
+    delta_tolerance: float | None = None  # None → 0.10
+    dte_tolerance:   int | None = None    # None → leg-level dte_tolerance
+    size_multiplier: float = 1.0          # reserved (no-op); warns when != 1.0
 
 class LegConfig(BaseModel):
     name:            str
@@ -367,13 +407,16 @@ class LegConfig(BaseModel):
     action:          Literal["buy_to_open", "sell_to_open"]
     dte:             IntSweep | None = None   # required for delta legs; None = inherit parent expiry for offset legs
     quantity:        int = 1
-    # Selection mode A: delta-targeted
-    delta:           NumericSweep | None = None
-    delta_tolerance: float = 0.10
+    # Selection mode A: delta-targeted (fixed or IV-stepped)
+    delta:           SimpleDeltaConfig | SteppedDeltaConfig | None = None
     dte_tolerance:   int = 5
     # Selection mode B: fixed offset from a reference leg
     strike_offset:   float | None = None   # positive = above ref strike, negative = below
     reference_leg:   str | None = None     # name of the delta-targeted leg to offset from
+    # Selection mode C: unified indicator-conditioned (dte, delta) stepping
+    stepped:         SteppedLegConfig | None = None
+    # Selection mode D: named, priority-resolved conditional targets
+    targets:         dict[str, LegTarget] | None = None
 
 
 class StopLossConfig(BaseModel):
@@ -624,6 +667,77 @@ open after the stop.
 
 ---
 
+### Greeks Timestamp Tolerance (`time_tolerance`)
+
+`entry.time_tolerance` controls how closely an `option_greeks` snapshot timestamp must
+align with the candidate bar timestamp for an entry to fire. It is expressed in
+**seconds** and defaults to `0` (exact match required).
+
+```yaml
+entry:
+  window:
+    start: "10:00"
+    end:   "10:30"
+  time_tolerance: 300   # accept greeks snapshots within ±5 minutes of the bar timestamp
+```
+
+**Default: `0` — exact match.**  
+A candidate bar at 10:00:00 only produces an entry if there is an `option_greeks` row
+at exactly 10:00:00 for the target underlying. This is the legacy behaviour and is safe
+when the input database was built from a single ingest pipeline that writes greeks and
+underlying bars at identical timestamps.
+
+#### When to use a non-zero tolerance
+
+Some production databases are assembled from multiple data sources that publish greeks
+and underlying-bar data at slightly different minute marks — for example, greeks arriving
+at `:05` past each minute while underlying bars are at `:00`. With `time_tolerance: 0`,
+these databases produce no entries on the affected dates even though valid options exist.
+Setting `time_tolerance` to cover the ingest offset (typically 60–300 seconds) restores
+correct behaviour.
+
+#### How it works
+
+The entry scanner selects options using an **ASOF nearest-time join** grouped by
+calendar date:
+
+1. For each greeks snapshot timestamp, the best-matching option is identified (smallest
+   `|actual_delta − target_delta|` within DTE tolerance).
+2. For each candidate bar at time T, the join finds the greeks snapshot at time T′ on
+   the **same calendar date** where `|T′ − T|` is smallest.
+3. A match is accepted only if `|T′ − T| ≤ time_tolerance`. When `time_tolerance: 0`
+   this requires T′ = T exactly.
+4. The entry is recorded at the bar's timestamp T; the option price and greeks come
+   from the T′ snapshot.
+
+**Priority: timestamp first.** When multiple greeks snapshots fall within the tolerance
+window, the nearest in time is selected — not the one with the best delta. For example,
+with `time_tolerance: 600` and a -0.10 ± 0.03 target, a -0.075 snapshot at T+1min wins
+over a -0.11 snapshot at T+6min even though the latter is a closer delta match. If you
+need delta-optimal selection across a wide time window, narrow the entry window or
+pre-aggregate your greeks data to a consistent timestamp before ingesting.
+
+**Calendar date boundary is always respected.** The `by`-date grouping in the ASOF join
+ensures that no greeks snapshot from a different calendar day is matched, regardless of
+how large `time_tolerance` is set.
+
+#### Choosing a value
+
+| Scenario | Recommended value |
+|---|---|
+| Single ingest pipeline, timestamps guaranteed identical | `0` (default) |
+| Greeks and bars from different vendors, offset ≤ 1 min | `60` |
+| Known `:05`-past-minute greeks vs `:00` bars | `300` |
+| Heterogeneous database, worst-case offset unknown | Start with `300`, verify no same-day cross-session contamination |
+
+Setting `time_tolerance` too large relative to the entry window is harmless — the
+greeks query's `ts_event BETWEEN ts_min AND ts_max` range filter (built from candidate
+bar timestamps) already prevents snapshots from outside the entry window from being
+considered. The worst-case price staleness is bounded by the entry window width, not by
+`time_tolerance`.
+
+---
+
 ## Entry Condition Evaluation
 
 All entry conditions — indicator values, underlying bar values, leg properties, and
@@ -662,6 +776,41 @@ Every condition expression has access to the following columns:
 
 Leg property references use dot notation (`<leg_name>.<field>`). Indicator names must
 not contain dots — this is the delimiter that identifies leg property references.
+
+### Indicator Alignment (session-scoped as-of join)
+
+Indicators are frequently **coarser than the 1-minute entry grid** — a daily regime
+signal has one value per session, a 5-minute VES value one per five bars. To make these
+usable in conditions (and in `stepped:` / `targets:` selection) without pre-expanding
+them to every minute, indicator columns are merged onto entry candidates with a
+**session-scoped backward as-of join**:
+
+- Each candidate receives the **most recent indicator value at or before its own
+  timestamp**, per column.
+- The match is scoped to the **session-local calendar date** (the `universe.session`
+  timezone) and is **never filled across the session boundary** — a new session starts
+  fresh.
+- Mixed-cadence indicators in one wide frame are handled column-by-column: a row carries
+  the latest value of *each* column independently, even when that column had no value on
+  the exact matched row.
+
+**What this means in practice:**
+
+| Situation | Behaviour |
+|---|---|
+| Daily indicator (one value/session) | Gates **every** intraday entry in that session, not just entries landing on the indicator's timestamp. |
+| 5-minute indicator | Every 1-minute candidate inherits the latest 5-minute value ≤ its timestamp. |
+| Candidate **before** the session's first indicator value | Value is `null` → the condition fails / a step resolves null → the entry is skipped. |
+| First candidate of a new session | Never inherits the previous session's last value. |
+
+This applies uniformly to entry `conditions`, exit `conditions`, `roll.conditions`, and
+the `stepped:` / `targets:` selectors — all of them read indicator columns through the
+same as-of merge. You no longer need to forward-fill a daily indicator to the full
+1-minute grid at build time purely to make it joinable.
+
+> An optional per-indicator staleness guard (reject values older than *N* minutes) is a
+> planned enhancement; today a value is carried forward for the remainder of its session
+> regardless of age.
 
 ### Condition Syntax
 
@@ -1107,7 +1256,8 @@ strategy:
         - name:     short_put
           right:    put
           action:   sell_to_open
-          delta:    -0.30
+          delta:
+            target: -0.30
           dte:      21
           quantity: 1
 
@@ -1466,11 +1616,161 @@ best_match = argmin |actual_delta - target_delta|
 ```
 
 Default tolerances (configurable per leg):
-- `delta_tolerance: 0.05`
+- `delta.tolerance: 0.10`
 - `dte_tolerance: 5`
 
 If no option is found within tolerance at a given entry timestamp, that entry is
 skipped entirely — all legs must be fillable for an entry to be recorded.
+
+### IV-Stepped Delta
+
+Instead of a fixed delta target, a leg can select different delta targets based on the
+current value of any pre-loaded indicator (e.g. a VIX-like index). Steps are evaluated
+in order; the first where `source < below` wins. A catch-all step (no `below`) handles
+everything else. If the source is null or no step matches and there is no catch-all, the
+entry is skipped (same as "no option found within tolerance").
+
+```yaml
+legs:
+  - name:  short_put
+    right: put
+    action: sell_to_open
+    dte:   21
+    delta:
+      step_source: ves1d_close   # indicator column to condition on
+      tolerance:   0.10          # fallback tolerance for steps without an explicit value
+      steps:
+        - below: 10              # ves1d_close < 10  → sell a smaller delta
+          target: -0.10
+          tolerance: 0.03
+        - below: 15              # ves1d_close < 15  → moderate delta
+          target: -0.12
+          tolerance: 0.05
+        -                        # catch-all — fires when ves1d_close >= 15
+          target: -0.15
+          # tolerance omitted → inherits the top-level tolerance: 0.10
+```
+
+Steps are evaluated in declaration order. Tolerance per step is optional; when omitted,
+`SteppedDeltaConfig.tolerance` is used. IV-stepped delta cannot be combined with
+`strike_offset` legs, and `delta.target` sweeps are not available on stepped configs
+(use fixed step targets with sweep on other parameters such as `exit.stop_loss`).
+
+### Unified Stepped Leg (`stepped:`) — indicator-conditioned DTE **and** delta
+
+`delta.step_source` (above) conditions only the **delta** target; the DTE is fixed.
+When a leg's **DTE and delta both vary by market state**, use the leg-level `stepped:`
+block instead. It is a single 1-D threshold selector that emits the full per-bucket
+selection tuple `(dte, delta, delta_tolerance, dte_tolerance)` from one indicator source.
+
+```yaml
+legs:
+  - name:  short_put
+    right: put
+    action: sell_to_open
+    stepped:                       # replaces scalar dte:/delta: on this leg
+      source: iv_percentile        # any pre-loaded indicator column
+      steps:                       # evaluated top-down; first `source < below` wins
+        - below: 0.33              # LOW  bucket
+          dte: 2
+          delta: -0.10
+          delta_tolerance: 0.015
+        - below: 0.67              # MID  bucket
+          dte: 2
+          delta: -0.085
+          delta_tolerance: 0.012
+        - dte: 1                   # HIGH bucket (catch-all — no `below`, must be last)
+          delta: -0.07
+          delta_tolerance: 0.010
+```
+
+Rules:
+
+- Every step **must** set both `dte` and `delta` (each step is self-contained).
+  `delta_tolerance` and `dte_tolerance` are optional per step — when omitted they fall
+  back to `0.10` and the leg's `dte_tolerance` (default `5`) respectively.
+- Steps are evaluated in declaration order; the first where `source < below` wins. A
+  single trailing catch-all (no `below`) handles everything else. If the source is null,
+  or no step matches and there is no catch-all, the entry is skipped.
+- `stepped:` is mutually exclusive with scalar `dte:`, `delta:`, and `strike_offset:` on
+  the same leg.
+- Works with `strike_offset` **long legs**: the long leg keeps its
+  `reference_leg`/`strike_offset` and inherits the *selected* short-leg strike **and**
+  expiry, so a stepped DTE flows through to the long leg automatically.
+
+`stepped:` is the terse single-axis threshold tool. For multi-axis, named,
+priority-resolved selection see [Named Conditional Targets](#named-conditional-targets-targets).
+
+> **Indicator alignment.** Step sources (and all entry/exit `conditions`) are merged onto
+> entry candidates with a **session-scoped backward as-of join**: each candidate receives
+> the most recent indicator value at or before its timestamp within the session, never
+> filled across the session boundary. A daily or 5-minute source therefore gates **every**
+> intraday entry in its session — no need to pre-expand indicators to the 1-minute grid.
+
+### Named Conditional Targets (`targets`)
+
+`stepped:` conditions on a single indicator with 1-D `below` thresholds. Real
+selections are often **multi-axis** (e.g. IV-percentile tercile × term-structure
+state). The leg-level `targets:` map expresses these as named selections, each guarded
+by a full `condition` expression and an explicit `priority`.
+
+```yaml
+legs:
+  - name:  short_put
+    right: put
+    action: sell_to_open
+    targets:                       # named conditional selections for this leg
+      low_contango:
+        priority: 10
+        condition: "iv_percentile < 0.33 and ts_ratio <= 0.9061"
+        dte: 2
+        delta: -0.10
+        delta_tolerance: 0.015
+        size_multiplier: 1.0
+      high_backwardation:
+        priority: 90
+        condition: "iv_percentile >= 0.67 and ts_ratio >= 0.9986"
+        dte: 0
+        delta: -0.05
+        delta_tolerance: 0.01
+        size_multiplier: 0.35
+      default:                     # reserved fallback: no condition, no priority
+        dte: 1
+        delta: -0.08
+        delta_tolerance: 0.012
+```
+
+**Selection semantics.** At each entry timestamp every non-`default` target's
+`condition` is evaluated; among those true, the target with the **highest `priority`
+wins**. Precedence is explicit and independent of YAML map order, so overlapping
+conditions resolve deterministically. The reserved `default` (no condition, no priority)
+is chosen only when no target matches; if it is absent and nothing matches, the entry is
+skipped.
+
+**Rules.**
+
+- `targets` is a map of `name → target`. Every non-`default` target **requires** both
+  `condition` (a condition expression) and `priority` (an integer).
+- `priority` values must be **unique** across the map — a duplicate is a validation
+  error. Space them `10 / 20 / 30 …` so new cells get distinct numbers cheaply.
+- `dte` and `delta` are **required** on every target (each is self-contained);
+  `delta_tolerance` → `0.10` and `dte_tolerance` → the leg's `dte_tolerance` when omitted.
+- `targets` is mutually exclusive with scalar `dte:` / `delta:`, `strike_offset:`, and
+  `stepped:` on the same leg. At most **one** leg per trade may use `targets` (so each
+  position has a single target attribution).
+- `strike_offset` **long legs** inherit the **winning target's** selected strike **and**
+  expiry.
+- **Position tagging.** Each resulting position is tagged with the winning target's name
+  in the output DB's `position.target_name` column, so per-target P&L attribution comes
+  back from a single trade — no need to split into N gated trades.
+
+**`size_multiplier`** is parsed and validated now but is **reserved** — position sizing
+is not yet implemented, so a non-`1.0` value is a no-op and emits a warning. This keeps
+configs forward-compatible for when sizing lands.
+
+Because mutually-exclusive predicates yield exactly one match, a single `targets` leg
+reproduces an N-gated-trade construction as **one trade** — removing the cross-cell
+position overlap that per-trade one-at-a-time allows in the multi-trade workaround.
 
 ---
 

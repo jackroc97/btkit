@@ -74,8 +74,7 @@ def _make_strategy(
                         right="put",
                         action="sell_to_open",
                         dte=dte,
-                        delta=delta,
-                        delta_tolerance=delta_tolerance,
+                        delta={"target": delta, "tolerance": delta_tolerance},
                         dte_tolerance=dte_tolerance,
                     )
                 ],

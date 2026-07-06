@@ -53,7 +53,7 @@ def _make_scanner(leg_out: bool = True) -> ExitScanner:
                         right="put",
                         action="sell_to_open",
                         dte=0,
-                        delta=-0.16,
+                        delta={"target": -0.16},
                     ),
                     LegConfig(
                         name="long_put",
@@ -239,7 +239,7 @@ class TestAdjustLegOutExits:
                             right="put",
                             action="sell_to_open",
                             dte=0,
-                            delta=-0.16,
+                            delta={"target": -0.16},
                         ),
                     ],
                     exit=ExitConfig(take_profit_pct=0.50, leg_out=True),
@@ -324,7 +324,7 @@ def _make_scanner_with_volume(leg_out: bool, min_exit_volume: int) -> ExitScanne
                         right="put",
                         action="sell_to_open",
                         dte=0,
-                        delta=-0.16,
+                        delta={"target": -0.16},
                     ),
                     LegConfig(
                         name="long_put",

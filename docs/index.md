@@ -83,6 +83,9 @@ re-engineering of the project where necessary.
    - **`btkit analyze`** — Compute metrics, open results dashboard.
   - **`btkit db extend`** — Extend a target database with runs from one or more source databases. See
     [Output Database Utilities](database.md#output-database-utilities).
+  - **`btkit db set-equity`** — Update `initial_equity` for a set of backtests so that
+    equity-based metrics (CAGR, drawdown %, MAR) reflect a different account size. See
+    [Output Database Utilities](database.md#btkit-db-set-equity----update-initial-equity-and-recalculate-metrics).
 
 ---
 
@@ -95,6 +98,7 @@ re-engineering of the project where necessary.
 | [strategy.md](strategy.md) | Strategy YAML schema, Pydantic models, condition expressions, exit priority |
 | [study.md](study.md) | Study YAML format, sweep expansion, parallel execution, result analysis |
 | [fill_price_and_costs.md](fill_price_and_costs.md) | Fill price rules, slippage model, fee model |
+| [expiry_settlement.md](expiry_settlement.md) | Settlement-based expiry marks — why bar prices fail at expiry and how intrinsic values fix it |
 | [dashboard.md](dashboard.md) | Dashboard panels, Compare feature, live trades CSV format |
 | [constraints.md](constraints.md) | Known constraints, limitations, and reach goals |
 | [mvp.md](mvp.md) | MVP success criteria, in-scope components, and deferred features |

@@ -318,3 +318,96 @@ class TestEmptyResults:
         pp = PostProcessor(output_db, backtest_id=bid)
         ec = pp.equity_curve()
         assert ec.is_empty()
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap CI for mean P&L
+# ---------------------------------------------------------------------------
+
+
+class TestBootstrapMeanCI:
+    def test_ci_contains_true_mean(self):
+        """With 1000 identical values, the CI should tightly bracket the mean."""
+        import numpy as np
+        pnl = np.full(200, 50.0)
+        lo, hi = PostProcessor._bootstrap_mean_ci(pnl, n_boot=2000, rng=np.random.default_rng(0))
+        assert lo <= 50.0 <= hi
+
+    def test_ci_width_shrinks_with_more_data(self):
+        """Wider sample → narrower CI (law of large numbers)."""
+        import numpy as np
+        rng = np.random.default_rng(42)
+        small = rng.normal(0, 10, size=20)
+        large = rng.normal(0, 10, size=500)
+        lo_s, hi_s = PostProcessor._bootstrap_mean_ci(small, n_boot=5000, rng=np.random.default_rng(0))
+        lo_l, hi_l = PostProcessor._bootstrap_mean_ci(large, n_boot=5000, rng=np.random.default_rng(0))
+        assert (hi_s - lo_s) > (hi_l - lo_l)
+
+    def test_empty_returns_zeros(self):
+        import numpy as np
+        lo, hi = PostProcessor._bootstrap_mean_ci(np.array([]))
+        assert lo == 0.0 and hi == 0.0
+
+    def test_seed_reproducible(self):
+        import numpy as np
+        pnl = np.random.default_rng(7).normal(100, 20, size=100)
+        r1 = PostProcessor._bootstrap_mean_ci(pnl, n_boot=1000, rng=np.random.default_rng(99))
+        r2 = PostProcessor._bootstrap_mean_ci(pnl, n_boot=1000, rng=np.random.default_rng(99))
+        assert r1 == r2
+
+    def test_metrics_returns_ci_keys(self, output_db):
+        db, bid = _make_db_with_positions(
+            output_db,
+            [
+                {"open_mark": 5.0, "exit_mark": 4.0, "worst_mark": 5.5, "net_pnl": 100.0},
+                {"open_mark": 5.0, "exit_mark": 6.0, "worst_mark": 6.0, "net_pnl": -50.0,
+                 "exit_reason": "stop_loss"},
+            ],
+        )
+        m = PostProcessor(db, backtest_id=bid).metrics(seed=0)
+        assert "mean_pnl_ci_lower" in m
+        assert "mean_pnl_ci_upper" in m
+        assert m["mean_pnl_ci_lower"] <= m["mean_pnl_ci_upper"]
+
+
+# ---------------------------------------------------------------------------
+# Wilson CI for win rate
+# ---------------------------------------------------------------------------
+
+
+class TestWilsonWinRateCI:
+    def test_known_interval(self):
+        """50 wins out of 100 trades — Wilson CI should be roughly [0.40, 0.60]."""
+        lo, hi = PostProcessor._wilson_win_rate_ci(50, 100)
+        assert pytest.approx(lo, abs=0.01) == 0.4013
+        assert pytest.approx(hi, abs=0.01) == 0.5987
+
+    def test_bounds_in_zero_one(self):
+        """Extreme proportions must stay in [0, 1]."""
+        lo_low, hi_low = PostProcessor._wilson_win_rate_ci(0, 10)
+        lo_high, hi_high = PostProcessor._wilson_win_rate_ci(10, 10)
+        assert lo_low >= 0.0
+        assert hi_high <= 1.0
+
+    def test_zero_total_returns_zeros(self):
+        assert PostProcessor._wilson_win_rate_ci(0, 0) == (0.0, 0.0)
+
+    def test_lo_le_hi(self):
+        for n_wins, n_total in [(3, 10), (1, 5), (99, 100), (0, 50)]:
+            lo, hi = PostProcessor._wilson_win_rate_ci(n_wins, n_total)
+            assert lo <= hi
+
+    def test_metrics_returns_win_rate_ci_keys(self, output_db):
+        db, bid = _make_db_with_positions(
+            output_db,
+            [
+                {"open_mark": 5.0, "exit_mark": 4.0, "worst_mark": 5.5, "net_pnl": 100.0},
+                {"open_mark": 5.0, "exit_mark": 4.0, "worst_mark": 5.5, "net_pnl": 100.0},
+                {"open_mark": 5.0, "exit_mark": 6.0, "worst_mark": 6.0, "net_pnl": -50.0,
+                 "exit_reason": "stop_loss"},
+            ],
+        )
+        m = PostProcessor(db, backtest_id=bid).metrics(seed=0)
+        assert "win_rate_ci_lower" in m
+        assert "win_rate_ci_upper" in m
+        assert 0.0 <= m["win_rate_ci_lower"] <= m["win_rate_ci_upper"] <= 1.0

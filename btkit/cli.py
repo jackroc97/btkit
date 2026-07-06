@@ -23,6 +23,7 @@ Usage:
     btkit study run   --study YAML --input-db DB --output-db DB
                       [--workers N] [--max-combinations N] [--initial-equity N]
     btkit db extend   --sources a.db b.db ... --target combined.db
+    btkit db set-equity --output-db DB --equity N [--study-id N | --backtest-id N]
 """
 
 from __future__ import annotations
@@ -397,6 +398,11 @@ def dashboard(
     if input_db:
         os.environ["BTKIT_INPUT_DB"] = str(Path(input_db).resolve())
 
+    # Ensure the output DB has the latest schema (adds tag/backtest_tag tables
+    # to databases created before those tables were introduced).
+    with OutputDatabase(output_db) as odb:
+        odb.create_schema()
+
     # Refuse to start if the port is already bound — catches both background and
     # foreground cases before uvicorn tries and fails silently.
     existing_pid = _pid_on_port(port)
@@ -543,6 +549,134 @@ def db_extend(
     typer.echo(f"Merging {len(sources)} database(s) into {target} …")
     OutputMerger().merge(source_db_paths=sources, target_db_path=target)
     typer.echo("Merge complete.")
+
+
+@db_app.command("set-equity")
+def db_set_equity(
+    output_db: str = typer.Option(..., help="Path to the output database."),
+    equity: float = typer.Option(..., help="New initial equity value to apply."),
+    study_id: int = typer.Option(default=None, help="Limit update to this study ID."),
+    backtest_id: int = typer.Option(default=None, help="Limit update to this backtest ID."),
+) -> None:
+    """
+    Update initial_equity for a set of backtests and print how many rows were changed.
+
+    Filters are cumulative (AND). With no filters, all backtests in the database
+    are updated.
+
+    Examples:
+        btkit db set-equity --output-db results.db --equity 50000
+        btkit db set-equity --output-db results.db --equity 50000 --study-id 3
+        btkit db set-equity --output-db results.db --equity 50000 --backtest-id 17
+    """
+    if not Path(output_db).exists():
+        typer.echo(f"Error: database not found: {output_db}", err=True)
+        raise typer.Exit(code=1)
+
+    if study_id is not None and backtest_id is not None:
+        typer.echo("Error: specify at most one of --study-id or --backtest-id.", err=True)
+        raise typer.Exit(code=1)
+
+    con = duckdb.connect(output_db)
+    try:
+        if backtest_id is not None:
+            con.execute(
+                "UPDATE backtest SET initial_equity = ? WHERE id = ?",
+                [equity, backtest_id],
+            )
+            count = con.execute(
+                "SELECT COUNT(*) FROM backtest WHERE id = ?", [backtest_id]
+            ).fetchone()[0]
+        elif study_id is not None:
+            con.execute(
+                "UPDATE backtest SET initial_equity = ? WHERE study_id = ?",
+                [equity, study_id],
+            )
+            count = con.execute(
+                "SELECT COUNT(*) FROM backtest WHERE study_id = ?", [study_id]
+            ).fetchone()[0]
+        else:
+            con.execute("UPDATE backtest SET initial_equity = ?", [equity])
+            count = con.execute("SELECT COUNT(*) FROM backtest").fetchone()[0]
+    finally:
+        con.close()
+
+    typer.echo(f"Updated initial_equity to {equity:,.0f} for {count} backtest(s).")
+
+
+# ---------------------------------------------------------------------------
+# btkit audit …
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def audit(
+    input_db: str = typer.Option(..., help="Path to the input database to audit."),
+    output_format: str = typer.Option(
+        default="text",
+        help="Output format: text (default), json, or csv.",
+    ),
+    skip_phase2: bool = typer.Option(
+        default=False,
+        help=(
+            "Skip Phase 2 (Black-76 delta consistency check). "
+            "Phase 2 requires a 3-way join over option_greeks × option_bars × "
+            "underlying_bars and can take several minutes on large databases."
+        ),
+    ),
+    dry_run: bool = typer.Option(
+        default=False,
+        help="Compute flags but do NOT write to the option_audit table.",
+    ),
+    no_quintile: bool = typer.Option(
+        default=False,
+        help="Suppress the quintile breakdown table.",
+    ),
+) -> None:
+    """
+    Run a data quality audit against an input database.
+
+    Checks four phases of data integrity and writes results to the option_audit
+    table in the input database. The backtest engine reads this table to filter
+    out flagged instruments at entry time (controlled by universe.audit_filter
+    in the strategy YAML).
+
+    Phases:
+      1  IV distribution — IV_NAN, IV_SENTINEL, IV_HIGH
+      2  Black-76 delta  — DELTA_INCONSISTENT  (expensive; skip with --skip-phase2)
+      3  Bar coverage    — BARS_TRUNCATED, BARS_SPARSE, NO_EXPIRY_BARS
+      4  Integrity       — NEGATIVE_CLOSE, NEGATIVE_DTE, ZOMBIE_BAR,
+                           DELTA_SIGN_ERROR, DELTA_MAGNITUDE_ERROR
+
+    Examples:
+        btkit audit --input-db /path/to/input.db
+        btkit audit --input-db /path/to/input.db --skip-phase2 --output-format json
+        btkit audit --input-db /path/to/input.db --dry-run
+    """
+    from btkit.audit.runner import AuditRunner
+    from btkit.audit.report import format_report, format_quintile_summary
+
+    if not Path(input_db).exists():
+        typer.echo(f"Error: input database not found: {input_db}", err=True)
+        raise typer.Exit(code=1)
+
+    verbose = output_format.lower() == "text"
+
+    if verbose:
+        typer.echo(f"Auditing: {input_db}")
+        if skip_phase2:
+            typer.echo("  (Phase 2 skipped — use without --skip-phase2 for the full audit)")
+
+    runner = AuditRunner(input_db, dry_run=dry_run, skip_phase2=skip_phase2)
+    result = runner.run(verbose=verbose)
+
+    typer.echo(format_report(result, output_format=output_format))
+
+    if not no_quintile and not dry_run and verbose:
+        typer.echo("Quintile breakdown (by first-bar delta):")
+        q_df = runner.quintile_summary()
+        typer.echo(format_quintile_summary(q_df))
+        typer.echo("")
 
 
 if __name__ == "__main__":

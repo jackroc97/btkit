@@ -44,6 +44,15 @@ Each new column in the returned DataFrame becomes an independent indicator serie
 The engine stores each column separately in `indicator_bars` and makes it available
 in entry/exit conditions under its column name.
 
+> **Cadence is up to you.** An indicator column may be emitted at any frequency — one
+> value per session, per 5 minutes, or per bar. At backtest time each column is merged
+> onto candidates with a **session-scoped backward as-of join**: a candidate receives the
+> latest value at or before its timestamp within the session, never filled across the
+> session boundary. A daily signal therefore gates every intraday entry in its session,
+> so you do **not** need to forward-fill coarse indicators to the 1-minute grid yourself.
+> See [Indicator Alignment](strategy.md#indicator-alignment-session-scoped-as-of-join) in
+> the strategy reference.
+
 ### Extended form — with option data access
 
 When your indicator needs option chain data, declare a second `ctx` parameter:

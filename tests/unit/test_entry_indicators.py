@@ -121,7 +121,7 @@ def _make_scanner(db: InputDatabase, conditions: list[str]) -> EntryScanner:
             conditions=conditions,
         ),
         legs=[
-            LegConfig(name="short", right="put", action="sell_to_open", dte=30, delta=-0.16),
+            LegConfig(name="short", right="put", action="sell_to_open", dte=30, delta={"target": -0.16}),
         ],
         exit=ExitConfig(),
     )
@@ -227,7 +227,7 @@ class TestIndicatorStitchingAcrossRolls:
                 conditions=["ves1d > 20"],
             ),
             legs=[
-                LegConfig(name="short", right="put", action="sell_to_open", dte=30, delta=-0.16),
+                LegConfig(name="short", right="put", action="sell_to_open", dte=30, delta={"target": -0.16}),
             ],
             exit=ExitConfig(),
         )

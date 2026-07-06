@@ -114,7 +114,8 @@ def _extract_params(params_json: str | None) -> dict:
                 (l for l in legs if "sell" in l.get("action", "")),
                 legs[0] if legs else {},
             )
-            result["delta"]           = short.get("delta")
+            _delta = short.get("delta") or {}
+            result["delta"]           = _delta.get("target") if isinstance(_delta, dict) else _delta
             result["dte"]             = short.get("dte")
             ex = trade.get("exit", {})
             result["take_profit_pct"] = ex.get("take_profit_pct")

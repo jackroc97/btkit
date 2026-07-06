@@ -49,7 +49,7 @@ def _make_strategy(
             right="put",
             action="sell_to_open",
             dte=21,
-            delta=-0.25,
+            delta={"target": -0.25},
         )
     ]
     if n_legs == 2:

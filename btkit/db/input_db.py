@@ -329,10 +329,47 @@ class InputDatabase:
         finally:
             self._con.unregister("_entry_ts")
 
+    # ------------------------------------------------------------------
+    # Audit filter helpers
+    # ------------------------------------------------------------------
+
+    def _audit_table_exists(self) -> bool:
+        """Return True if the option_audit table is present in the database."""
+        try:
+            return (
+                self._con.execute(
+                    "SELECT COUNT(*) FROM information_schema.tables "
+                    "WHERE table_name = 'option_audit'"
+                ).fetchone()[0]
+                > 0
+            )
+        except Exception:
+            return False
+
+    def _flagged_instrument_ids(self, flag_codes: frozenset[str]) -> frozenset[int]:
+        """
+        Return the set of instrument_ids that have at least one row in option_audit
+        matching any of the given flag codes.
+
+        Returns an empty frozenset if option_audit does not exist or is empty.
+        """
+        if not flag_codes or not self._audit_table_exists():
+            return frozenset()
+        placeholders = ", ".join(f"'{c}'" for c in flag_codes)
+        try:
+            rows = self._con.execute(
+                f"SELECT DISTINCT instrument_id FROM option_audit "
+                f"WHERE flag_code IN ({placeholders})"
+            ).fetchall()
+            return frozenset(int(r[0]) for r in rows)
+        except Exception:
+            return frozenset()
+
     def greeks_for_all_legs(
         self,
         ts_event_underlying: list[tuple],
         leg_specs: list[dict],
+        audit_filter_codes: frozenset[str] | None = None,
     ) -> pl.DataFrame:
         """
         Batched greeks lookup for all legs across all candidate timestamps.
@@ -344,7 +381,7 @@ class InputDatabase:
 
         leg_specs is a list of dicts with keys: name, right (C/P), target_delta,
         target_dte, delta_tolerance, dte_tolerance. The tolerance values are
-        per-leg, sourced from LegConfig.delta_tolerance / LegConfig.dte_tolerance.
+        per-leg, sourced from LegConfig.delta.tolerance / LegConfig.dte_tolerance.
         Returns one DataFrame for all legs tagged with a leg_name column; caller
         partitions by leg_name and picks the best match per ts_event.
 
@@ -404,6 +441,14 @@ class InputDatabase:
         greeks_df = pl.concat(greeks_frames)
         if greeks_df.is_empty():
             return pl.DataFrame()
+
+        # --- Audit filter: exclude instruments flagged in option_audit ---
+        if audit_filter_codes:
+            flagged = self._flagged_instrument_ids(audit_filter_codes)
+            if flagged:
+                greeks_df = greeks_df.filter(~pl.col("instrument_id").is_in(flagged))
+            if greeks_df.is_empty():
+                return pl.DataFrame()
 
         # --- Phase 2: option_bars join with greeks as the build side ---
         self._con.register("_greeks_df", greeks_df)
@@ -468,6 +513,7 @@ class InputDatabase:
         strike_targets: pl.DataFrame,
         *,
         strike_tolerance: float = 1.0,
+        audit_filter_codes: frozenset[str] | None = None,
     ) -> pl.DataFrame:
         """
         For each (ts_event, leg_name) in strike_targets, find the option whose
@@ -522,6 +568,13 @@ class InputDatabase:
 
         if result.is_empty():
             return pl.DataFrame()
+
+        if audit_filter_codes:
+            flagged = self._flagged_instrument_ids(audit_filter_codes)
+            if flagged:
+                result = result.filter(~pl.col("instrument_id").is_in(flagged))
+            if result.is_empty():
+                return pl.DataFrame()
 
         return result.select(
             [
@@ -596,7 +649,10 @@ class InputDatabase:
         Requires underlying_bars to have an expiration column (populated at ingest).
         Falls back to a single arbitrary contract if expiration data is absent.
 
-        Returns columns: date (pl.Date), underlying_id (pl.Int64).
+        Returns columns: date (pl.Date), underlying_id (pl.Int64), expiry (pl.Date),
+        next_underlying_id (pl.Int64, nullable).  The extra columns enable the entry
+        scanner to include the next contract's options when target DTE extends beyond
+        the front-month's remaining life.
         """
         futures_df = self._con.execute(
             """
@@ -619,13 +675,21 @@ class InputDatabase:
                     {
                         "date": pl.Series([], dtype=pl.Date),
                         "underlying_id": pl.Series([], dtype=pl.Int64),
+                        "expiry": pl.Series([], dtype=pl.Date),
+                        "next_underlying_id": pl.Series([], dtype=pl.Int64),
                     }
                 )
             uid = int(row[0])
             dates = [
                 start_date + timedelta(days=i) for i in range((end_date - start_date).days + 1)
             ]
-            return pl.DataFrame({"date": dates, "underlying_id": [uid] * len(dates)})
+            n = len(dates)
+            return pl.DataFrame({
+                "date": pl.Series(dates, dtype=pl.Date),
+                "underlying_id": pl.Series([uid] * n, dtype=pl.Int64),
+                "expiry": pl.Series([None] * n, dtype=pl.Date),
+                "next_underlying_id": pl.Series([None] * n, dtype=pl.Int64),
+            })
 
         expirations = list(
             zip(
@@ -637,26 +701,35 @@ class InputDatabase:
 
         dates: list[date] = []
         underlying_ids: list[int] = []
+        expiry_dates: list[date | None] = []
+        next_underlying_ids: list[int | None] = []
         d = start_date
         while d <= end_date:
             roll_cutoff = d + timedelta(days=roll_days)
             # Front month: earliest expiration that hasn't yet hit its roll date
-            front_id = None
-            for iid, exp in expirations:
+            front_idx = None
+            for i, (iid, exp) in enumerate(expirations):
                 if exp >= roll_cutoff:
-                    front_id = iid
+                    front_idx = i
                     break
-            if front_id is None:
+            if front_idx is None:
                 # All contracts have rolled past — use the last one
-                front_id = expirations[-1][0]
+                front_idx = len(expirations) - 1
+            front_id = expirations[front_idx][0]
+            front_exp = expirations[front_idx][1]
+            next_id = expirations[front_idx + 1][0] if front_idx + 1 < len(expirations) else None
             dates.append(d)
             underlying_ids.append(front_id)
+            expiry_dates.append(front_exp)
+            next_underlying_ids.append(next_id)
             d += timedelta(days=1)
 
         return pl.DataFrame(
             {
                 "date": pl.Series(dates, dtype=pl.Date),
                 "underlying_id": pl.Series(underlying_ids, dtype=pl.Int64),
+                "expiry": pl.Series(expiry_dates, dtype=pl.Date),
+                "next_underlying_id": pl.Series(next_underlying_ids, dtype=pl.Int64),
             }
         )
 

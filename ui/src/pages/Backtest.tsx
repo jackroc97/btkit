@@ -1,8 +1,11 @@
-import { useState, useMemo, useEffect, useRef } from 'react'
+import { useState, useMemo, useEffect, useRef, useCallback } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { type ColDef } from 'ag-grid-community'
 import PlotlyChart from '../components/charts/PlotlyChart'
 import BtkAgGrid from '../components/BtkAgGrid'
+import { TagPicker } from '../tags/TagPicker'
+import { TagPillList } from '../tags/TagPill'
+import type { Tag } from '../tags/TagsContext'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -23,12 +26,18 @@ interface ApiBacktest {
   start_date: string | null
   end_date: string | null
   sharpe: number | null
+  sortino: number | null
+  calmar: number | null
   total_return_pct: number | null
   profit_factor: number | null
+  max_drawdown: number | null
+  max_drawdown_pct: number | null
+  cagr: number | null
   avg_win: number | null
   avg_loss: number | null
   n_take_profit: number | null
   n_stop_loss: number | null
+  tags: Tag[]
   params: Record<string, number | null>
 }
 
@@ -39,6 +48,8 @@ interface ApiPosition {
   open_date:   string
   exit_date:   string
   net_pnl:     number
+  continuation_pnl: number | null
+  continuation_exit_reason: string | null
   duration_min: number
   cum_pnl:     number
   return_pct:  number
@@ -126,6 +137,7 @@ function fmtVal(v: number | null, prefix = '', suffix = '', decimals = 2): strin
 function fmtParamTags(params: Record<string, number | null>): string[] {
   const parts: string[] = []
   if (params.delta != null) parts.push(`δ=${params.delta}`)
+  if (params.dte != null) parts.push(`DTE=${Math.round(params.dte)}`)
   if (params.take_profit_pct != null) parts.push(`TP=${Math.round(params.take_profit_pct * 100)}%`)
   if (params.stop_loss != null) parts.push(`SL=${params.stop_loss}`)
   if (params.min_credit != null) parts.push(`min=$${params.min_credit}`)
@@ -192,9 +204,18 @@ function TradeTable({ positions, backtestId }: { positions: ApiPosition[]; backt
       ),
     },
     {
-      field: 'net_pnl', headerName: 'P&L', width: 96,
+      field: 'net_pnl', headerName: 'Spread P&L', width: 104,
       valueFormatter: p => { const v = p.value as number; return `${v >= 0 ? '+' : ''}${v.toLocaleString(undefined, { maximumFractionDigits: 0 })}` },
       cellStyle: p => ({ color: (p.value as number) >= 0 ? '#4ade80' : '#f87171', fontWeight: 600 }),
+    },
+    {
+      field: 'continuation_pnl', headerName: 'Cont. P&L', width: 104,
+      valueFormatter: p => {
+        if (p.value == null) return '—'
+        const v = p.value as number
+        return `${v >= 0 ? '+' : ''}${v.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+      },
+      cellStyle: p => ({ color: p.value == null ? '#475569' : (p.value as number) >= 0 ? '#4ade80' : '#f87171' }),
     },
     {
       field: 'return_pct', headerName: 'Return', width: 90,
@@ -459,6 +480,12 @@ export default function Backtest() {
   const [xMode, setXMode]         = useState<'date' | 'trade'>('date')
   const [showCompare, setShowCompare] = useState(false)
   const [compareData, setCompareData] = useState<CompareData | null>(null)
+  const [localTags, setLocalTags] = useState<Tag[]>([])
+
+  const handleTagsChanged = useCallback((tags: Tag[]) => {
+    setLocalTags(tags)
+    setBt(prev => prev ? { ...prev, tags } : prev)
+  }, [])
 
   useEffect(() => {
     if (!id) return
@@ -467,7 +494,7 @@ export default function Backtest() {
       fetch(`/api/backtests/${id}`).then(r => { if (!r.ok) throw new Error(`${r.status}`); return r.json() }),
       fetch(`/api/backtests/${id}/positions`).then(r => { if (!r.ok) throw new Error(`${r.status}`); return r.json() }),
     ])
-      .then(([b, p]) => { setBt(b); setPositions(p) })
+      .then(([b, p]) => { setBt(b); setPositions(p); setLocalTags(b.tags ?? []) })
       .catch(e => setError(String(e)))
       .finally(() => setLoading(false))
   }, [id])
@@ -475,8 +502,13 @@ export default function Backtest() {
   const initial = bt?.initial_equity ?? 100_000
 
   // Computed metrics
-  const cagr  = useMemo(() => computeCAGR(bt?.total_return_pct ?? null, bt?.start_date ?? null, bt?.end_date ?? null), [bt])
-  const maxDD = useMemo(() => computeMaxDD(positions, initial), [positions, initial])
+  const cagr           = useMemo(() => computeCAGR(bt?.total_return_pct ?? null, bt?.start_date ?? null, bt?.end_date ?? null), [bt])
+  const maxDD          = useMemo(() => computeMaxDD(positions, initial), [positions, initial])
+  const recoveryFactor = useMemo(() => {
+    if (maxDD == null || maxDD >= 0 || bt == null) return null
+    const dollarDD = Math.abs(maxDD / 100) * initial
+    return dollarDD > 0 ? bt.total_pnl / dollarDD : null
+  }, [maxDD, bt, initial])
 
   // Equity series
   const equity   = useMemo(() => [0, ...positions.map(p => p.cum_pnl)], [positions])
@@ -577,8 +609,10 @@ export default function Backtest() {
     { label: 'Total Return',   value: fmtVal(bt.total_return_pct, (bt.total_return_pct ?? 0) >= 0 ? '+' : '', '%', 1), color: (bt.total_return_pct ?? 0) >= 0 ? 'positive' : 'negative' },
     { label: 'CAGR',           value: fmtVal(cagr, (cagr ?? 0) >= 0 ? '+' : '', '%', 1),                              color: (cagr ?? 0) >= 0 ? 'positive' : 'negative'           },
     { label: 'Sharpe Ratio',   value: fmtVal(bt.sharpe),                                                               color: bt.sharpe != null ? (bt.sharpe >= 1.5 ? 'positive' : bt.sharpe >= 0.8 ? 'amber' : 'negative') : 'neutral' },
-    { label: 'Sortino Ratio',  value: '—',                                                                             color: 'neutral'  },
+    { label: 'Sortino Ratio',  value: fmtVal(bt.sortino),                                                              color: bt.sortino != null ? (bt.sortino >= 1.5 ? 'positive' : bt.sortino >= 0.8 ? 'amber' : 'negative') : 'neutral' },
+    { label: 'Calmar Ratio',   value: fmtVal(bt.calmar),                                                               color: bt.calmar == null ? 'neutral' : bt.calmar >= 1 ? 'positive' : bt.calmar >= 0.5 ? 'amber' : 'negative' },
     { label: 'Max Drawdown',   value: fmtVal(maxDD, '', '%', 1),                                                       color: 'negative' },
+    { label: 'Recovery Factor', value: fmtVal(recoveryFactor),                                                          color: recoveryFactor == null ? 'neutral' : recoveryFactor >= 1 ? 'positive' : 'negative' },
     { label: 'Win Rate',       value: fmtVal(winPct, '', '%', 1),                                                      color: 'neutral'  },
     { label: 'Profit Factor',  value: fmtVal(bt.profit_factor),                                                        color: bt.profit_factor == null ? 'neutral' : bt.profit_factor >= 1 ? 'positive' : 'negative' },
     { label: 'Avg Trade P&L',  value: bt.avg_pnl != null ? `${bt.avg_pnl >= 0 ? '+' : ''}$${Math.abs(bt.avg_pnl).toFixed(0)}` : '—', color: (bt.avg_pnl ?? 0) >= 0 ? 'positive' : 'negative' },
@@ -588,6 +622,7 @@ export default function Backtest() {
     { label: 'Take Profit',    value: bt.n_take_profit != null ? String(bt.n_take_profit) : '—',                       color: 'neutral'  },
     { label: 'Stop Loss',      value: bt.n_stop_loss   != null ? String(bt.n_stop_loss)   : '—',                       color: 'neutral'  },
     { label: 'Avg Duration',   value: avgDur != null ? fmtDur(avgDur) : '—',                                          color: 'neutral'  },
+    ...(bt.params.dte != null ? [{ label: 'Target DTE', value: String(Math.round(bt.params.dte)), color: 'neutral' as const }] : []),
   ] : []
 
   const paramTags = bt ? fmtParamTags(bt.params) : []
@@ -636,7 +671,15 @@ export default function Backtest() {
             {/* Header */}
             <div className="d-flex align-items-start justify-content-between gap-3 mb-3">
               <div>
-                <h5 className="mb-1 fw-semibold" style={{ color: '#e2e8f0' }}>{bt.strategy_label}</h5>
+                <div className="d-flex align-items-center gap-2 flex-wrap mb-1">
+                  <h5 className="mb-0 fw-semibold" style={{ color: '#e2e8f0' }}>{bt.strategy_label}</h5>
+                  {localTags.length > 0 && <TagPillList tags={localTags} maxVisible={5} size="md" />}
+                  <TagPicker
+                    backtestId={bt.id}
+                    currentTags={localTags}
+                    onChanged={handleTagsChanged}
+                  />
+                </div>
                 <div className="btk-item-sub">
                   <span style={{ color: '#60a5fa', fontFamily: 'monospace', fontSize: '0.75rem' }}>{bt.strategy_name}</span>
                   {bt.start_date && bt.end_date && (
