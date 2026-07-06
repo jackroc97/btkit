@@ -130,11 +130,20 @@ class DatabaseBuilder:
         indicator_scripts: list[str | Path] | None = None,
         append: bool = False,
         underlying_staleness_minutes: int = 15,
+        fill_range: tuple[datetime, datetime] | None = None,
+        instruments: list[int] | None = None,
+        recompute_tail_days: int = 60,
     ) -> None:
         self.raw_data_path = Path(raw_data_path)
         self.db_path = Path(db_path)
         self.indicator_scripts = [Path(p) for p in (indicator_scripts or [])]
-        self.append = append
+        # Interior "fill-the-gaps" mode: splice corrected source data into an
+        # existing timeline and refresh greeks + indicators scoped to that window.
+        # It is an append operation by construction, so append is forced on.
+        self.fill_range = fill_range
+        self.instruments = list(instruments) if instruments else None
+        self.recompute_tail_days = int(recompute_tail_days)
+        self.append = append or (fill_range is not None)
         # Max age (minutes) of the nearest-prior underlying bar used as the spot
         # price F when computing greeks. 0 = require an exact same-minute bar.
         self.underlying_staleness_minutes = int(underlying_staleness_minutes)
@@ -454,7 +463,11 @@ class DatabaseBuilder:
         calc = GreeksCalculator(
             self._con, underlying_max_staleness_minutes=self.underlying_staleness_minutes
         )
-        calc.run(skip_existing=self.append)
+        calc.run(
+            skip_existing=self.append,
+            fill_range=self.fill_range,
+            instruments=self.instruments,
+        )
 
     # ------------------------------------------------------------------
     # Step 4: Indicators
@@ -471,15 +484,54 @@ class DatabaseBuilder:
 
         con = duckdb.connect(str(self.db_path))
         try:
-            underlyings = con.execute(
-                "SELECT DISTINCT instrument_id FROM underlying_bars"
-            ).fetchall()
-            for script_path in self.indicator_scripts:
-                runner = IndicatorRunner(con, script_path)
-                for (underlying_id,) in underlyings:
-                    runner.run(underlying_id)
+            if self.fill_range is not None:
+                self._run_indicators_scoped(con)
+            else:
+                underlyings = con.execute(
+                    "SELECT DISTINCT instrument_id FROM underlying_bars"
+                ).fetchall()
+                for script_path in self.indicator_scripts:
+                    runner = IndicatorRunner(con, script_path)
+                    for (underlying_id,) in underlyings:
+                        runner.run(underlying_id)
         finally:
             con.close()
+
+    def _run_indicators_scoped(self, con: duckdb.DuckDBPyConnection) -> None:
+        """
+        Interior fill mode: recompute each indicator only for the underlyings whose
+        bars were back-filled, over the fill window plus a trailing-dependency tail,
+        overwriting stale values (see IndicatorRunner.run_scoped).
+
+        Affected underlyings are the caller-supplied --instruments, or (when none
+        are given) every underlying with bars in the fill window.
+        """
+        start, end = self.fill_range
+        if self.instruments:
+            underlying_ids = list(self.instruments)
+        else:
+            underlying_ids = [
+                r[0]
+                for r in con.execute(
+                    "SELECT DISTINCT instrument_id FROM underlying_bars "
+                    "WHERE ts_event >= ? AND ts_event <= ?",
+                    [start, end],
+                ).fetchall()
+            ]
+
+        if not underlying_ids:
+            print("[indicators] fill mode: no affected underlyings in the window — skipping")
+            return
+
+        print(
+            f"[indicators] fill mode: recomputing {len(self.indicator_scripts)} script(s) "
+            f"for {len(underlying_ids)} underlying(s) over "
+            f"{start.date()}→{end.date()} ±{self.recompute_tail_days}d"
+        )
+        for script_path in self.indicator_scripts:
+            runner = IndicatorRunner(con, script_path)
+            for underlying_id in underlying_ids:
+                runner.run_scoped(underlying_id, start, end, self.recompute_tail_days)
 
     # ------------------------------------------------------------------
     # Helpers
