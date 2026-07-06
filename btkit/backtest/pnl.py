@@ -32,7 +32,8 @@ class BacktestPositions:
     """Computed results ready to be written to the output database."""
 
     positions: pl.DataFrame  # matches position table schema
-    legs: pl.DataFrame  # matches position_leg table schema
+    legs: pl.DataFrame       # matches position_leg table schema
+    continuations: pl.DataFrame  # matches position_continuation table schema (may be empty)
 
 
 class PnLCalculator:
@@ -43,6 +44,7 @@ class PnLCalculator:
         self,
         all_entries: dict[str, pl.DataFrame],
         all_exits: dict[str, pl.DataFrame],
+        all_continuations: dict[str, pl.DataFrame] | None = None,
     ) -> BacktestPositions:
         """
         Receives one entries DataFrame and one exits DataFrame per trade (keyed
@@ -66,6 +68,7 @@ class PnLCalculator:
         fees = costs.effective_fees
         positions_list: list[pl.DataFrame] = []
         legs_list: list[pl.DataFrame] = []
+        continuations_list: list[pl.DataFrame] = []
 
         for trade in self.strategy.trades:
             entries = all_entries.get(trade.name, pl.DataFrame())
@@ -111,6 +114,13 @@ class PnLCalculator:
                 )
             )
 
+            # target_name: the winning conditional target for a `targets:` leg
+            # (item 3), or null for legs selected any other way.
+            if "_target_name" in pos.columns:
+                pos = pos.with_columns(pl.col("_target_name").alias("target_name"))
+            else:
+                pos = pos.with_columns(pl.lit(None).cast(pl.Utf8).alias("target_name"))
+
             positions_list.append(
                 pos.rename({"entry_time": "open_time"}).select(
                     [
@@ -125,6 +135,7 @@ class PnLCalculator:
                         "slippage_cost",
                         "fee_cost",
                         "net_pnl",
+                        "target_name",
                     ]
                 )
             )
@@ -156,10 +167,41 @@ class PnLCalculator:
                 )
                 legs_list.append(leg_df)
 
+            # -- Continuations --
+            cont_raw = (all_continuations or {}).get(trade.name, pl.DataFrame())
+            if not cont_raw.is_empty():
+                # Find the long leg for multiplier/quantity
+                long_legs = [lg for lg in trade.legs if lg.action == "buy_to_open"]
+                if long_legs:
+                    ll = long_legs[0]
+                    multiplier_col = f"leg_{ll.name}_multiplier"
+                    ll_quantity = float(ll.quantity)
+                    # Attach multiplier from entries
+                    mult_df = entries.select(["entry_id", pl.col(multiplier_col).alias("_mult")])
+                    cont = cont_raw.join(mult_df, on="entry_id", how="left")
+                    cont = cont.with_columns(
+                        (
+                            (pl.col("continuation_exit_price") - pl.col("continuation_entry_price"))
+                            * pl.col("_mult")
+                            * pl.lit(ll_quantity)
+                        ).alias("continuation_pnl")
+                    ).drop("_mult")
+                    continuations_list.append(cont.select([
+                        "entry_id",
+                        "continuation_entry_price",
+                        "continuation_exit_time",
+                        "continuation_exit_price",
+                        "continuation_exit_reason",
+                        "continuation_pnl",
+                    ]))
+
         if not positions_list:
-            return BacktestPositions(positions=pl.DataFrame(), legs=pl.DataFrame())
+            return BacktestPositions(
+                positions=pl.DataFrame(), legs=pl.DataFrame(), continuations=pl.DataFrame()
+            )
 
         all_positions = pl.concat(positions_list)
         all_legs = pl.concat(legs_list) if legs_list else pl.DataFrame()
+        all_conts = pl.concat(continuations_list) if continuations_list else pl.DataFrame()
 
-        return BacktestPositions(positions=all_positions, legs=all_legs)
+        return BacktestPositions(positions=all_positions, legs=all_legs, continuations=all_conts)

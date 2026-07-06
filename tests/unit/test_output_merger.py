@@ -11,8 +11,14 @@ from btkit.db.output_db import OutputDatabase
 from btkit.study.merger import OutputMerger
 
 
-def _make_worker_db(path: str, backtest_rows: int = 1, positions_per_backtest: int = 2) -> None:
+def _make_worker_db(
+    path: str,
+    backtest_rows: int = 1,
+    positions_per_backtest: int = 2,
+    continuations_per_backtest: int = 0,
+) -> None:
     """Helpers: populate a worker DB with synthetic rows."""
+    import polars as pl
     with OutputDatabase(path) as odb:
         odb.create_schema()
         for i in range(backtest_rows):
@@ -29,7 +35,6 @@ def _make_worker_db(path: str, backtest_rows: int = 1, positions_per_backtest: i
             odb.finalize_backtest(
                 bid, status="completed", duration_s=1.0, warnings=[]
             )
-            import polars as pl
             positions = pl.DataFrame({
                 "entry_id": list(range(positions_per_backtest)),
                 "trade_name": ["t1"] * positions_per_backtest,
@@ -62,7 +67,16 @@ def _make_worker_db(path: str, backtest_rows: int = 1, positions_per_backtest: i
                 "entry_vega": [2.0] * positions_per_backtest,
                 "entry_dte": [21] * positions_per_backtest,
             })
-            odb.write_results(bid, positions, legs)
+            cont_count = min(continuations_per_backtest, positions_per_backtest)
+            continuations = pl.DataFrame({
+                "entry_id": list(range(cont_count)),
+                "continuation_entry_price": [2.0] * cont_count,
+                "continuation_exit_time": [datetime.now(UTC)] * cont_count,
+                "continuation_exit_price": [5.0] * cont_count,
+                "continuation_exit_reason": ["trailing_stop"] * cont_count,
+                "continuation_pnl": [150.0] * cont_count,
+            }) if cont_count > 0 else None
+            odb.write_results(bid, positions, legs, continuations)
 
 
 class TestMergeBasic:
@@ -210,6 +224,83 @@ class TestIdResequencing:
             ).fetchone()
         assert row[0] == 1   # study_id preserved
         assert row[1] == 1   # combination_id preserved
+
+
+class TestContinuationMerge:
+    def test_continuation_rows_merged(self, tmp_path):
+        w1 = str(tmp_path / "w1.db")
+        w2 = str(tmp_path / "w2.db")
+        output = str(tmp_path / "out.db")
+        _make_worker_db(w1, positions_per_backtest=2, continuations_per_backtest=2)
+        _make_worker_db(w2, positions_per_backtest=3, continuations_per_backtest=3)
+
+        with OutputDatabase(output) as odb:
+            odb.create_schema()
+
+        OutputMerger().merge([w1, w2], output, cleanup=False)
+
+        with OutputDatabase(output) as odb:
+            pc_count = odb._con.execute(
+                "SELECT COUNT(*) FROM position_continuation"
+            ).fetchone()[0]
+        assert pc_count == 5
+
+    def test_continuation_ids_unique(self, tmp_path):
+        w1 = str(tmp_path / "w1.db")
+        w2 = str(tmp_path / "w2.db")
+        output = str(tmp_path / "out.db")
+        _make_worker_db(w1, positions_per_backtest=2, continuations_per_backtest=2)
+        _make_worker_db(w2, positions_per_backtest=2, continuations_per_backtest=2)
+
+        with OutputDatabase(output) as odb:
+            odb.create_schema()
+
+        OutputMerger().merge([w1, w2], output, cleanup=False)
+
+        with OutputDatabase(output) as odb:
+            ids = [
+                r[0]
+                for r in odb._con.execute(
+                    "SELECT id FROM position_continuation ORDER BY id"
+                ).fetchall()
+            ]
+        assert len(ids) == len(set(ids))
+
+    def test_continuation_position_id_fk_preserved(self, tmp_path):
+        w1 = str(tmp_path / "w1.db")
+        w2 = str(tmp_path / "w2.db")
+        output = str(tmp_path / "out.db")
+        _make_worker_db(w1, positions_per_backtest=2, continuations_per_backtest=2)
+        _make_worker_db(w2, positions_per_backtest=3, continuations_per_backtest=3)
+
+        with OutputDatabase(output) as odb:
+            odb.create_schema()
+
+        OutputMerger().merge([w1, w2], output, cleanup=False)
+
+        with OutputDatabase(output) as odb:
+            orphans = odb._con.execute("""
+                SELECT COUNT(*) FROM position_continuation pc
+                LEFT JOIN position p ON pc.position_id = p.id
+                WHERE p.id IS NULL
+            """).fetchone()[0]
+        assert orphans == 0
+
+    def test_no_continuations_does_not_error(self, tmp_path):
+        w1 = str(tmp_path / "w1.db")
+        output = str(tmp_path / "out.db")
+        _make_worker_db(w1, positions_per_backtest=2, continuations_per_backtest=0)
+
+        with OutputDatabase(output) as odb:
+            odb.create_schema()
+
+        OutputMerger().merge([w1], output, cleanup=False)
+
+        with OutputDatabase(output) as odb:
+            pc_count = odb._con.execute(
+                "SELECT COUNT(*) FROM position_continuation"
+            ).fetchone()[0]
+        assert pc_count == 0
 
 
 class TestEdgeCases:

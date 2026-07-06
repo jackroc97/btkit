@@ -444,7 +444,8 @@ CREATE TABLE position (
     worst_mark      DOUBLE,                     -- most adverse mark seen during trade lifetime
     slippage_cost   DOUBLE,
     fee_cost        DOUBLE,
-    net_pnl         DOUBLE
+    net_pnl         DOUBLE,
+    target_name     VARCHAR                     -- winning `targets:` name; NULL otherwise
 );
 ```
 
@@ -454,6 +455,11 @@ CREATE TABLE position (
   that produced it. For single-trade strategies this is a constant; for multi-trade
   strategies (e.g. independent put and call spreads) it allows `PostProcessor` to
   report per-trade metrics and lets users filter results by wing.
+- `target_name` records the winning named target when the trade's leg uses a `targets:`
+  map (see [strategy.md](strategy.md#named-conditional-targets-targets)); it is `NULL`
+  for legs selected any other way. It enables per-target P&L attribution from a single
+  trade — group positions by `target_name` to compare cells. The column is added by an
+  automatic migration to output DBs created before the feature existed.
 - `open_mark` and `exit_mark` use generic "mark" naming rather than spread-specific
   terminology. "Mark" is the standard financial term for the current market value of a
   position and applies equally to single-leg options, multi-leg spreads, and future
@@ -537,3 +543,57 @@ correctly — only non-null study FK references are offset.
 rows. The command does not deduplicate. Use a fresh target file when re-merging from
 scratch, or rely on the append behaviour deliberately when adding new source databases
 incrementally.
+
+---
+
+### `btkit db set-equity` — Update initial equity and recalculate metrics
+
+Updates the `initial_equity` value stored in the `backtest` table for one or more runs.
+Metrics that depend on starting equity — CAGR, max drawdown %, and MAR — are computed
+from raw position P&L at read time, so updating `initial_equity` is sufficient to
+reflect a different account size. No separate recalculation step is required; the next
+`btkit analyze` call or dashboard load will use the new value automatically.
+
+```
+btkit db set-equity --output-db results.db --equity 50000
+```
+
+| Option | Description |
+|---|---|
+| `--output-db` | Path to the output database to update. |
+| `--equity` | New initial equity value to apply. |
+| `--study-id` | Limit the update to backtests belonging to this study ID. |
+| `--backtest-id` | Limit the update to a single backtest by ID. |
+
+`--study-id` and `--backtest-id` are mutually exclusive. With neither flag, every
+backtest in the database is updated.
+
+**Examples**
+
+Update all backtests in a database:
+
+```bash
+btkit db set-equity --output-db results.db --equity 50000
+# Updated initial_equity to 50,000 for 48 backtest(s).
+```
+
+Update only the backtests from a particular study sweep:
+
+```bash
+btkit db set-equity --output-db results.db --equity 250000 --study-id 3
+# Updated initial_equity to 250,000 for 12 backtest(s).
+```
+
+Update a single backtest:
+
+```bash
+btkit db set-equity --output-db results.db --equity 75000 --backtest-id 17
+# Updated initial_equity to 75,000 for 1 backtest(s).
+```
+
+**Why metrics recalculate automatically**
+
+CAGR, max drawdown, and MAR are derived from the equity curve, which is itself derived
+from `initial_equity + cumulative net_pnl`. None of these values are cached in the
+database — they are computed fresh from `position.net_pnl` rows on every read. Changing
+`initial_equity` therefore propagates to all metrics without any additional steps.

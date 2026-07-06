@@ -6,12 +6,17 @@ exposed as a general-purpose utility via `btkit db merge` for combining
 any set of output databases.
 
 FK chain:  study → backtest → position → position_leg
+                                       → position_continuation
+           tag ──────────────↗ (via backtest_tag)
 
 Re-sequencing order per source:
-    1. study rows:       id += study_offset
-    2. backtest rows:    id += bt_offset; study_id += study_offset (if set)
-    3. position rows:    id += pos_offset; backtest_id += bt_offset
-    4. position_leg rows: id += pl_offset; position_id += pos_offset
+    1. study rows:                 id += study_offset
+    2. backtest rows:              id += bt_offset; study_id += study_offset (if set)
+    3. position rows:              id += pos_offset; backtest_id += bt_offset
+    4. position_leg rows:          id += pl_offset; position_id += pos_offset
+    5. position_continuation rows: id += pc_offset; position_id += pos_offset
+    6. tag rows:                   merged by name; conflicts keep target color, log warning
+    7. backtest_tag rows:          re-sequenced with bt_offset and resolved tag ids
 
 Uses DuckDB ATTACH to avoid loading source data through Python memory.
 """
@@ -157,7 +162,8 @@ class OutputMerger:
                 worst_mark,
                 slippage_cost,
                 fee_cost,
-                net_pnl
+                net_pnl,
+                target_name
             FROM w.position
         """)
 
@@ -193,3 +199,69 @@ class OutputMerger:
                 entry_dte
             FROM w.position_leg
         """)
+
+        # ── 4. position_continuation ──────────────────────────────────
+        pc_count = con.execute(
+            "SELECT COUNT(*) FROM w.position_continuation"
+        ).fetchone()[0]
+        if pc_count > 0:
+            pc_offset = con.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM position_continuation"
+            ).fetchone()[0]
+            con.execute(f"""
+                INSERT INTO position_continuation
+                SELECT
+                    id          + {pc_offset},
+                    position_id + {pos_offset},
+                    continuation_entry_price,
+                    continuation_exit_time,
+                    continuation_exit_price,
+                    continuation_exit_reason,
+                    continuation_pnl
+                FROM w.position_continuation
+            """)
+
+        # ── 5. tag + backtest_tag ──────────────────────────────────────
+        # Tags are merged by name. If a tag name already exists in the target,
+        # the target's color wins (no overwrite). New tag names are inserted
+        # with re-sequenced IDs. backtest_tag rows are then written using the
+        # resolved target tag IDs.
+        src_tags = con.execute("SELECT id, name, color FROM w.tag").fetchall()
+        if not src_tags:
+            return
+
+        # Build a mapping: source tag id → target tag id
+        tag_id_map: dict[int, int] = {}
+        for src_id, name, color in src_tags:
+            existing = con.execute(
+                "SELECT id FROM tag WHERE name = ?", [name]
+            ).fetchone()
+            if existing:
+                tag_id_map[src_id] = existing[0]
+            else:
+                next_tag_id = con.execute(
+                    "SELECT COALESCE(MAX(id), 0) + 1 FROM tag"
+                ).fetchone()[0]
+                con.execute(
+                    "INSERT INTO tag (id, name, color) VALUES (?, ?, ?)",
+                    [next_tag_id, name, color],
+                )
+                tag_id_map[src_id] = next_tag_id
+
+        src_bt_tags = con.execute(
+            "SELECT backtest_id, tag_id FROM w.backtest_tag"
+        ).fetchall()
+        for src_bt_id, src_tag_id in src_bt_tags:
+            target_bt_id = src_bt_id + bt_offset
+            target_tag_id = tag_id_map.get(src_tag_id)
+            if target_tag_id is None:
+                continue
+            existing = con.execute(
+                "SELECT 1 FROM backtest_tag WHERE backtest_id = ? AND tag_id = ?",
+                [target_bt_id, target_tag_id],
+            ).fetchone()
+            if not existing:
+                con.execute(
+                    "INSERT INTO backtest_tag (backtest_id, tag_id) VALUES (?, ?)",
+                    [target_bt_id, target_tag_id],
+                )

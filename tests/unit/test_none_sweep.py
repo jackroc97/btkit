@@ -44,7 +44,8 @@ class TestNoneStopLoss:
                   right: put
                   action: sell_to_open
                   dte: 21
-                  delta: -0.25
+                  delta:
+                    target: -0.25
               exit:
                 stop_loss: {stop_loss}
                 take_profit: 0.50
@@ -121,7 +122,8 @@ class TestNoneTakeProfit:
                   right: put
                   action: sell_to_open
                   dte: 21
-                  delta: -0.25
+                  delta:
+                    target: -0.25
               exit:
                 stop_loss: 2.0
                 take_profit: {take_profit}
@@ -165,7 +167,8 @@ class TestNoneTakeProfitPct:
                   right: put
                   action: sell_to_open
                   dte: 21
-                  delta: -0.25
+                  delta:
+                    target: -0.25
               exit:
                 stop_loss: 2.0
                 take_profit_pct: {take_profit_pct}
@@ -224,7 +227,8 @@ def _cross_sweep_expander(tmp_path: Path) -> StudyExpander:
                   right: put
                   action: sell_to_open
                   dte: 21
-                  delta: -0.25
+                  delta:
+                    target: -0.25
               exit:
                 stop_loss: [null, 2.0]
                 take_profit_pct: [null, 0.70]
@@ -276,7 +280,8 @@ class TestTableCombinationsWithNone:
                       right: put
                       action: sell_to_open
                       dte: 21
-                      delta: -0.25
+                      delta:
+                        target: -0.25
                   exit:
                     stop_loss: 2.0
                     take_profit: 0.50

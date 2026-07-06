@@ -46,7 +46,8 @@ strategy:
           right:  put
           action: sell_to_open
           dte:    21
-          delta:  [-0.20, -0.25]
+          delta:
+            target: [-0.20, -0.25]
       exit:
         stop_loss:   2.0
         take_profit: 1.0
@@ -83,7 +84,8 @@ strategy:
           right:  put
           action: sell_to_open
           dte:    21
-          delta:  -0.25
+          delta:
+            target: -0.25
       exit:
         stop_loss:   2.0
         take_profit: 1.0
@@ -225,5 +227,6 @@ class TestParseConditionErrors:
             parse_condition("0 < sma_5 < 100")
 
     def test_unsupported_node_raises(self):
+        # ** is not in the supported arithmetic operators
         with pytest.raises(ValueError):
-            parse_condition("sma_5 + 10 > 100")
+            parse_condition("sma_5 ** 2 > 100")

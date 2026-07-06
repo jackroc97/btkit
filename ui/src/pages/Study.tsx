@@ -1,13 +1,18 @@
-import { useState, useMemo, useRef, useEffect } from 'react'
+import { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { type ColDef } from 'ag-grid-community'
+import { type ColDef, type ICellRendererParams, type ValueGetterParams } from 'ag-grid-community'
 import PlotlyChart from '../components/charts/PlotlyChart'
 import BtkAgGrid from '../components/BtkAgGrid'
+import CompositeScore, { type ScoreConfig } from '../components/CompositeScore'
+import { TagFilterBar } from '../tags/TagFilterBar'
+import { TagPicker } from '../tags/TagPicker'
+import { TagPillList } from '../tags/TagPill'
+import type { Tag } from '../tags/TagsContext'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type Status = 'completed' | 'running' | 'error'
-type HeatMetric = 'sharpe' | 'total_return_pct' | 'win_rate_pct' | 'profit_factor' | 'avg_pnl'
+type HeatMetric = 'sharpe' | 'sortino' | 'calmar' | 'total_return_pct' | 'win_rate_pct' | 'profit_factor' | 'avg_pnl' | 'recovery_factor'
 
 interface ApiBacktest {
   id: number
@@ -25,8 +30,19 @@ interface ApiBacktest {
   start_date: string | null
   end_date: string | null
   sharpe: number | null
+  sortino: number | null
+  calmar: number | null
   total_return_pct: number | null
   profit_factor: number | null
+  max_drawdown: number | null
+  max_drawdown_pct: number | null
+  cagr: number | null
+  recovery_factor: number | null
+  mean_pnl_ci_lower: number | null
+  mean_pnl_ci_upper: number | null
+  win_rate_ci_lower: number | null
+  win_rate_ci_upper: number | null
+  tags: Tag[]
   params: Record<string, number | null>
 }
 
@@ -68,6 +84,13 @@ interface HeatmapConfig {
   strategy:  string | null
 }
 
+interface DailyPnl {
+  trade_date:  string
+  total_pnl:   number
+  n_backtests: number
+  n_trades:    number
+}
+
 // ── Metric definitions ────────────────────────────────────────────────────────
 
 interface HeatMetricDef {
@@ -78,18 +101,24 @@ interface HeatMetricDef {
 }
 
 const HEAT_METRICS: HeatMetricDef[] = [
-  { key: 'sharpe',           label: 'Sharpe Ratio',   higherBetter: true,  fmt: v => v.toFixed(2)                           },
-  { key: 'total_return_pct', label: 'Total Return %', higherBetter: true,  fmt: v => `${v > 0 ? '+' : ''}${v.toFixed(1)}%`  },
-  { key: 'win_rate_pct',     label: 'Win Rate %',     higherBetter: true,  fmt: v => `${v.toFixed(1)}%`                      },
-  { key: 'profit_factor',    label: 'Profit Factor',  higherBetter: true,  fmt: v => v.toFixed(2)                            },
-  { key: 'avg_pnl',          label: 'Avg P&L ($)',    higherBetter: true,  fmt: v => `$${v.toFixed(0)}`                      },
+  { key: 'sharpe',           label: 'Sharpe Ratio',     higherBetter: true,  fmt: v => v.toFixed(2)                           },
+  { key: 'sortino',          label: 'Sortino Ratio',    higherBetter: true,  fmt: v => v.toFixed(2)                           },
+  { key: 'calmar',           label: 'Calmar Ratio',     higherBetter: true,  fmt: v => v.toFixed(2)                           },
+  { key: 'total_return_pct', label: 'Total Return %',   higherBetter: true,  fmt: v => `${v > 0 ? '+' : ''}${v.toFixed(1)}%`  },
+  { key: 'win_rate_pct',     label: 'Win Rate %',       higherBetter: true,  fmt: v => `${v.toFixed(1)}%`                      },
+  { key: 'profit_factor',    label: 'Profit Factor',    higherBetter: true,  fmt: v => v.toFixed(2)                            },
+  { key: 'recovery_factor',  label: 'Recovery Factor',  higherBetter: true,  fmt: v => v.toFixed(2)                            },
+  { key: 'avg_pnl',          label: 'Avg P&L ($)',      higherBetter: true,  fmt: v => `$${v.toFixed(0)}`                      },
 ]
 
 const HIST_METRICS = [
   { key: 'sharpe',           label: 'Sharpe Ratio',     tickformat: '.2f'  },
+  { key: 'sortino',          label: 'Sortino Ratio',    tickformat: '.2f'  },
+  { key: 'calmar',           label: 'Calmar Ratio',     tickformat: '.2f'  },
   { key: 'total_return_pct', label: 'Total Return (%)', tickformat: '.1f'  },
   { key: 'win_rate_pct',     label: 'Win Rate (%)',     tickformat: '.1f'  },
   { key: 'profit_factor',    label: 'Profit Factor',    tickformat: '.2f'  },
+  { key: 'recovery_factor',  label: 'Recovery Factor',  tickformat: '.2f'  },
   { key: 'avg_pnl',          label: 'Avg P&L ($)',      tickformat: ',.0f' },
   { key: 'n_trades',         label: 'Num Trades',       tickformat: 'd'    },
 ]
@@ -158,9 +187,12 @@ function getAxisValues(backtests: ApiBacktest[], axis: string): string[] {
 function getMetricValue(b: ApiBacktest, metric: HeatMetric): number | null {
   switch (metric) {
     case 'sharpe':           return b.sharpe
+    case 'sortino':          return b.sortino
+    case 'calmar':           return b.calmar
     case 'total_return_pct': return b.total_return_pct
     case 'win_rate_pct':     return b.win_rate != null ? b.win_rate * 100 : null
     case 'profit_factor':    return b.profit_factor
+    case 'recovery_factor':  return b.recovery_factor
     case 'avg_pnl':          return b.avg_pnl
   }
 }
@@ -168,9 +200,12 @@ function getMetricValue(b: ApiBacktest, metric: HeatMetric): number | null {
 function getHistValue(b: ApiBacktest, key: string): number | null {
   switch (key) {
     case 'sharpe':           return b.sharpe
+    case 'sortino':          return b.sortino
+    case 'calmar':           return b.calmar
     case 'total_return_pct': return b.total_return_pct
     case 'win_rate_pct':     return b.win_rate != null ? b.win_rate * 100 : null
     case 'profit_factor':    return b.profit_factor
+    case 'recovery_factor':  return b.recovery_factor
     case 'avg_pnl':          return b.avg_pnl
     case 'n_trades':         return b.n_trades
     default:                 return null
@@ -188,10 +223,20 @@ function StatusBadge({ status }: { status: Status }) {
 
 // ── Backtests AG Grid ─────────────────────────────────────────────────────────
 
-function BacktestTable({ backtests }: { backtests: ApiBacktest[] }) {
+function BacktestTable({
+  backtests,
+  onTagsChanged,
+  scoreConfig,
+  studyId,
+}: {
+  backtests: ApiBacktest[]
+  onTagsChanged: (backtestId: number, tags: Tag[]) => void
+  scoreConfig: ScoreConfig | null
+  studyId: string | undefined
+}) {
   const navigate = useNavigate()
 
-  const columnDefs: ColDef<ApiBacktest>[] = [
+  const baseColumnDefs: ColDef<ApiBacktest>[] = [
     {
       field: 'combination_id', headerName: '#', width: 64,
       cellStyle: { color: 'var(--btk-muted-dk)' },
@@ -199,6 +244,22 @@ function BacktestTable({ backtests }: { backtests: ApiBacktest[] }) {
     {
       field: 'strategy_label', headerName: 'Strategy', minWidth: 140, flex: 1,
       cellStyle: { color: '#60a5fa', fontFamily: 'monospace', fontSize: '0.78rem' },
+    },
+    {
+      headerName: 'Tags', width: 170,
+      cellRenderer: (p: ICellRendererParams<ApiBacktest>) => {
+        if (!p.data) return null
+        return (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, height: '100%' }} onClick={e => e.stopPropagation()}>
+            <TagPillList tags={p.data.tags ?? []} maxVisible={2} />
+            <TagPicker
+              backtestId={p.data.id}
+              currentTags={p.data.tags ?? []}
+              onChanged={next => onTagsChanged(p.data!.id, next)}
+            />
+          </div>
+        )
+      },
     },
     {
       headerName: 'δ', width: 72,
@@ -214,6 +275,11 @@ function BacktestTable({ backtests }: { backtests: ApiBacktest[] }) {
       headerName: 'SL', width: 72,
       valueGetter: p => p.data?.params?.stop_loss,
       valueFormatter: p => p.value != null ? String(p.value) : '—',
+    },
+    {
+      headerName: 'DTE', width: 68,
+      valueGetter: p => p.data?.params?.dte,
+      valueFormatter: p => p.value != null ? String(Math.round(Number(p.value))) : '—',
     },
     {
       field: 'status', headerName: 'Status', width: 104,
@@ -238,6 +304,24 @@ function BacktestTable({ backtests }: { backtests: ApiBacktest[] }) {
       },
     },
     {
+      field: 'sortino', headerName: 'Sortino', width: 90,
+      valueFormatter: p => p.value != null ? (p.value as number).toFixed(2) : '—',
+      cellStyle: p => {
+        const v = p.value as number | null
+        if (v == null) return null
+        return { color: v >= 1.5 ? '#4ade80' : v >= 0.8 ? '#f59e0b' : '#f87171', fontWeight: 600, fontSize: '0.825rem' }
+      },
+    },
+    {
+      field: 'calmar', headerName: 'Calmar', width: 90,
+      valueFormatter: p => p.value != null ? (p.value as number).toFixed(2) : '—',
+      cellStyle: p => {
+        const v = p.value as number | null
+        if (v == null) return null
+        return { color: v >= 1 ? '#4ade80' : v >= 0.5 ? '#f59e0b' : '#f87171', fontSize: '0.825rem' }
+      },
+    },
+    {
       field: 'total_return_pct', headerName: 'Return', width: 90,
       valueFormatter: p => { const v = p.value as number | null; return v == null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}%` },
       cellStyle: p => ({ color: ((p.value as number | null) ?? 0) >= 0 ? '#4ade80' : '#f87171', fontSize: '0.825rem' }),
@@ -250,6 +334,21 @@ function BacktestTable({ backtests }: { backtests: ApiBacktest[] }) {
       field: 'n_trades', headerName: 'Trades', width: 80,
     },
     {
+      headerName: 'Final Equity', width: 120,
+      valueGetter: p => {
+        const init = p.data?.initial_equity
+        const pnl  = p.data?.total_pnl ?? 0
+        return init != null ? init + pnl : null
+      },
+      valueFormatter: p => { const v = p.value as number | null; return v == null ? '—' : `$${v.toLocaleString('en-US', { maximumFractionDigits: 0 })}` },
+      cellStyle: p => {
+        const init = (p.node?.data as ApiBacktest | undefined)?.initial_equity
+        const v = p.value as number | null
+        if (v == null || init == null) return null
+        return { color: v >= init ? '#4ade80' : '#f87171' }
+      },
+    },
+    {
       field: 'avg_pnl', headerName: 'Avg P&L', width: 100,
       valueFormatter: p => { const v = p.value as number | null; return v == null ? '—' : `${v >= 0 ? '+' : ''}$${Math.abs(v).toFixed(0)}` },
       cellStyle: p => ({ color: ((p.value as number | null) ?? 0) >= 0 ? '#4ade80' : '#f87171' }),
@@ -258,7 +357,72 @@ function BacktestTable({ backtests }: { backtests: ApiBacktest[] }) {
       field: 'profit_factor', headerName: 'Prof. Factor', width: 104,
       valueFormatter: p => p.value != null ? (p.value as number).toFixed(2) : '—',
     },
+    {
+      field: 'max_drawdown_pct', headerName: 'Max DD', width: 88,
+      valueFormatter: p => p.value != null ? `-${(p.value as number).toFixed(1)}%` : '—',
+      cellStyle: p => p.value != null ? { color: '#f87171', fontSize: '0.825rem' } : null,
+    },
+    {
+      field: 'cagr', headerName: 'CAGR', width: 84,
+      valueFormatter: p => { const v = p.value as number | null; return v == null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}%` },
+      cellStyle: p => ({ color: ((p.value as number | null) ?? 0) >= 0 ? '#4ade80' : '#f87171', fontSize: '0.825rem' }),
+    },
+    {
+      field: 'recovery_factor', headerName: 'Recovery', width: 100,
+      valueFormatter: p => p.value != null ? (p.value as number).toFixed(2) : '—',
+      cellStyle: p => {
+        const v = p.value as number | null
+        if (v == null) return null
+        return { color: v >= 1 ? '#4ade80' : '#f87171' }
+      },
+    },
+    {
+      headerName: 'Mean P&L CI', width: 148,
+      valueGetter: p => {
+        const lo = p.data?.mean_pnl_ci_lower, hi = p.data?.mean_pnl_ci_upper
+        return lo != null && hi != null ? (lo + hi) / 2 : null
+      },
+      cellRenderer: (p: { data?: ApiBacktest }) => {
+        const lo = p.data?.mean_pnl_ci_lower, hi = p.data?.mean_pnl_ci_upper
+        if (lo == null || hi == null) return '—'
+        const fmtV = (v: number) => `${v >= 0 ? '+' : ''}$${Math.abs(v).toFixed(0)}`
+        return <span style={{ fontSize: '0.78rem', color: '#94a3b8' }}>{fmtV(lo)} – {fmtV(hi)}</span>
+      },
+    },
+    {
+      headerName: 'Win Rate CI', width: 136,
+      valueGetter: p => {
+        const lo = p.data?.win_rate_ci_lower, hi = p.data?.win_rate_ci_upper
+        return lo != null && hi != null ? (lo + hi) / 2 : null
+      },
+      cellRenderer: (p: { data?: ApiBacktest }) => {
+        const lo = p.data?.win_rate_ci_lower, hi = p.data?.win_rate_ci_upper
+        if (lo == null || hi == null) return '—'
+        return <span style={{ fontSize: '0.78rem', color: '#94a3b8' }}>{(lo * 100).toFixed(1)}% – {(hi * 100).toFixed(1)}%</span>
+      },
+    },
   ]
+
+  const columnDefs = useMemo((): ColDef<ApiBacktest>[] => {
+    if (!scoreConfig || scoreConfig.weights.length === 0) return baseColumnDefs
+    return [...baseColumnDefs, {
+      headerName: scoreConfig.label || 'Score',
+      colId: '__score__',
+      valueGetter: (p: ValueGetterParams<ApiBacktest>) => {
+        if (!p.data) return null
+        let sum = 0
+        for (const { metric, weight } of scoreConfig.weights) {
+          const v = (p.data as unknown as Record<string, number | null>)[metric]
+          if (v != null) sum += weight * v
+        }
+        return sum
+      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      valueFormatter: (p: any) => p.value != null ? (p.value as number).toFixed(3) : '—',
+      cellStyle: { color: '#818cf8', fontWeight: 600 },
+      sortable: true,
+    } as ColDef<ApiBacktest>]
+  }, [baseColumnDefs, scoreConfig])
 
   return (
     <BtkAgGrid
@@ -269,6 +433,7 @@ function BacktestTable({ backtests }: { backtests: ApiBacktest[] }) {
       filterPlaceholder="Filter backtests…"
       initialSortColId="sharpe"
       initialSortDir="desc"
+      prefKey={studyId ? `grid.study.${studyId}` : undefined}
     />
   )
 }
@@ -490,31 +655,195 @@ function HeatmapSection({ backtests, sweepAxes, strategies }: {
   )
 }
 
+// ── Daily P&L Panel ──────────────────────────────────────────────────────────
+
+const PNL_SCALE = [
+  [0.00, 'rgba(185,28,28,0.90)'],
+  [0.35, 'rgba(220,38,38,0.75)'],
+  [0.50, '#1e293b'],
+  [0.65, 'rgba(21,128,61,0.75)'],
+  [1.00, 'rgba(22,163,74,0.90)'],
+]
+
+const WORST_DAY_COLS: ColDef<DailyPnl>[] = [
+  { field: 'trade_date',  headerName: 'Date',         width: 110, sort: 'asc' },
+  {
+    field: 'total_pnl',
+    headerName: 'Total P&L',
+    width: 130,
+    valueFormatter: p => p.value == null ? '—' : `${p.value >= 0 ? '+' : ''}$${p.value.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`,
+    cellStyle: p => ({ color: (p.value == null ? '#94a3b8' : p.value >= 0 ? '#4ade80' : '#f87171') as string }),
+  },
+  { field: 'n_backtests', headerName: '# Backtests',  width: 110 },
+  { field: 'n_trades',    headerName: '# Trades',      width: 100 },
+]
+
+function DailyPnlPanel({ rows }: { rows: DailyPnl[] }) {
+  if (rows.length === 0) return null
+
+  const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']
+
+  const dates = rows.map(r => new Date(r.trade_date + 'T12:00:00'))
+  const minDate = dates[0]
+  // Start from Monday of the first week
+  const startDay = minDate.getDay() // 0=Sun, 1=Mon..
+  const mondayOffset = startDay === 0 ? -6 : 1 - startDay
+  const weekStart = new Date(minDate)
+  weekStart.setDate(weekStart.getDate() + mondayOffset)
+
+  const maxWeek = Math.ceil(
+    (dates[dates.length - 1].getTime() - weekStart.getTime()) / (7 * 86400000)
+  ) + 1
+
+  // z[dayIndex][weekIndex], null = no trade
+  const z: (number | null)[][] = Array.from({ length: 5 }, () => Array(maxWeek).fill(null))
+
+  for (let i = 0; i < rows.length; i++) {
+    const d = dates[i]
+    const dow = d.getDay() // 0=Sun .. 6=Sat
+    const dayIdx = dow === 0 ? 6 : dow - 1 // Mon=0..Sun=6; we only use 0-4
+    if (dayIdx > 4) continue
+    const weekIdx = Math.floor((d.getTime() - weekStart.getTime()) / (7 * 86400000))
+    z[dayIdx][weekIdx] = rows[i].total_pnl
+  }
+
+  // Month tick labels on x-axis at first week of each month
+  const tickvals: number[] = []
+  const ticktext: string[] = []
+  let lastMonth = -1
+  const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+  for (let w = 0; w < maxWeek; w++) {
+    const wDate = new Date(weekStart.getTime() + w * 7 * 86400000)
+    if (wDate.getMonth() !== lastMonth) {
+      lastMonth = wDate.getMonth()
+      const yr = wDate.getFullYear().toString().slice(2)
+      tickvals.push(w)
+      ticktext.push(`${MONTHS[lastMonth]} '${yr}`)
+    }
+  }
+
+  const allPnl = rows.map(r => Math.abs(r.total_pnl))
+  const maxAbs  = Math.max(...allPnl, 1)
+
+  const heatmapTrace = {
+    type: 'heatmap',
+    x: Array.from({ length: maxWeek }, (_, i) => i),
+    y: DAY_LABELS,
+    z,
+    zmin: -maxAbs,
+    zmax:  maxAbs,
+    colorscale: PNL_SCALE,
+    showscale: true,
+    hoverongaps: false,
+    xgap: 2,
+    ygap: 2,
+    colorbar: {
+      thickness: 10,
+      len: 0.8,
+      tickfont: { color: '#94a3b8', size: 10 },
+      tickformat: ',.0f',
+    },
+    hovertemplate: 'Week %{x}<br>%{y}<br>P&L: $%{z:,.0f}<extra></extra>',
+  }
+
+  const layout = {
+    ...DARK_LAYOUT,
+    margin: { t: 8, r: 60, b: 28, l: 46 },
+    xaxis: {
+      ...DARK_LAYOUT.xaxis,
+      tickvals,
+      ticktext,
+      tickangle: -35,
+      showgrid: false,
+    },
+    yaxis: {
+      ...DARK_LAYOUT.yaxis,
+      tickfont: { size: 10 },
+      showgrid: false,
+    },
+  }
+
+  const worstRows = [...rows].sort((a, b) => a.total_pnl - b.total_pnl).slice(0, 20)
+
+  return (
+    <div className="btk-chart-card mb-3">
+      <div className="px-3 pt-3 pb-1">
+        <span className="btk-chart-title">Daily P&amp;L — Aggregated Across Study</span>
+      </div>
+      <PlotlyChart
+        data={[heatmapTrace]}
+        layout={layout}
+        style={{ width: '100%', height: 180 }}
+      />
+      <div className="px-3 pb-3 pt-2">
+        <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: 6 }}>Worst 20 days</div>
+        <BtkAgGrid<DailyPnl>
+          rowData={worstRows}
+          columnDefs={WORST_DAY_COLS}
+          pageSize={20}
+          filterPlaceholder="Filter days…"
+        />
+      </div>
+    </div>
+  )
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function Study() {
   const { id }              = useParams<{ id: string }>()
-  const [study, setStudy]   = useState<ApiStudy | null>(null)
-  const [equity, setEquity] = useState<EquityCurve[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError]     = useState<string | null>(null)
+  const [study, setStudy]       = useState<ApiStudy | null>(null)
+  const [equity, setEquity]     = useState<EquityCurve[]>([])
+  const [dailyPnl, setDailyPnl] = useState<DailyPnl[]>([])
+  const [loading, setLoading]   = useState(true)
+  const [error, setError]       = useState<string | null>(null)
   const [histKey, setHistKey] = useState('sharpe')
   const [xMode, setXMode]     = useState<'date' | 'trade'>('date')
+  const [activeTagFilter, setActiveTagFilter] = useState<Set<number>>(new Set())
+  const [scoreConfig, setScoreConfig] = useState<ScoreConfig | null>(null)
 
   useEffect(() => {
     if (!id) return
     Promise.all([
       fetch(`/api/studies/${id}`).then(r => { if (!r.ok) throw new Error(`${r.status}`); return r.json() }),
       fetch(`/api/studies/${id}/equity`).then(r => { if (!r.ok) throw new Error(`${r.status}`); return r.json() }),
+      fetch(`/api/studies/${id}/daily-pnl`).then(r => r.ok ? r.json() : []),
     ])
-      .then(([s, e]) => { setStudy(s); setEquity(e) })
+      .then(([s, e, d]) => { setStudy(s); setEquity(e); setDailyPnl(d) })
       .catch(e => setError(String(e)))
       .finally(() => setLoading(false))
   }, [id])
 
+  const updateBacktestTags = useCallback((backtestId: number, tags: Tag[]) => {
+    setStudy(prev => {
+      if (!prev) return prev
+      return {
+        ...prev,
+        backtests: prev.backtests.map(b => b.id === backtestId ? { ...b, tags } : b),
+      }
+    })
+  }, [])
+
+  // Collect distinct tags across all backtests for the filter bar
+  const tagsInView = useMemo((): Tag[] => {
+    const seen = new Map<number, Tag>()
+    for (const b of study?.backtests ?? []) {
+      for (const tag of b.tags ?? []) {
+        if (!seen.has(tag.id)) seen.set(tag.id, tag)
+      }
+    }
+    return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name))
+  }, [study])
+
+  const filteredBacktests = useMemo(() => {
+    const all = study?.backtests ?? []
+    if (activeTagFilter.size === 0) return all
+    return all.filter(b => (b.tags ?? []).some(t => activeTagFilter.has(t.id)))
+  }, [study, activeTagFilter])
+
   const completed = useMemo(
-    () => (study?.backtests ?? []).filter(b => b.status === 'completed'),
-    [study]
+    () => filteredBacktests.filter(b => b.status === 'completed'),
+    [filteredBacktests]
   )
 
   const bestBt = useMemo(
@@ -525,10 +854,15 @@ export default function Study() {
     [completed]
   )
 
+  const filteredIds = useMemo(() => new Set(filteredBacktests.map(b => b.id)), [filteredBacktests])
+
   // Equity traces from API equity curves
   const equityTraces = useMemo(() => {
     const btById = new Map((study?.backtests ?? []).map(b => [b.id, b]))
-    const traces: unknown[] = equity.map(c => {
+    const visibleEquity = activeTagFilter.size > 0
+      ? equity.filter(c => filteredIds.has(c.backtest_id))
+      : equity
+    const traces: unknown[] = visibleEquity.map(c => {
       const initial = c.initial_equity || 100_000
       const y = [initial, ...c.cum_pnl.map(p => initial + p)]
       const isBest = c.backtest_id === bestBt?.id
@@ -548,8 +882,8 @@ export default function Study() {
       }
     })
     if (traces.length > 0 && xMode !== 'date') {
-      const maxLen = Math.max(...equity.map(c => c.cum_pnl.length + 1))
-      const initial = equity[0]?.initial_equity || 100_000
+      const maxLen = Math.max(...visibleEquity.map(c => c.cum_pnl.length + 1))
+      const initial = visibleEquity[0]?.initial_equity || 100_000
       traces.unshift({
         x: [0, maxLen - 1], y: [initial, initial],
         type: 'scatter', mode: 'lines',
@@ -558,7 +892,7 @@ export default function Study() {
       })
     }
     return traces
-  }, [equity, bestBt, xMode, study])
+  }, [equity, bestBt, xMode, study, activeTagFilter, filteredIds])
 
   // Distribution histogram
   const histMetaDef = HIST_METRICS.find(m => m.key === histKey)!
@@ -752,20 +1086,48 @@ export default function Study() {
               </div>
             </div>
 
+            {/* Daily P&L */}
+            <DailyPnlPanel rows={dailyPnl} />
+
             {/* Heatmaps */}
             {study.sweep_axes.length >= 2 && (
               <HeatmapSection
-                backtests={study.backtests}
+                backtests={filteredBacktests}
                 sweepAxes={study.sweep_axes}
                 strategies={study.strategies}
               />
             )}
 
             {/* Backtests table */}
-            <div className="mb-2">
-              <span className="btk-chart-title">Backtests</span>
+            <div className="d-flex align-items-center justify-content-between mb-2 flex-wrap gap-2">
+              <span className="btk-chart-title">
+                Backtests
+                {activeTagFilter.size > 0 && (
+                  <span style={{ fontSize: '0.75rem', fontWeight: 400, color: 'var(--btk-muted-dk)', marginLeft: 8 }}>
+                    ({filteredBacktests.length} of {study.backtests.length})
+                  </span>
+                )}
+              </span>
+              {tagsInView.length > 0 && (
+                <TagFilterBar
+                  tags={tagsInView}
+                  active={activeTagFilter}
+                  onChange={setActiveTagFilter}
+                />
+              )}
             </div>
-            <BacktestTable backtests={study.backtests} />
+            <div className="d-flex align-items-center mb-2" style={{ gap: 8 }}>
+              <CompositeScore
+                prefKey={`composite.study.${id}`}
+                onChange={setScoreConfig}
+              />
+            </div>
+            <BacktestTable
+              backtests={filteredBacktests}
+              onTagsChanged={updateBacktestTags}
+              scoreConfig={scoreConfig}
+              studyId={id}
+            />
           </>
         )}
       </div>

@@ -67,7 +67,8 @@ class OutputDatabase:
                 worst_mark      DOUBLE,
                 slippage_cost   DOUBLE,
                 fee_cost        DOUBLE,
-                net_pnl         DOUBLE
+                net_pnl         DOUBLE,
+                target_name     VARCHAR
             )
         """)
         self._con.execute("""
@@ -258,6 +259,10 @@ class OutputDatabase:
             pl.Series("id", pos_ids),
             pl.lit(backtest_id).alias("backtest_id"),
         )
+        # target_name is optional in the input frame (only targets-leg trades set
+        # it); default to null so direct callers need not supply it.
+        if "target_name" not in positions.columns:
+            positions = positions.with_columns(pl.lit(None).cast(pl.Utf8).alias("target_name"))
 
         # Build entry_id → position_id map for legs.
         id_map = dict(zip(positions["entry_id"].to_list(), pos_ids, strict=False))
@@ -277,6 +282,7 @@ class OutputDatabase:
                 "slippage_cost",
                 "fee_cost",
                 "net_pnl",
+                "target_name",
             ]
         )
         self._con.register("_positions", pos_rows)
@@ -444,6 +450,16 @@ class OutputDatabase:
                     PRIMARY KEY (backtest_id, tag_id)
                 )
             """)
+        if "position" in tables:
+            pos_cols = {
+                row[0]
+                for row in self._con.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'position'"
+                ).fetchall()
+            }
+            if "target_name" not in pos_cols:
+                self._con.execute("ALTER TABLE position ADD COLUMN target_name VARCHAR")
         if "position_continuation" not in tables and "position" in tables:
             self._con.execute("""
                 CREATE TABLE IF NOT EXISTS position_continuation (

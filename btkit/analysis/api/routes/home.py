@@ -7,9 +7,9 @@ from datetime import date, datetime
 from typing import Any
 
 from fastapi import APIRouter
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
-from ..db import query
+from ..db import cache_get, cache_set, query
 
 router = APIRouter()
 
@@ -56,7 +56,8 @@ daily AS (
 daily_stats AS (
     SELECT backtest_id,
         AVG(daily_pnl)         AS mean_daily_pnl,
-        STDDEV_SAMP(daily_pnl) AS std_daily_pnl
+        STDDEV_SAMP(daily_pnl) AS std_daily_pnl,
+        STDDEV_SAMP(CASE WHEN daily_pnl < 0 THEN daily_pnl END) AS downside_std
     FROM daily
     GROUP BY backtest_id
 ),
@@ -70,6 +71,38 @@ trade_stats AS (
         CAST(MIN(open_time) AS DATE)                                AS start_date,
         CAST(MAX(exit_time) AS DATE)                                AS end_date
     FROM position
+    GROUP BY backtest_id
+),
+equity_curve AS (
+    SELECT
+        p.backtest_id,
+        p.exit_time,
+        p.id AS pos_id,
+        COALESCE(b.initial_equity, 0) + SUM(p.net_pnl) OVER (
+            PARTITION BY p.backtest_id
+            ORDER BY p.exit_time, p.id
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS equity
+    FROM position p
+    JOIN backtest b ON b.id = p.backtest_id
+    WHERE b.status = 'completed'
+),
+peak_equity AS (
+    SELECT
+        backtest_id,
+        equity,
+        MAX(equity) OVER (
+            PARTITION BY backtest_id
+            ORDER BY exit_time, pos_id
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS peak
+    FROM equity_curve
+),
+dd_stats AS (
+    SELECT backtest_id,
+        MAX(peak - equity)                       AS max_drawdown,
+        ARG_MAX(peak, peak - equity)             AS peak_at_max_dd
+    FROM peak_equity
     GROUP BY backtest_id
 )
 SELECT
@@ -91,13 +124,54 @@ SELECT
         THEN (d.mean_daily_pnl / d.std_daily_pnl) * SQRT(252.0)
         ELSE NULL
     END                                                              AS sharpe,
+    CASE WHEN COALESCE(d.downside_std, 0.0) > 0
+        THEN (d.mean_daily_pnl / d.downside_std) * SQRT(252.0)
+        ELSE NULL
+    END                                                              AS sortino,
     CASE WHEN COALESCE(b.initial_equity, 0) > 0
         THEN (COALESCE(t.total_pnl, 0.0) / b.initial_equity) * 100.0
         ELSE NULL
-    END                                                              AS total_return_pct
+    END                                                              AS total_return_pct,
+    COALESCE(dd.max_drawdown, 0.0)                                   AS max_drawdown,
+    CASE WHEN COALESCE(dd.max_drawdown, 0.0) > 0
+        THEN COALESCE(t.total_pnl, 0.0) / dd.max_drawdown
+        ELSE NULL
+    END                                                              AS recovery_factor,
+    CASE WHEN COALESCE(dd.peak_at_max_dd, 0.0) > 0
+        THEN (dd.max_drawdown / dd.peak_at_max_dd) * 100.0
+        ELSE NULL
+    END                                                              AS max_drawdown_pct,
+    CASE
+        WHEN t.start_date IS NOT NULL
+         AND t.end_date   IS NOT NULL
+         AND t.end_date > t.start_date
+         AND COALESCE(b.initial_equity, 0) > 0
+        THEN (
+            POWER(
+                (b.initial_equity + COALESCE(t.total_pnl, 0.0)) / b.initial_equity,
+                365.25 / DATEDIFF('day', t.start_date, t.end_date)
+            ) - 1.0
+        ) * 100.0
+        ELSE NULL
+    END                                                              AS cagr,
+    CASE
+        WHEN COALESCE(dd.peak_at_max_dd, 0.0) > 0
+         AND t.start_date IS NOT NULL
+         AND t.end_date   IS NOT NULL
+         AND t.end_date > t.start_date
+         AND COALESCE(b.initial_equity, 0) > 0
+        THEN (
+            POWER(
+                (b.initial_equity + COALESCE(t.total_pnl, 0.0)) / b.initial_equity,
+                365.25 / DATEDIFF('day', t.start_date, t.end_date)
+            ) - 1.0
+        ) * 100.0 / (dd.max_drawdown / dd.peak_at_max_dd * 100.0)
+        ELSE NULL
+    END                                                              AS calmar
 FROM backtest b
 LEFT JOIN trade_stats t ON t.backtest_id = b.id
 LEFT JOIN daily_stats  d ON d.backtest_id = b.id
+LEFT JOIN dd_stats     dd ON dd.backtest_id = b.id
 WHERE b.status = 'completed'
 ORDER BY b.id DESC
 """
@@ -136,6 +210,13 @@ WHERE study_id IN (SELECT id FROM study)
 ORDER BY study_id, combination_id
 """
 
+_BACKTEST_TAGS_SQL = """
+SELECT bt.backtest_id, t.id, t.name, t.color
+FROM backtest_tag bt
+JOIN tag t ON t.id = bt.tag_id
+ORDER BY bt.backtest_id, t.name
+"""
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _clean(v: Any) -> Any:
@@ -164,7 +245,9 @@ def _extract_params(params_json: str) -> dict:
                 (l for l in legs if "sell" in l.get("action", "")),
                 legs[0] if legs else {},
             )
-            result["delta"]           = short.get("delta")
+            _delta = short.get("delta") or {}
+            result["delta"]           = _delta.get("target") if isinstance(_delta, dict) else _delta
+            result["dte"]             = short.get("dte")
             ex = trade.get("exit", {})
             result["take_profit_pct"] = ex.get("take_profit_pct")
             result["stop_loss"]       = ex.get("stop_loss")
@@ -188,22 +271,77 @@ def _strategy_label(name: str) -> str:
     return name.replace("_", " ").title()
 
 
+# ── Cache ─────────────────────────────────────────────────────────────────────
+
+_FINGERPRINT_SQL = """
+SELECT
+    CAST(COUNT(*) AS VARCHAR)         || ':' ||
+    CAST(COALESCE(MAX(id), 0) AS VARCHAR)  || ':' ||
+    CAST(COALESCE(SUM(initial_equity), 0) AS VARCHAR) AS fp
+FROM backtest
+"""
+
+_TAG_COUNT_SQL = """
+SELECT CAST(COUNT(*) AS VARCHAR) FROM backtest_tag
+"""
+
+
+def _fingerprint() -> str:
+    try:
+        _, rows = query(_FINGERPRINT_SQL)
+        fp = rows[0][0] if rows else "0:0:0"
+    except Exception:
+        fp = "0:0:0"
+    try:
+        _, trows = query(_TAG_COUNT_SQL)
+        tc = trows[0][0] if trows else "0"
+    except Exception:
+        tc = "0"
+    return f"{fp}:{tc}"
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+def _load_backtest_tags() -> dict[int, list[dict]]:
+    """Return a mapping of backtest_id → list of {id, name, color} tag dicts."""
+    try:
+        _, rows = query(_BACKTEST_TAGS_SQL)
+    except Exception:
+        return {}
+    tags_by_bt: dict[int, list[dict]] = {}
+    for bt_id, t_id, t_name, t_color in rows:
+        tags_by_bt.setdefault(bt_id, []).append({"id": t_id, "name": t_name, "color": t_color})
+    return tags_by_bt
+
+
 @router.get("/backtests")
-def list_backtests() -> JSONResponse:
+def list_backtests() -> Response:
+    fp = _fingerprint()
+    cached = cache_get("home.backtests", fp)
+    if cached is not None:
+        return Response(content=cached, media_type="application/json")
+
     cols, rows = query(_BACKTEST_SQL)
+    tags_by_bt = _load_backtest_tags()
     result = []
     for row in rows:
         d = _row_to_dict(cols, row)
         d["params"]         = _extract_params(d.pop("strategy_params"))
         d["strategy_label"] = _strategy_label(d["strategy_name"])
+        d["tags"]           = tags_by_bt.get(d["id"], [])
         result.append(d)
-    return JSONResponse(result)
+    body = json.dumps(result)
+    cache_set("home.backtests", body, fp)
+    return Response(content=body, media_type="application/json")
 
 
 @router.get("/studies")
-def list_studies() -> JSONResponse:
+def list_studies() -> Response:
+    fp = _fingerprint()
+    cached = cache_get("home.studies", fp)
+    if cached is not None:
+        return Response(content=cached, media_type="application/json")
+
     # Fetch study basics
     s_cols, s_rows = query(_STUDY_SQL)
     studies = {r[0]: _row_to_dict(s_cols, r) for r in s_rows}
@@ -246,6 +384,18 @@ def list_studies() -> JSONResponse:
         sid, params_json = row
         study_params.setdefault(sid, []).append(_extract_params(params_json))
 
+    # Build per-study tag union from backtest tags
+    tags_by_bt = _load_backtest_tags()
+    # Map study_id → set of tag dicts (deduplicated by tag id)
+    study_tag_map: dict[int, dict[int, dict]] = {}
+    for row in bt_rows:
+        d = _row_to_dict(bt_cols, row)
+        sid = d["study_id"]
+        if sid is None:
+            continue
+        for tag in tags_by_bt.get(d["id"], []):
+            study_tag_map.setdefault(sid, {})[tag["id"]] = tag
+
     # Compose final response
     result = []
     for sid, s in studies.items():
@@ -262,6 +412,9 @@ def list_studies() -> JSONResponse:
             "total_trades":    sm.get("total_trades", 0),
             "best_sharpe":     sm.get("best_sharpe"),
             "best_return_pct": sm.get("best_return_pct"),
+            "tags":            sorted(study_tag_map.get(sid, {}).values(), key=lambda t: t["name"]),
         })
 
-    return JSONResponse(result)
+    body = json.dumps(result)
+    cache_set("home.studies", body, fp)
+    return Response(content=body, media_type="application/json")

@@ -35,14 +35,16 @@ strategy:
         - name: short_put
           right:    put
           action:   sell_to_open
-          delta:    -0.25
+          delta:
+            target:    -0.25
           dte:      21
           quantity: 1
 
         - name: long_put
           right:    put
           action:   buy_to_open
-          delta:    -0.15
+          delta:
+            target:    -0.15
           dte:      21
           quantity: 1
 

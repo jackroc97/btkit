@@ -24,6 +24,7 @@ from typing import Any
 import polars as pl
 
 from btkit.strategy.definition import (
+    SimpleDeltaConfig,
     SweepRange,
     StopLossConfig,
     StrategyDefinition,
@@ -137,10 +138,10 @@ class StudyExpander:
 
         for trade in defn.trades:
             for leg in trade.legs:
-                if leg.delta is not None:
-                    vals = _as_values(leg.delta)
+                if isinstance(leg.delta, SimpleDeltaConfig):
+                    vals = _as_values(leg.delta.target)
                     if vals is not None:
-                        sweep_axes[f"{trade.name}.{leg.name}.delta"] = vals
+                        sweep_axes[f"{trade.name}.{leg.name}.delta.target"] = vals
                 vals = _as_values(leg.dte)
                 if vals is not None:
                     sweep_axes[f"{trade.name}.{leg.name}.dte"] = vals
@@ -238,9 +239,9 @@ class StudyExpander:
         is a fully-scalar StrategyDefinition (no remaining SweepRange/list fields).
 
         Dot-path format:
-          "{trade_name}.{leg_name}.delta"      → trade.legs[j].delta
-          "{trade_name}.{leg_name}.dte"        → trade.legs[j].dte
-          "{trade_name}.exit.{field}"          → trade.exit.{field}
+          "{trade_name}.{leg_name}.delta.target" → trade.legs[j].delta.target
+          "{trade_name}.{leg_name}.dte"         → trade.legs[j].dte
+          "{trade_name}.exit.{field}"           → trade.exit.{field}
         """
         raw = defn.model_dump()
         trade_by_name = {t["name"]: i for i, t in enumerate(raw["trades"])}
@@ -280,6 +281,14 @@ class StudyExpander:
                 if section not in leg_by_name:
                     raise ValueError(f"Unknown leg {section!r} in dot-path {dot_path!r}")
                 lj = leg_by_name[section]
-                raw["trades"][ti]["legs"][lj][parts[2]] = value
+                if len(parts) == 4:
+                    field, sub_field = parts[2], parts[3]
+                    existing = raw["trades"][ti]["legs"][lj].get(field, {})
+                    if isinstance(existing, dict):
+                        raw["trades"][ti]["legs"][lj][field] = dict(existing, **{sub_field: value})
+                    else:
+                        raw["trades"][ti]["legs"][lj][field] = {sub_field: value}
+                else:
+                    raw["trades"][ti]["legs"][lj][parts[2]] = value
 
         return StrategyDefinition.model_validate(raw)

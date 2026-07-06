@@ -60,7 +60,8 @@ strategy:
           right: put
           action: sell_to_open
           dte: 21
-          delta: [-0.20, -0.25, -0.30]
+          delta:
+            target: [-0.20, -0.25, -0.30]
       exit:
         stop_loss: [2.0, 3.0]
         take_profit: 1.0
@@ -94,7 +95,8 @@ strategy:
           right: put
           action: sell_to_open
           dte: 21
-          delta: [-0.20, -0.25]
+          delta:
+            target: [-0.20, -0.25]
       exit:
         stop_loss: 2.0
         take_profit: 1.0
@@ -128,7 +130,8 @@ strategy:
             start: 14
             stop: 28
             step: 7
-          delta: -0.25
+          delta:
+            target: -0.25
       exit:
         stop_loss: 2.0
         take_profit: 1.0
@@ -162,7 +165,8 @@ strategy:
           right: put
           action: sell_to_open
           dte: 21
-          delta: [-0.20, -0.30]
+          delta:
+            target: [-0.20, -0.30]
       exit:
         stop_loss: 2.0
         take_profit: 1.0
@@ -172,7 +176,7 @@ strategy:
         study = StudyDefinition(name="s", strategies=[StrategyRef(path="o.yaml")])
         expander = StudyExpander(study, tmp_path)
         combos = expander.combinations
-        delta_values = [defn.trades[0].legs[0].delta for _, defn in combos]
+        delta_values = [defn.trades[0].legs[0].delta.target for _, defn in combos]
         assert delta_values == [-0.20, -0.30]
 
     def test_all_combinations_fully_scalar(self, tmp_path):
@@ -194,7 +198,8 @@ strategy:
           right: put
           action: sell_to_open
           dte: 21
-          delta: [-0.20, -0.25]
+          delta:
+            target: [-0.20, -0.25]
       exit:
         stop_loss: 2.0
         take_profit: 1.0
@@ -241,7 +246,8 @@ strategy:
           right: put
           action: sell_to_open
           dte: 21
-          delta: [-0.20, -0.25]
+          delta:
+            target: [-0.20, -0.25]
       exit:
         stop_loss: 2.0
         take_profit: 1.0
@@ -276,7 +282,8 @@ strategy:
           right: put
           action: sell_to_open
           dte: 21
-          delta: [-0.10, -0.20, -0.30, -0.40, -0.50]
+          delta:
+            target: [-0.10, -0.20, -0.30, -0.40, -0.50]
       exit:
         stop_loss: [1.0, 2.0, 3.0, 4.0]
         take_profit: 1.0
@@ -318,7 +325,8 @@ strategy:
           right: put
           action: sell_to_open
           dte: 21
-          delta: [-0.20, -0.25]
+          delta:
+            target: [-0.20, -0.25]
       exit:
         stop_loss: 2.0
         take_profit: 1.0
@@ -328,8 +336,8 @@ strategy:
         study = StudyDefinition(name="s", strategies=[StrategyRef(path="s.yaml")])
         expander = StudyExpander(study, tmp_path)
         df = expander.params_df
-        assert "t1.sp.delta" in df.columns
-        assert df["t1.sp.delta"].to_list() == [-0.20, -0.25]
+        assert "t1.sp.delta.target" in df.columns
+        assert df["t1.sp.delta.target"].to_list() == [-0.20, -0.25]
 
 
 class TestExplicitCombinations:
@@ -350,13 +358,14 @@ strategy:
           right: put
           action: sell_to_open
           dte: 21
-          delta: -0.25
+          delta:
+            target: -0.25
       exit:
         stop_loss: 2.0
         take_profit: 1.0
   combinations:
     mode: table
-    columns: ["t1.sp.delta", "t1.exit.stop_loss"]
+    columns: ["t1.sp.delta.target", "t1.exit.stop_loss"]
     rows:
       - [-0.20, 2.0]
       - [-0.25, 3.0]
@@ -368,7 +377,7 @@ strategy:
         expander = StudyExpander(study, tmp_path)
         combos = expander.combinations
         assert len(combos) == 3
-        deltas = [defn.trades[0].legs[0].delta for _, defn in combos]
+        deltas = [defn.trades[0].legs[0].delta.target for _, defn in combos]
         assert deltas == [-0.20, -0.25, -0.30]
 
     def test_unknown_trade_raises(self, tmp_path):
@@ -388,7 +397,8 @@ strategy:
           right: put
           action: sell_to_open
           dte: 21
-          delta: -0.25
+          delta:
+            target: -0.25
       exit:
         stop_loss: 2.0
         take_profit: 1.0

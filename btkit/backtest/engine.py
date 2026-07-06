@@ -93,19 +93,11 @@ class BacktestEngine:
                         exits, exit_scanner.continuation_exits, trade
                     )
 
-                entries, exits = self._enforce_one_at_a_time(entries, exits, gate_overrides)
+                entries, exits = self._enforce_entries(
+                    entries, exits, gate_overrides,
+                    max_entries_per_day=trade.entry.max_entries_per_day,
+                )
 
-                roll_exit_ids: set[int] = set()
-                if trade.roll is not None and "exit_reason" in exits.columns:
-                    roll_exit_ids = set(
-                        exits.filter(pl.col("exit_reason") == "roll")["entry_id"].to_list()
-                    )
-
-                if trade.entry.max_entries_per_day is not None:
-                    entries, exits = self._enforce_max_entries_per_day(
-                        entries, exits, trade.entry.max_entries_per_day,
-                        roll_exit_ids=roll_exit_ids if roll_exit_ids else None,
-                    )
                 if trade.entry.no_reentry_after_loss:
                     entries, exits = self._enforce_no_reentry_after_loss(entries, exits)
                 all_entries[trade.name] = entries
@@ -156,14 +148,25 @@ class BacktestEngine:
         cohorts whose positions expire after universe.end_date still have
         indicator data without a separate DB fetch.
 
-        Returns an empty DataFrame when no trades have conditions, so the DB
-        is not queried at all for strategies without indicator-based filters.
+        Returns an empty DataFrame when no trade needs indicators (no entry/exit/roll
+        conditions and no stepped-delta legs), so the DB is not queried unnecessarily.
         """
-        needs_indicators = any(
-            bool(trade.entry.conditions) or bool(trade.exit.conditions)
-            for trade in self.strategy.trades
-        )
-        if not needs_indicators:
+        from btkit.strategy.definition import SteppedDeltaConfig
+
+        def _needs(trade) -> bool:
+            return (
+                bool(trade.entry.conditions)
+                or bool(trade.exit.conditions)
+                or (trade.roll is not None and bool(trade.roll.conditions))
+                or any(
+                    isinstance(leg.delta, SteppedDeltaConfig)
+                    or leg.stepped is not None
+                    or leg.targets is not None
+                    for leg in trade.legs
+                )
+            )
+
+        if not any(_needs(t) for t in self.strategy.trades):
             return pl.DataFrame()
 
         universe = self.strategy.universe
@@ -176,7 +179,27 @@ class BacktestEngine:
             tzinfo=tz,
         ).astimezone(UTC)
 
-        max_dte = max(int(leg.dte) for trade in self.strategy.trades for leg in trade.legs)
+        _dtes = [
+            int(leg.dte)
+            for trade in self.strategy.trades
+            for leg in trade.legs
+            if leg.dte is not None
+        ]
+        _dtes += [
+            int(s.dte)
+            for trade in self.strategy.trades
+            for leg in trade.legs
+            if leg.stepped is not None
+            for s in leg.stepped.steps
+        ]
+        _dtes += [
+            int(t.dte)
+            for trade in self.strategy.trades
+            for leg in trade.legs
+            if leg.targets is not None
+            for t in leg.targets.values()
+        ]
+        max_dte = max(_dtes) if _dtes else 0
         base_end = datetime(
             universe.end_date.year,
             universe.end_date.month,
@@ -383,9 +406,15 @@ class BacktestEngine:
                 pl.col("entry_id").is_in(list(roll_reentry_ids)).alias("_is_roll_reentry"),
             )
             .with_columns(
+                # Cumulative count of non-roll-reentry entries within each day.
+                # Using cum_count() over the full group would count roll re-entries
+                # even though they get rank=0, inflating the rank of the first
+                # legitimate entry after a same-day roll→TP sequence.
                 pl.when(pl.col("_is_roll_reentry"))
                 .then(pl.lit(0))
-                .otherwise(pl.col("entry_id").cum_count().over("_entry_date"))
+                .otherwise(
+                    (~pl.col("_is_roll_reentry")).cast(pl.Int32).cum_sum().over("_entry_date")
+                )
                 .alias("_day_rank")
             )
             .filter(
@@ -396,6 +425,135 @@ class BacktestEngine:
 
         keep_ids = set(entries_capped["entry_id"].to_list())
 
+        return (
+            entries.filter(pl.col("entry_id").is_in(keep_ids)),
+            exits.filter(pl.col("entry_id").is_in(keep_ids)),
+        )
+
+    def _enforce_entries(
+        self,
+        entries: pl.DataFrame,
+        exits: pl.DataFrame,
+        gate_overrides: dict[int, int] | None = None,
+        max_entries_per_day: int | None = None,
+    ) -> tuple[pl.DataFrame, pl.DataFrame]:
+        """
+        Jointly enforces one-at-a-time and per-day entry limits in a single
+        chronological walk.
+
+        Running the two constraints as sequential passes causes a ghost-gate bug:
+        _enforce_one_at_a_time advances the gate to the exit of a candidate at or
+        just after the prior exit timestamp (e.g. a candidate accepted by the `>=`
+        gate check but immediately blocked by the daily cap).  That ghost candidate
+        is never actually opened, yet its exit time gates out days or weeks of
+        legitimate entries.  The joint walk fixes this by only advancing the gate
+        when an entry survives BOTH constraints.
+
+        Roll re-entry exemption: when an accepted entry exits via roll, the very
+        next accepted entry on the same calendar day (in the session timezone) is
+        exempt from the per-day cap.  The exemption is tracked dynamically in the
+        walk so only genuinely accepted rolls trigger it — ghost candidates blocked
+        by the gate or daily cap can never create spurious exemptions.
+
+        gate_overrides: entry_id → effective gate time (Int64 µs), for
+            on_sl_long_continuation positions whose gate extends past raw exit_time.
+        max_entries_per_day: if None, only the one-at-a-time constraint is applied.
+        """
+        if entries.is_empty():
+            return entries, exits
+
+        tz_str = self.strategy.universe.session.timezone
+
+        # Include exit_reason so the walk can detect roll exits and grant the
+        # roll re-entry exemption dynamically.
+        exits_cols = ["entry_id", "exit_time"]
+        if "exit_reason" in exits.columns:
+            exits_cols.append("exit_reason")
+
+        combined = (
+            entries.select(["entry_id", "entry_time"])
+            .join(exits.select(exits_cols), on="entry_id", how="left")
+            .sort("entry_time")
+        )
+
+        entry_times = combined["entry_time"].cast(pl.Int64).to_numpy()
+        exit_times = combined["exit_time"].cast(pl.Int64).fill_null(0).to_numpy()
+        entry_ids = combined["entry_id"].to_numpy()
+
+        if gate_overrides:
+            gate_times = np.array(
+                [gate_overrides.get(int(eid), int(et)) for eid, et in zip(entry_ids, exit_times)],
+                dtype=np.int64,
+            )
+        else:
+            gate_times = exit_times
+
+        entry_dates: list | None = None
+        exit_time_dates: list | None = None
+        exit_reasons: list | None = None
+        if max_entries_per_day is not None:
+            entry_dates = (
+                combined["entry_time"]
+                .dt.convert_time_zone(tz_str)
+                .dt.date()
+                .to_list()
+            )
+            # Exit date in tz — needed to identify which day the roll re-entry falls on.
+            exit_time_dates = (
+                combined["exit_time"]
+                .dt.convert_time_zone(tz_str)
+                .dt.date()
+                .to_list()
+            )
+            exit_reasons = (
+                combined["exit_reason"].to_list()
+                if "exit_reason" in combined.columns
+                else [None] * len(entry_times)
+            )
+
+        keep = np.zeros(len(entry_times), dtype=bool)
+        last_exit: int | None = None
+        day_counts: dict = {}
+        # Date (in session tz) of the pending roll re-entry exemption.
+        # Set when an accepted entry exits via roll; cleared on use or when the
+        # walk moves past that date.
+        pending_roll_reentry_date = None
+
+        for i in range(len(entry_times)):
+            if last_exit is not None and entry_times[i] < last_exit:
+                continue
+
+            is_exempt = False
+            if max_entries_per_day is not None:
+                d = entry_dates[i]
+
+                # Expire stale exemption once we've moved past the roll exit date.
+                if pending_roll_reentry_date is not None and d > pending_roll_reentry_date:
+                    pending_roll_reentry_date = None
+
+                is_exempt = (
+                    pending_roll_reentry_date is not None
+                    and d == pending_roll_reentry_date
+                )
+
+                if not is_exempt:
+                    if day_counts.get(d, 0) >= max_entries_per_day:
+                        continue
+                    day_counts[d] = day_counts.get(d, 0) + 1
+
+            keep[i] = True
+            last_exit = int(gate_times[i])
+
+            # Update roll re-entry state for the next iteration.
+            if max_entries_per_day is not None:
+                if is_exempt:
+                    # Exemption consumed; clear so only one re-entry per roll is exempt.
+                    pending_roll_reentry_date = None
+                if exit_reasons[i] == "roll" and exit_time_dates[i] is not None:
+                    # This accepted entry rolls; the next same-day accepted entry is exempt.
+                    pending_roll_reentry_date = exit_time_dates[i]
+
+        keep_ids = entry_ids[keep].tolist()
         return (
             entries.filter(pl.col("entry_id").is_in(keep_ids)),
             exits.filter(pl.col("entry_id").is_in(keep_ids)),

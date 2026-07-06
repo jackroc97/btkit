@@ -101,7 +101,7 @@ class TestInstrumentConfigTickSize:
                     name="t",
                     instrument=InstrumentConfig(root_symbol="ES", asset_class="future", tick_size=0.05),
                     entry=EntryConfig(window=EntryWindowConfig(start=time(10, 0), end=time(12, 0))),
-                    legs=[LegConfig(name="sp", right="put", action="sell_to_open", delta=-0.25, dte=21)],
+                    legs=[LegConfig(name="sp", right="put", action="sell_to_open", delta={"target": -0.25}, dte=21)],
                     exit=ExitConfig(stop_loss=2.0, take_profit=1.0),
                 )
             ],
@@ -129,7 +129,7 @@ def _make_strategy_with_tick(tick_size: float = 0.0) -> StrategyDefinition:
                 name="trade1",
                 instrument=InstrumentConfig(root_symbol="ES", asset_class="future", tick_size=tick_size),
                 entry=EntryConfig(window=EntryWindowConfig(start=time(10, 0), end=time(12, 0))),
-                legs=[LegConfig(name="short_put", right="put", action="sell_to_open", delta=-0.25, dte=21)],
+                legs=[LegConfig(name="short_put", right="put", action="sell_to_open", delta={"target": -0.25}, dte=21)],
                 exit=ExitConfig(stop_loss=2.0, take_profit=1.0),
             )
         ],
@@ -242,7 +242,7 @@ def _make_exit_scanner(tick_size: float = 0.0, dte_exit: int | None = 1) -> Exit
                     tick_size=tick_size,
                 ),
                 entry=EntryConfig(window=EntryWindowConfig(start=time(9, 30), end=time(16, 0))),
-                legs=[LegConfig(name="short_put", right="put", action="sell_to_open", delta=-0.25, dte=0)],
+                legs=[LegConfig(name="short_put", right="put", action="sell_to_open", delta={"target": -0.25}, dte=0)],
                 exit=ExitConfig(dte_exit=dte_exit, expiry_exit=False),
             )
         ],
@@ -268,6 +268,7 @@ def _make_pm_entries(
         {
             "entry_id": [0],
             "entry_time": pl.Series(["2026-01-14 16:00:00"], dtype=pl.Datetime("us", "UTC")),
+            "open_mark": pl.Series([1.00], dtype=pl.Float64),
             "tp_price": pl.Series([None], dtype=pl.Float64),
             "sl_price": pl.Series([None], dtype=pl.Float64),
             "dte_exit": pl.Series([1], dtype=pl.Int32),

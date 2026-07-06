@@ -59,7 +59,7 @@ def _make_leg(name: str = "short_put", delta: float = -0.25, dte: int = 21) -> L
         name=name,
         right="put",
         action="sell_to_open",
-        delta=delta,
+        delta={"target": delta},
         dte=dte,
     )
 
@@ -247,8 +247,10 @@ class TestExitConfig:
 
 class TestLegConfig:
     def test_delta_mode(self):
+        from btkit.strategy.definition import SimpleDeltaConfig
         leg = _make_leg()
-        assert leg.delta == -0.25
+        assert isinstance(leg.delta, SimpleDeltaConfig)
+        assert leg.delta.target == -0.25
         assert leg.strike_offset is None
         assert leg.reference_leg is None
 
@@ -279,7 +281,7 @@ class TestLegConfig:
 
     def test_delta_leg_without_dte_rejected(self):
         with pytest.raises(ValidationError, match="dte is required for delta-targeted legs"):
-            LegConfig(name="leg", right="put", action="sell_to_open", delta=-0.25)
+            LegConfig(name="leg", right="put", action="sell_to_open", delta={"target": -0.25})
 
     def test_delta_and_offset_mutually_exclusive(self):
         with pytest.raises(ValidationError, match="mutually exclusive"):
@@ -288,13 +290,15 @@ class TestLegConfig:
                 right="put",
                 action="sell_to_open",
                 dte=21,
-                delta=-0.25,
+                delta={"target": -0.25},
                 strike_offset=-10.0,
                 reference_leg="other",
             )
 
     def test_neither_delta_nor_offset_rejected(self):
-        with pytest.raises(ValidationError, match="one of delta or strike_offset"):
+        with pytest.raises(
+            ValidationError, match="one of delta, strike_offset, stepped, or targets is required"
+        ):
             LegConfig(name="leg", right="put", action="sell_to_open", dte=21)
 
     def test_offset_without_reference_rejected(self):
@@ -307,21 +311,24 @@ class TestLegConfig:
             )
 
     def test_default_tolerances(self):
+        from btkit.strategy.definition import SimpleDeltaConfig
         leg = _make_leg()
-        assert leg.delta_tolerance == 0.10
+        assert isinstance(leg.delta, SimpleDeltaConfig)
+        assert leg.delta.tolerance == 0.10
         assert leg.dte_tolerance == 5
 
     def test_custom_tolerances(self):
+        from btkit.strategy.definition import SimpleDeltaConfig
         leg = LegConfig(
             name="leg",
             right="put",
             action="sell_to_open",
             dte=0,
-            delta=-0.25,
-            delta_tolerance=0.20,
+            delta={"target": -0.25, "tolerance": 0.20},
             dte_tolerance=0,
         )
-        assert leg.delta_tolerance == 0.20
+        assert isinstance(leg.delta, SimpleDeltaConfig)
+        assert leg.delta.tolerance == 0.20
         assert leg.dte_tolerance == 0
 
 
@@ -447,13 +454,13 @@ class TestStrategyDefinition:
             right="put",
             action="sell_to_open",
             dte=21,
-            delta=[-0.20, -0.25, -0.30],
+            delta={"target": [-0.20, -0.25, -0.30]},
         )
         trade = _make_trade(legs=[leg_with_sweep])
         with pytest.raises(ValidationError, match="mutually exclusive"):
             _make_strategy(
                 trades=[trade],
-                combinations=[{"short_put": {"delta": -0.25}}],
+                combinations=[{"short_put": {"delta": {"target": -0.25}}}],
             )
 
     def test_is_parameterized_scalar(self):
@@ -466,7 +473,7 @@ class TestStrategyDefinition:
             right="put",
             action="sell_to_open",
             dte=21,
-            delta=[-0.20, -0.25],
+            delta={"target": [-0.20, -0.25]},
         )
         trade = _make_trade(legs=[leg])
         s = _make_strategy(trades=[trade])
@@ -478,7 +485,7 @@ class TestStrategyDefinition:
             right="put",
             action="sell_to_open",
             dte=21,
-            delta=SweepRange(start=-0.20, stop=-0.30, step=-0.05),
+            delta={"target": SweepRange(start=-0.20, stop=-0.30, step=-0.05)},
         )
         trade = _make_trade(legs=[leg])
         s = _make_strategy(trades=[trade])

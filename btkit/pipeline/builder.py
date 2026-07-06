@@ -17,10 +17,12 @@ Build sequence:
 Parallelism strategy:
     - Definition ingest: one ThreadPoolExecutor worker per .dbn.zst file (not per
       zip). Each worker opens its own ZipFile handle, reads one named file,
-      decompresses and parses it. Results are merged in the main thread (first-seen
-      wins). Because option/future metadata is static — strike, expiry, and
-      multiplier never change — any snapshot is equivalent and merge order does not
-      affect correctness.
+      decompresses and parses it. Results are merged in the main thread using a
+      later-expiration-wins rule: when the same instrument_id appears in multiple
+      definition files (because the data vendor recycled an ID from an expired
+      instrument to a new one), the definition with the more recent expiration date
+      takes precedence. This correctly resolves cases such as an expired option ID
+      being reused years later for a quarterly futures contract.
 
     - OHLCV ingest: work units are (zip_path, filename) tuples. Files are processed
       in batches of _OHLCV_BATCH_SIZE with _INGEST_WORKERS threads per batch.
@@ -136,6 +138,8 @@ class DatabaseBuilder:
         """
         t_total = time.perf_counter()
         self._con = duckdb.connect(str(self.db_path))
+        self._con.execute("SET preserve_insertion_order=false")
+        self._con.execute("SET temp_directory='/tmp/duckdb_build_tmp'")
         try:
             self._con.execute(INPUT_SCHEMA_SQL)
 
@@ -195,8 +199,11 @@ class DatabaseBuilder:
         and build self._instrument_map: instrument_id → _InstrumentInfo.
 
         Each worker opens its own ZipFile handle and reads exactly one file.
-        Results are merged in the main thread (first-seen wins). Because
-        option/future metadata is static any snapshot is equivalent.
+        Results are merged in the main thread using later-expiration-wins: when
+        the same instrument_id appears in multiple definition files, the definition
+        with the more recent expiration date is used. This handles Databento ID
+        recycling where a numeric ID previously assigned to an expired option is
+        reused for a new futures contract.
 
         Only instrument_class F (future), C (call), and P (put) are kept.
         """
@@ -216,7 +223,19 @@ class DatabaseBuilder:
         with ThreadPoolExecutor(max_workers=_INGEST_WORKERS) as pool:
             for partial_map in pool.map(_scan_definition_file, work_units):
                 for iid, info in partial_map.items():
-                    if iid not in self._instrument_map:
+                    existing = self._instrument_map.get(iid)
+                    if existing is None:
+                        self._instrument_map[iid] = info
+                    elif (
+                        info.expiration is not None
+                        and (
+                            existing.expiration is None
+                            or info.expiration > existing.expiration
+                        )
+                    ):
+                        # Later-expiration wins: handles Databento instrument ID
+                        # recycling where an expired option's ID is reused for a
+                        # new futures contract years later.
                         self._instrument_map[iid] = info
 
         missing = required_ids - set(self._instrument_map)
