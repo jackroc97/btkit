@@ -321,6 +321,48 @@ the maximum timestamp in `underlying_bars`:
 
 ---
 
+### Interior fill-the-gaps (`--fill-range`)
+
+Plain `--append` assumes **append-at-the-end**. Repairing a *middle* window of history —
+e.g. splicing corrected ES futures OHLCV back into 2020-01→2020-06 after the
+[time-aware instrument-ID fix](#) — needs the downstream layers refreshed **only over
+that window**, without a full rebuild. `--fill-range` does exactly that (and implies
+`--append`):
+
+```bash
+btkit build \
+  --data-path data/corrected_2020h1/ \
+  --db-path   output/input_es_full.db \
+  --indicators indicators/ves.py \
+  --fill-range 2020-01-01 2020-06-30 \
+  --instruments 21336 \
+  --recompute-tail-days 60
+```
+
+Per layer, scoped to the window (and, if given, `--instruments`, a list of **underlying**
+instrument_ids; otherwise every underlying with bars in the window):
+
+- **OHLCV** — interleaved insert. Interior rows (`ts_event <= existing max`) always go
+  through the `NOT EXISTS` dedup, so middle-of-timeline bars are inserted; only rows
+  strictly newer than existing coverage take the fast path. (This already held for plain
+  `--append`.)
+- **Greeks** — the `NOT EXISTS` recompute is bounded to `ob.ts_event BETWEEN start AND end`
+  (and the given underlyings), so only the now-resolvable options in the window are
+  computed, not a full-DB scan. Greeks are per-bar, so window scoping is exact.
+- **Indicators** — recomputed over `[start − tail, end + tail]` for each affected
+  underlying and **overwritten in `[start, end + tail]`** (delete-then-insert, so stale
+  trailing-window values are actually replaced — the normal `NOT EXISTS` write never
+  overwrites). This is *not* gated on end-extension. The leading tail warms up trailing
+  windows at `start`; the forward tail refreshes values whose lookback still reaches into
+  the gap.
+
+> **`--recompute-tail-days` (default 60)** must exceed the indicator's own lookback for
+> the refreshed values to be correct — e.g. a 30-session VES z-score needs ≳ 45 calendar
+> days. Values before `start` are left untouched (a backward window can't reach a later
+> gap). Re-running is idempotent.
+
+---
+
 ### Adding new symbols
 
 When `--append` is used with data for a symbol not yet in the database (e.g. adding NQ

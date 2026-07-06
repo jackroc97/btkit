@@ -197,7 +197,12 @@ class GreeksCalculator:
         # same-minute underlying bar (legacy behaviour).
         self.underlying_max_staleness_minutes = int(underlying_max_staleness_minutes)
 
-    def run(self, skip_existing: bool = False) -> None:
+    def run(
+        self,
+        skip_existing: bool = False,
+        fill_range: tuple | None = None,
+        instruments: list[int] | None = None,
+    ) -> None:
         """
         Process all rows in option_bars one trading day at a time.
 
@@ -211,6 +216,12 @@ class GreeksCalculator:
              OFFSET approach.
 
         When skip_existing=False every option_bars row is processed.
+
+        Scoping (interior "fill-the-gaps" builds): fill_range=(start_dt, end_dt)
+        limits the materialisation to option bars in that window, and instruments
+        (a list of underlying_ids) narrows it further. Greeks are per-bar with no
+        trailing dependency, so scoping to the back-filled window is exact — and it
+        bounds the NOT EXISTS scan to that window instead of the whole DB.
         """
         new_only_filter = (
             """
@@ -222,6 +233,15 @@ class GreeksCalculator:
             if skip_existing
             else ""
         )
+
+        scope_filter = ""
+        scope_params: list = []
+        if fill_range is not None:
+            scope_filter += "\n              AND ob.ts_event >= ? AND ob.ts_event <= ?"
+            scope_params.extend([fill_range[0], fill_range[1]])
+        if instruments:
+            id_list = ",".join(str(int(i)) for i in instruments)
+            scope_filter += f"\n              AND ob.underlying_id IN ({id_list})"
 
         # Step 1: Materialise pending rows once (expensive NOT EXISTS runs here,
         # not once per batch).
@@ -254,10 +274,11 @@ class GreeksCalculator:
               ON ob.underlying_id = ub.instrument_id
              AND ob.ts_event >= ub.ts_event
             WHERE ob.close IS NOT NULL
-              AND ob.ts_event - ub.ts_event <= INTERVAL '{stale_minutes} minutes'
+              AND ob.ts_event - ub.ts_event <= INTERVAL '{stale_minutes} minutes'{scope_filter}
             {new_only_filter}
             ORDER BY ob.ts_event, ob.instrument_id
-            """
+            """,
+            scope_params,
         )
 
         total = self.con.execute("SELECT COUNT(*) FROM _greek_pending").fetchone()[0]

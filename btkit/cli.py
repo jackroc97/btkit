@@ -32,6 +32,7 @@ import os
 import signal
 import sys
 import time
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import duckdb
@@ -145,6 +146,21 @@ def _require_output_db(path: str) -> None:
         raise typer.Exit(code=1)
 
 
+def _parse_fill_range(fill_range: tuple[str, str]) -> tuple[datetime, datetime] | None:
+    """Parse the --fill-range (START, END) YYYY-MM-DD pair into an inclusive
+    UTC datetime window (start 00:00:00 → end 23:59:59). Returns None when unset."""
+    start_s, end_s = fill_range
+    if not start_s or not end_s:
+        return None
+    sd = date.fromisoformat(start_s)
+    ed = date.fromisoformat(end_s)
+    if ed < sd:
+        raise typer.BadParameter("--fill-range END must be on or after START")
+    start_dt = datetime(sd.year, sd.month, sd.day, tzinfo=UTC)
+    end_dt = datetime(ed.year, ed.month, ed.day, 23, 59, 59, tzinfo=UTC)
+    return start_dt, end_dt
+
+
 def _ensure_indicators(input_db_path: str, strategy: StrategyDefinition) -> None:
     """Run any indicator scripts listed in strategy.indicators that are not yet in the DB,
     or that are stale because new underlying bars have been added since they were last built."""
@@ -219,15 +235,49 @@ def build(
             "not print. 0 requires an exact same-minute bar (legacy behaviour)."
         ),
     ),
+    fill_range: tuple[str, str] = typer.Option(
+        (None, None),
+        "--fill-range",
+        metavar="START END",
+        help=(
+            "Interior fill-the-gaps mode: two YYYY-MM-DD dates. Splice corrected "
+            "source data into this window of an existing DB and refresh greeks + "
+            "indicators scoped to it (implies --append). Run the time-aware ID fix first."
+        ),
+    ),
+    instruments: str = typer.Option(
+        None,
+        "--instruments",
+        help=(
+            "Comma-separated underlying instrument_ids to scope --fill-range to. "
+            "Default: auto-detect underlyings with bars in the window."
+        ),
+    ),
+    recompute_tail_days: int = typer.Option(
+        60,
+        "--recompute-tail-days",
+        help=(
+            "Days added on each side of --fill-range when recomputing indicators, to "
+            "warm up and refresh trailing-window values. Must exceed the indicator's "
+            "lookback (e.g. >=45 for a 30-session profile)."
+        ),
+    ),
 ) -> None:
     """Build the input database from raw Databento files."""
-    typer.echo(f"{'Appending to' if append else 'Building'} database: {db_path}")
+    fr = _parse_fill_range(fill_range)
+    instr = [int(x) for x in instruments.split(",")] if instruments else None
+    if fr is not None:
+        typer.echo(f"Fill mode: splicing/refreshing {fr[0].date()} → {fr[1].date()}")
+    typer.echo(f"{'Appending to' if (append or fr) else 'Building'} database: {db_path}")
     builder = DatabaseBuilder(
         raw_data_path=data_path,
         db_path=db_path,
         indicator_scripts=indicators or None,
         append=append,
         underlying_staleness_minutes=underlying_staleness_minutes,
+        fill_range=fr,
+        instruments=instr,
+        recompute_tail_days=recompute_tail_days,
     )
     builder.build()
     typer.echo("Build complete.")

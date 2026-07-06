@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 
@@ -233,6 +233,115 @@ class IndicatorRunner:
                 underlying_symbol=underlying_symbol,
             )
             self._write_indicator_bars(result_df, col_name, indicator_id)
+
+    def run_scoped(
+        self,
+        underlying_id: int,
+        start: datetime,
+        end: datetime,
+        tail_days: int,
+    ) -> None:
+        """
+        Recompute this script's indicators for an interior back-filled window and
+        overwrite the affected rows, scoped to one underlying.
+
+        Trailing-window indicators (e.g. a 30-session z-score) computed while the
+        window was missing are stale for the window itself AND for a forward tail
+        whose lookback still reaches into the window. So:
+
+          * feed the script bars over [start - tail_days, end + tail_days] — the
+            leading tail warms up trailing windows at ``start``; the trailing tail
+            covers forward values whose lookback reaches back into the gap. The
+            IndicatorContext window is set to the same span, scoping any
+            option-data queries to the neighbourhood of the fill (not full
+            history);
+          * DELETE existing indicator_bars in [start, end + tail_days] and INSERT
+            the freshly computed values there (a plain insert, so stale values are
+            actually replaced — the normal NOT EXISTS write never overwrites).
+
+        Rows before ``start`` are untouched: a backward trailing window cannot
+        reach into a later gap, so pre-gap values are already correct.
+
+        ``tail_days`` must exceed the indicator's own lookback for the refreshed
+        values to be correct (e.g. ≥ ~45 calendar days for a 30-session profile).
+        """
+        feed_start = start - timedelta(days=tail_days)
+        write_end = end + timedelta(days=tail_days)
+
+        underlying_df = self.con.execute(
+            "SELECT ts_event, instrument_id, symbol, open, high, low, close, volume "
+            "FROM underlying_bars "
+            "WHERE instrument_id = ? AND ts_event >= ? AND ts_event <= ? "
+            "ORDER BY ts_event",
+            [underlying_id, feed_start, write_end],
+        ).pl()
+        if underlying_df.is_empty():
+            return
+        underlying_symbol = underlying_df["symbol"][0]
+
+        if self._wants_context:
+            ctx = IndicatorContext(
+                self.con,
+                underlying_id,
+                underlying_df["ts_event"].min(),
+                underlying_df["ts_event"].max(),
+            )
+            result_df = self._module.compute(underlying_df, ctx)
+        else:
+            result_df = self._module.compute(underlying_df)
+
+        input_cols = set(underlying_df.columns)
+        new_cols = [c for c in result_df.columns if c not in input_cols]
+        if not new_cols:
+            return
+
+        for col_name in new_cols:
+            indicator_id = self._upsert_indicator_definition(
+                name=col_name,
+                underlying_id=underlying_id,
+                underlying_symbol=underlying_symbol,
+            )
+            self._overwrite_indicator_bars(result_df, col_name, indicator_id, start, write_end)
+
+    def _overwrite_indicator_bars(
+        self,
+        df: pl.DataFrame,
+        col_name: str,
+        indicator_id: int,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> None:
+        """
+        Replace indicator_bars for [window_start, window_end] with freshly
+        computed values: delete the window's existing rows, then insert the new
+        non-null values. Delete-then-insert (rather than NOT EXISTS) is what
+        refreshes stale trailing-window values; the fresh compute is authoritative
+        for the window.
+        """
+        # Normalise ts_event to UTC before comparing to the UTC window bounds:
+        # DuckDB returns TIMESTAMPTZ in the connection's session timezone, which
+        # need not be UTC. convert_time_zone preserves the instant.
+        tall = (
+            df.select(
+                [
+                    pl.col("ts_event").dt.convert_time_zone("UTC"),
+                    pl.lit(indicator_id).cast(pl.Int64).alias("indicator_id"),
+                    pl.col(col_name).cast(pl.Float64).alias("value"),
+                ]
+            )
+            .filter((pl.col("ts_event") >= window_start) & (pl.col("ts_event") <= window_end))
+            .filter(pl.col("value").is_not_null())
+        )
+
+        self.con.execute(
+            "DELETE FROM indicator_bars WHERE indicator_id = ? AND ts_event >= ? AND ts_event <= ?",
+            [indicator_id, window_start, window_end],
+        )
+        if tall.is_empty():
+            return
+        self.con.register("_indicator_overwrite", tall)
+        self.con.execute("INSERT INTO indicator_bars SELECT * FROM _indicator_overwrite")
+        self.con.unregister("_indicator_overwrite")
 
     def _detect_context_param(self) -> bool:
         """Return True if compute() declares a second positional parameter."""
