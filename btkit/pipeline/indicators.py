@@ -213,7 +213,7 @@ class IndicatorRunner:
         # Step 2 & 3: Call compute(), optionally with context
         if self._wants_context:
             start: datetime = underlying_df["ts_event"].min()
-            end: datetime   = underlying_df["ts_event"].max()
+            end: datetime = underlying_df["ts_event"].max()
             ctx = IndicatorContext(self.con, underlying_id, start, end)
             result_df = self._module.compute(underlying_df, ctx)
         else:
@@ -241,9 +241,7 @@ class IndicatorRunner:
             inspect.Parameter.POSITIONAL_ONLY,
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
         }
-        positional_params = [
-            p for p in sig.parameters.values() if p.kind in positional_kinds
-        ]
+        positional_params = [p for p in sig.parameters.values() if p.kind in positional_kinds]
         return len(positional_params) >= 2
 
     def _upsert_indicator_definition(

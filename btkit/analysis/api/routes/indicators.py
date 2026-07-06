@@ -1,7 +1,8 @@
 """Indicator overlay endpoints for per-trade charts (requires BTKIT_INPUT_DB)."""
+
 from __future__ import annotations
 
-from datetime import timezone
+from datetime import UTC
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
@@ -10,7 +11,7 @@ from ..db import query as out_query
 from ..db_input import connect as input_connect
 
 router = APIRouter()
-UTC = timezone.utc
+UTC = UTC
 
 _POS_SQL = """
 SELECT p.open_time, p.exit_time, pl.instrument_id
@@ -32,7 +33,7 @@ def _get_underlying_id(con, instrument_id: int) -> int | None:
 
 def _day_window(open_time, exit_time):
     day_start = open_time.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=UTC)
-    day_end   = exit_time.replace(hour=23, minute=59, second=59, microsecond=0, tzinfo=UTC)
+    day_end = exit_time.replace(hour=23, minute=59, second=59, microsecond=0, tzinfo=UTC)
     return day_start, day_end
 
 
@@ -56,7 +57,7 @@ def list_indicators(position_id: int) -> JSONResponse:
         if not pos_rows:
             raise HTTPException(status_code=404, detail="Position not found")
 
-        pos = dict(zip(pos_cols, pos_rows[0]))
+        pos = dict(zip(pos_cols, pos_rows[0], strict=False))
         underlying_id = _get_underlying_id(con, pos["instrument_id"])
         if underlying_id is None:
             return JSONResponse({"indicators": []})
@@ -66,9 +67,7 @@ def list_indicators(position_id: int) -> JSONResponse:
             [underlying_id],
         ).fetchall()
 
-        return JSONResponse({
-            "indicators": [{"id": r[0], "name": r[1]} for r in rows]
-        })
+        return JSONResponse({"indicators": [{"id": r[0], "name": r[1]} for r in rows]})
     finally:
         con.close()
 
@@ -89,7 +88,7 @@ def get_indicator_data(position_id: int, indicator_id: int) -> JSONResponse:
         if not pos_rows:
             raise HTTPException(status_code=404, detail="Position not found")
 
-        pos = dict(zip(pos_cols, pos_rows[0]))
+        pos = dict(zip(pos_cols, pos_rows[0], strict=False))
         open_time = pos["open_time"]
         exit_time = pos["exit_time"]
         if not open_time or not exit_time:
@@ -107,10 +106,8 @@ def get_indicator_data(position_id: int, indicator_id: int) -> JSONResponse:
             [indicator_id, day_start, day_end],
         ).fetchall()
 
-        return JSONResponse([
-            {"time": int(r[0].timestamp()), "value": r[1]}
-            for r in rows
-            if r[1] is not None
-        ])
+        return JSONResponse(
+            [{"time": int(r[0].timestamp()), "value": r[1]} for r in rows if r[1] is not None]
+        )
     finally:
         con.close()

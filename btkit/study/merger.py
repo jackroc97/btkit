@@ -80,9 +80,7 @@ class OutputMerger:
         # ── 0. study ───────────────────────────────────────────────────
         # Worker DBs have no study rows (StudyRunner pre-creates them in
         # the target). General merges may have study rows — handle both.
-        study_offset = con.execute(
-            "SELECT COALESCE(MAX(id), 0) FROM study"
-        ).fetchone()[0]
+        study_offset = con.execute("SELECT COALESCE(MAX(id), 0) FROM study").fetchone()[0]
 
         src_study_count = con.execute("SELECT COUNT(*) FROM w.study").fetchone()[0]
         if src_study_count > 0:
@@ -104,9 +102,7 @@ class OutputMerger:
         if bt_count == 0:
             return
 
-        bt_offset = con.execute(
-            "SELECT COALESCE(MAX(id), 0) FROM backtest"
-        ).fetchone()[0]
+        bt_offset = con.execute("SELECT COALESCE(MAX(id), 0) FROM backtest").fetchone()[0]
 
         # Worker DBs have no study rows — their study_id is pre-created in the
         # target (so no offset needed). Only add study_offset when the source
@@ -144,9 +140,7 @@ class OutputMerger:
         if pos_count == 0:
             return
 
-        pos_offset = con.execute(
-            "SELECT COALESCE(MAX(id), 0) FROM position"
-        ).fetchone()[0]
+        pos_offset = con.execute("SELECT COALESCE(MAX(id), 0) FROM position").fetchone()[0]
 
         con.execute(f"""
             INSERT INTO position
@@ -172,9 +166,7 @@ class OutputMerger:
         if pl_count == 0:
             return
 
-        pl_offset = con.execute(
-            "SELECT COALESCE(MAX(id), 0) FROM position_leg"
-        ).fetchone()[0]
+        pl_offset = con.execute("SELECT COALESCE(MAX(id), 0) FROM position_leg").fetchone()[0]
 
         con.execute(f"""
             INSERT INTO position_leg
@@ -201,9 +193,7 @@ class OutputMerger:
         """)
 
         # ── 4. position_continuation ──────────────────────────────────
-        pc_count = con.execute(
-            "SELECT COUNT(*) FROM w.position_continuation"
-        ).fetchone()[0]
+        pc_count = con.execute("SELECT COUNT(*) FROM w.position_continuation").fetchone()[0]
         if pc_count > 0:
             pc_offset = con.execute(
                 "SELECT COALESCE(MAX(id), 0) FROM position_continuation"
@@ -233,24 +223,18 @@ class OutputMerger:
         # Build a mapping: source tag id → target tag id
         tag_id_map: dict[int, int] = {}
         for src_id, name, color in src_tags:
-            existing = con.execute(
-                "SELECT id FROM tag WHERE name = ?", [name]
-            ).fetchone()
+            existing = con.execute("SELECT id FROM tag WHERE name = ?", [name]).fetchone()
             if existing:
                 tag_id_map[src_id] = existing[0]
             else:
-                next_tag_id = con.execute(
-                    "SELECT COALESCE(MAX(id), 0) + 1 FROM tag"
-                ).fetchone()[0]
+                next_tag_id = con.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM tag").fetchone()[0]
                 con.execute(
                     "INSERT INTO tag (id, name, color) VALUES (?, ?, ?)",
                     [next_tag_id, name, color],
                 )
                 tag_id_map[src_id] = next_tag_id
 
-        src_bt_tags = con.execute(
-            "SELECT backtest_id, tag_id FROM w.backtest_tag"
-        ).fetchall()
+        src_bt_tags = con.execute("SELECT backtest_id, tag_id FROM w.backtest_tag").fetchall()
         for src_bt_id, src_tag_id in src_bt_tags:
             target_bt_id = src_bt_id + bt_offset
             target_tag_id = tag_id_map.get(src_tag_id)

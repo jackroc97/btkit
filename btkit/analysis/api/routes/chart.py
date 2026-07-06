@@ -1,28 +1,29 @@
 """Per-trade chart data endpoint (requires BTKIT_INPUT_DB env var)."""
+
 from __future__ import annotations
 
 import math
-from datetime import timezone
+from datetime import UTC
 from itertools import groupby
-from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from ..db import query as out_query
 from ..db_input import connect as input_connect
-from .detail import EXIT_REASON_MAP, _extract_params
+from .detail import _extract_params
 
 router = APIRouter()
 
-UTC = timezone.utc
+UTC = UTC
 
 _GREEN = "#4ade80"
-_RED   = "#f87171"
+_RED = "#f87171"
 _AMBER = "#94a3b8"
 
 _POS_SQL = """
-SELECT p.open_time, p.exit_time, p.exit_reason, p.open_mark, p.exit_mark, p.net_pnl, b.strategy_params
+SELECT p.open_time, p.exit_time, p.exit_reason, p.open_mark, p.exit_mark, p.net_pnl,
+       b.strategy_params
 FROM position p
 JOIN backtest b ON b.id = p.backtest_id
 WHERE p.id = ?
@@ -70,7 +71,7 @@ def _nan_to_none(v):
 @router.get("/positions/{position_id}/chart")
 def position_chart(
     position_id: int,
-    leg_id: Optional[int] = Query(None),
+    leg_id: int | None = Query(None),
 ) -> JSONResponse:
     con = input_connect()
     if con is None:
@@ -81,9 +82,9 @@ def position_chart(
         con.close()
         raise HTTPException(status_code=404, detail="Position not found")
 
-    pos = dict(zip(pos_cols, pos_rows[0]))
+    pos = dict(zip(pos_cols, pos_rows[0], strict=False))
     leg_cols, leg_rows = out_query(_LEGS_SQL, [position_id])
-    legs = [dict(zip(leg_cols, r)) for r in leg_rows]
+    legs = [dict(zip(leg_cols, r, strict=False)) for r in leg_rows]
 
     try:
         return _build(pos, legs, con, leg_id=leg_id)
@@ -94,11 +95,11 @@ def position_chart(
 
 
 def _build(pos: dict, legs: list[dict], con, leg_id: int | None = None) -> JSONResponse:
-    open_time   = pos["open_time"]
-    exit_time   = pos["exit_time"]
+    open_time = pos["open_time"]
+    exit_time = pos["exit_time"]
     exit_reason = pos.get("exit_reason") or ""
-    open_mark   = _nan_to_none(pos.get("open_mark")) or 0.0
-    exit_mark   = _nan_to_none(pos.get("exit_mark")) or 0.0
+    open_mark = _nan_to_none(pos.get("open_mark")) or 0.0
+    exit_mark = _nan_to_none(pos.get("exit_mark")) or 0.0
 
     if not open_time or not exit_time:
         return JSONResponse({"has_data": False, "reason": "missing_timestamps"})
@@ -107,7 +108,7 @@ def _build(pos: dict, legs: list[dict], con, leg_id: int | None = None) -> JSONR
     exit_ts = int(exit_time.timestamp())
 
     day_start = open_time.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=UTC)
-    day_end   = exit_time.replace(hour=23, minute=59, second=59, microsecond=0, tzinfo=UTC)
+    day_end = exit_time.replace(hour=23, minute=59, second=59, microsecond=0, tzinfo=UTC)
 
     params = _extract_params(pos.get("strategy_params"))
 
@@ -116,7 +117,7 @@ def _build(pos: dict, legs: list[dict], con, leg_id: int | None = None) -> JSONR
 
     # ── Underlying bars ───────────────────────────────────────────────────────
     candles: list[dict] = []
-    volume:  list[dict] = []
+    volume: list[dict] = []
     underlying_id = None
 
     if legs:
@@ -146,17 +147,25 @@ def _build(pos: dict, legs: list[dict], con, leg_id: int | None = None) -> JSONR
             if lg.get("open_price")
         )
         credit = abs(leg_credit)
-        call_strikes = [lg["strike_price"] for lg in legs if lg.get("right") == "C" and lg.get("strike_price")]
-        put_strikes  = [lg["strike_price"] for lg in legs if lg.get("right") == "P" and lg.get("strike_price")]
+        call_strikes = [
+            lg["strike_price"] for lg in legs if lg.get("right") == "C" and lg.get("strike_price")
+        ]
+        put_strikes = [
+            lg["strike_price"] for lg in legs if lg.get("right") == "P" and lg.get("strike_price")
+        ]
 
         if call_strikes:
             c_str = min(call_strikes)
-            c_be  = round(c_str + credit, 2)
-            be_lines.append({"price": c_be, "label": f"C-BE {_sfmt(c_str)}+{credit:.1f}={_sfmt(c_be)}"})
+            c_be = round(c_str + credit, 2)
+            be_lines.append(
+                {"price": c_be, "label": f"C-BE {_sfmt(c_str)}+{credit:.1f}={_sfmt(c_be)}"}
+            )
         if put_strikes:
             p_str = max(put_strikes)
-            p_be  = round(p_str - credit, 2)
-            be_lines.append({"price": p_be, "label": f"P-BE {_sfmt(p_str)}-{credit:.1f}={_sfmt(p_be)}"})
+            p_be = round(p_str - credit, 2)
+            be_lines.append(
+                {"price": p_be, "label": f"P-BE {_sfmt(p_str)}-{credit:.1f}={_sfmt(p_be)}"}
+            )
 
     # ── Strike lines (active legs only) ───────────────────────────────────────
     strike_lines: list[dict] = []
@@ -171,9 +180,9 @@ def _build(pos: dict, legs: list[dict], con, leg_id: int | None = None) -> JSONR
     # ── TP / SL dollar lines (spread mode only) ───────────────────────────────
     tp_sl_lines: list[dict] = []
     if legs and not leg_id:
-        first_qty  = legs[0].get("quantity")  or 1
+        first_qty = legs[0].get("quantity") or 1
         first_mult = legs[0].get("multiplier") or 100
-        notional   = first_qty * first_mult
+        notional = first_qty * first_mult
         leg_credit_raw = sum(
             (lg["open_price"] if lg["action"][0] == "S" else -lg["open_price"])
             for lg in legs
@@ -181,39 +190,43 @@ def _build(pos: dict, legs: list[dict], con, leg_id: int | None = None) -> JSONR
         )
         tp_pct = params.get("take_profit_pct")
         if tp_pct:
-            tp_sl_lines.append({
-                "value": round(leg_credit_raw * float(tp_pct) * notional, 2),
-                "label": "TP",
-                "color": _GREEN,
-            })
+            tp_sl_lines.append(
+                {
+                    "value": round(leg_credit_raw * float(tp_pct) * notional, 2),
+                    "label": "TP",
+                    "color": _GREEN,
+                }
+            )
         sl_pts = params.get("stop_loss")
         if sl_pts:
-            tp_sl_lines.append({
-                "value": round(-float(sl_pts) * notional, 2),
-                "label": "SL",
-                "color": _RED,
-            })
+            tp_sl_lines.append(
+                {
+                    "value": round(-float(sl_pts) * notional, 2),
+                    "label": "SL",
+                    "color": _RED,
+                }
+            )
 
     # ── Leg mode: replace underlying candles with option OHLCV ───────────────
     if leg_id and active_legs:
         ob_rows = con.execute(_OPT_BARS_SQL, [leg_id, day_start, day_end]).fetchall()
         opt_candles = []
-        opt_volume  = []
+        opt_volume = []
         for r in ob_rows:
-            o, h, l, c, vol = r[1], r[2], r[3], r[4], r[5]
+            o, h, low, c, vol = r[1], r[2], r[3], r[4], r[5]
             if o is None or c is None:
                 continue
             ts = int(r[0].timestamp())
-            opt_candles.append({"time": ts, "open": o, "high": h or c, "low": l or c, "close": c})
+            opt_candles.append({"time": ts, "open": o, "high": h or c, "low": low or c, "close": c})
             color = "rgba(22,163,74,0.35)" if c >= o else "rgba(220,38,38,0.35)"
             opt_volume.append({"time": ts, "value": vol or 0, "color": color})
         if opt_candles:
-            candles      = opt_candles
-            volume       = opt_volume
-            strike_lines = []   # strike levels are underlying-referenced, irrelevant here
+            candles = opt_candles
+            volume = opt_volume
+            strike_lines = []  # strike levels are underlying-referenced, irrelevant here
 
     # ── Running P&L from option bars (active legs) ───────────────────────────
-    pnl_pts:        list[dict] = []
+    pnl_pts: list[dict] = []
     after_exit_pts: list[dict] = []
 
     if active_legs:
@@ -221,7 +234,7 @@ def _build(pos: dict, legs: list[dict], con, leg_id: int | None = None) -> JSONR
         leg_map = {
             lg["instrument_id"]: (
                 lg["action"][0],
-                lg.get("quantity")  or 1,
+                lg.get("quantity") or 1,
                 lg.get("multiplier") or 100,
                 lg.get("open_price") or 0.0,
             )
@@ -288,50 +301,57 @@ def _build(pos: dict, legs: list[dict], con, leg_id: int | None = None) -> JSONR
         exit_color = _AMBER
         exit_label = exit_reason or "Exit"
 
-    exit_text = (f"Exp {exit_mark:.2f}" if exit_reason == "expiry"
-                 else f"Exit {exit_mark:.2f} – {exit_label}")
+    exit_text = (
+        f"Exp {exit_mark:.2f}"
+        if exit_reason == "expiry"
+        else f"Exit {exit_mark:.2f} – {exit_label}"
+    )
 
     # In leg mode use the leg's own entry/exit prices for marker labels.
     if leg_id and active_legs:
-        lg        = active_legs[0]
-        entry_lbl = f"Entry {lg['open_price']:.2f}" if lg.get("open_price") else f"Entry {open_mark:.2f}"
-        ep        = lg.get("exit_price")
+        lg = active_legs[0]
+        entry_lbl = (
+            f"Entry {lg['open_price']:.2f}" if lg.get("open_price") else f"Entry {open_mark:.2f}"
+        )
+        ep = lg.get("exit_price")
         if exit_reason == "expiry":
             exit_lbl = f"Exp {ep:.2f}" if ep else "Exp"
         else:
-            exit_lbl = (f"Exit {ep:.2f} – {exit_label}" if ep else exit_label)
+            exit_lbl = f"Exit {ep:.2f} – {exit_label}" if ep else exit_label
     else:
         entry_lbl = f"Entry {open_mark:.2f}"
-        exit_lbl  = exit_text
+        exit_lbl = exit_text
 
     markers = [
         {
-            "time":     open_ts,
+            "time": open_ts,
             "position": "belowBar",
-            "color":    _GREEN,
-            "shape":    "arrowUp",
-            "text":     entry_lbl,
+            "color": _GREEN,
+            "shape": "arrowUp",
+            "text": entry_lbl,
         },
         {
-            "time":     exit_ts,
+            "time": exit_ts,
             "position": "aboveBar",
-            "color":    exit_color,
-            "shape":    "arrowDown",
-            "text":     exit_lbl,
+            "color": exit_color,
+            "shape": "arrowDown",
+            "text": exit_lbl,
         },
     ]
 
-    return JSONResponse({
-        "has_data":     True,
-        "candles":      candles,
-        "volume":       volume,
-        "markers":      markers,
-        "be_lines":     be_lines,
-        "strike_lines": strike_lines,
-        "pnl":          pnl_pts if len(pnl_pts) > 1 else [],
-        "after_exit":   after_exit_pts if len(after_exit_pts) > 1 else [],
-        "tp_sl_lines":  tp_sl_lines,
-        "open_ts":      open_ts,
-        "exit_ts":      exit_ts,
-        "leg_mode":     leg_id is not None,
-    })
+    return JSONResponse(
+        {
+            "has_data": True,
+            "candles": candles,
+            "volume": volume,
+            "markers": markers,
+            "be_lines": be_lines,
+            "strike_lines": strike_lines,
+            "pnl": pnl_pts if len(pnl_pts) > 1 else [],
+            "after_exit": after_exit_pts if len(after_exit_pts) > 1 else [],
+            "tp_sl_lines": tp_sl_lines,
+            "open_ts": open_ts,
+            "exit_ts": exit_ts,
+            "leg_mode": leg_id is not None,
+        }
+    )

@@ -30,7 +30,6 @@ from btkit.study.definition import StudyDefinition
 from btkit.study.expander import StudyExpander
 from btkit.study.merger import OutputMerger
 
-
 # ---------------------------------------------------------------------------
 # Worker function (module-level for picklability)
 # ---------------------------------------------------------------------------
@@ -106,9 +105,7 @@ class StudyRunner:
 
     def run(self) -> tuple[int, list[dict]]:
         """Execute the full study. Returns (study_id, failed_combinations)."""
-        expander = StudyExpander(
-            self._study, self._study_dir, self._max_combinations
-        )
+        expander = StudyExpander(self._study, self._study_dir, self._max_combinations)
         combinations = expander.combinations  # raises ValueError if over limit
 
         # Insert study row first to get a stable study_id before any worker starts.
@@ -151,10 +148,12 @@ class StudyRunner:
                         cid = futures_map[future]
                         exc = future.exception()
                         if exc is not None:
-                            failed.append({
-                                "combination_id": cid,
-                                "error": str(exc),
-                            })
+                            failed.append(
+                                {
+                                    "combination_id": cid,
+                                    "error": str(exc),
+                                }
+                            )
                         pbar.update(1)
 
             OutputMerger().merge(

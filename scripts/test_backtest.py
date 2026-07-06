@@ -25,7 +25,7 @@ STRATEGIES_DIR = Path("tests/fixtures/strategies")
 
 def run_strategy(path: Path, db: InputDatabase) -> None:
     strategy = load_strategy(path)
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Strategy: {strategy.name}")
 
     all_entries = {}
@@ -65,6 +65,7 @@ def main() -> None:
             except Exception as exc:
                 print(f"\nERROR in {yaml_file.name}: {exc}")
                 import traceback
+
                 traceback.print_exc()
 
     print("\nDone.")

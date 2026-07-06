@@ -8,10 +8,10 @@ Covers:
   - roll + no_reentry_after_loss interaction (roll does NOT block re-entry)
   - roll.conditions — condition-only trigger, combined trigger, _need_vega activation
 """
+
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, time
-from unittest.mock import MagicMock
 
 import polars as pl
 import pytest
@@ -22,14 +22,12 @@ from btkit.strategy.definition import (
     EntryWindowConfig,
     ExitConfig,
     InstrumentConfig,
-    IntSweep,
     LegConfig,
     RollConfig,
     StrategyDefinition,
     TradeDefinition,
     UniverseConfig,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -56,8 +54,21 @@ def _make_engine(max_entries_per_day=None, no_reentry=False, roll=None):
                 instrument=InstrumentConfig(root_symbol="ES", asset_class="future"),
                 entry=entry_cfg,
                 legs=[
-                    LegConfig(name="short", right="put", action="sell_to_open", dte=0, delta={"target": -0.16}),
-                    LegConfig(name="long", right="put", action="buy_to_open", dte=0, strike_offset=-50.0, reference_leg="short"),
+                    LegConfig(
+                        name="short",
+                        right="put",
+                        action="sell_to_open",
+                        dte=0,
+                        delta={"target": -0.16},
+                    ),
+                    LegConfig(
+                        name="long",
+                        right="put",
+                        action="buy_to_open",
+                        dte=0,
+                        strike_offset=-50.0,
+                        reference_leg="short",
+                    ),
                 ],
                 exit=ExitConfig(stop_loss=1.5, take_profit=0.5),
                 roll=roll,
@@ -71,20 +82,25 @@ def _make_engine(max_entries_per_day=None, no_reentry=False, roll=None):
 
 def _ts(dt_str: str) -> datetime:
     import zoneinfo
+
     naive = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
     return naive.replace(tzinfo=zoneinfo.ZoneInfo(TZ)).astimezone(UTC)
 
 
 def _make_frames(rows: list[dict]) -> tuple[pl.DataFrame, pl.DataFrame]:
-    entries = pl.DataFrame({
-        "entry_id":   [r["entry_id"] for r in rows],
-        "entry_time": pl.Series([_ts(r["entry_time"]) for r in rows]).dt.cast_time_unit("us"),
-    })
-    exits = pl.DataFrame({
-        "entry_id":    [r["entry_id"] for r in rows],
-        "exit_reason": [r["exit_reason"] for r in rows],
-        "exit_time":   pl.Series([_ts(r["exit_time"]) for r in rows]).dt.cast_time_unit("us"),
-    })
+    entries = pl.DataFrame(
+        {
+            "entry_id": [r["entry_id"] for r in rows],
+            "entry_time": pl.Series([_ts(r["entry_time"]) for r in rows]).dt.cast_time_unit("us"),
+        }
+    )
+    exits = pl.DataFrame(
+        {
+            "entry_id": [r["entry_id"] for r in rows],
+            "exit_reason": [r["exit_reason"] for r in rows],
+            "exit_time": pl.Series([_ts(r["exit_time"]) for r in rows]).dt.cast_time_unit("us"),
+        }
+    )
     return entries, exits
 
 
@@ -92,8 +108,8 @@ def _make_frames(rows: list[dict]) -> tuple[pl.DataFrame, pl.DataFrame]:
 # RollConfig validation tests
 # ---------------------------------------------------------------------------
 
-class TestRollConfig:
 
+class TestRollConfig:
     def test_dte_only_valid(self):
         cfg = RollConfig(dte=10)
         assert cfg.dte == 10
@@ -124,15 +140,23 @@ class TestRollConfig:
 
 
 class TestTradeDefinitionRoll:
-
     def test_roll_defaults_none(self):
         trade = TradeDefinition(
             name="t",
             instrument=InstrumentConfig(root_symbol="ES", asset_class="future"),
             entry=EntryConfig(window=EntryWindowConfig(start=time(9, 30), end=time(16, 0))),
             legs=[
-                LegConfig(name="short", right="put", action="sell_to_open", dte=0, delta={"target": -0.16}),
-                LegConfig(name="long", right="put", action="buy_to_open", dte=0, strike_offset=-50.0, reference_leg="short"),
+                LegConfig(
+                    name="short", right="put", action="sell_to_open", dte=0, delta={"target": -0.16}
+                ),
+                LegConfig(
+                    name="long",
+                    right="put",
+                    action="buy_to_open",
+                    dte=0,
+                    strike_offset=-50.0,
+                    reference_leg="short",
+                ),
             ],
             exit=ExitConfig(),
         )
@@ -144,8 +168,17 @@ class TestTradeDefinitionRoll:
             instrument=InstrumentConfig(root_symbol="ES", asset_class="future"),
             entry=EntryConfig(window=EntryWindowConfig(start=time(9, 30), end=time(16, 0))),
             legs=[
-                LegConfig(name="short", right="put", action="sell_to_open", dte=0, delta={"target": -0.16}),
-                LegConfig(name="long", right="put", action="buy_to_open", dte=0, strike_offset=-50.0, reference_leg="short"),
+                LegConfig(
+                    name="short", right="put", action="sell_to_open", dte=0, delta={"target": -0.16}
+                ),
+                LegConfig(
+                    name="long",
+                    right="put",
+                    action="buy_to_open",
+                    dte=0,
+                    strike_offset=-50.0,
+                    reference_leg="short",
+                ),
             ],
             exit=ExitConfig(),
             roll=RollConfig(dte=10),
@@ -158,8 +191,8 @@ class TestTradeDefinitionRoll:
 # _enforce_max_entries_per_day roll bypass tests
 # ---------------------------------------------------------------------------
 
-class TestRollReentryBypass:
 
+class TestRollReentryBypass:
     def test_roll_reentry_not_counted_against_daily_cap(self):
         """
         Scenario: max_entries_per_day=1 with a roll.
@@ -169,8 +202,18 @@ class TestRollReentryBypass:
         """
         engine = _make_engine(max_entries_per_day=1)
         rows = [
-            {"entry_id": 1, "entry_time": "2024-01-02 09:45", "exit_time": "2024-01-02 11:00", "exit_reason": "roll"},
-            {"entry_id": 2, "entry_time": "2024-01-02 11:01", "exit_time": "2024-01-02 14:00", "exit_reason": "dte_exit"},
+            {
+                "entry_id": 1,
+                "entry_time": "2024-01-02 09:45",
+                "exit_time": "2024-01-02 11:00",
+                "exit_reason": "roll",
+            },
+            {
+                "entry_id": 2,
+                "entry_time": "2024-01-02 11:01",
+                "exit_time": "2024-01-02 14:00",
+                "exit_reason": "dte_exit",
+            },
         ]
         entries, exits = _make_frames(rows)
         roll_exit_ids = {1}
@@ -183,8 +226,18 @@ class TestRollReentryBypass:
         """A regular re-entry (not following a roll) is still subject to the daily cap."""
         engine = _make_engine(max_entries_per_day=1)
         rows = [
-            {"entry_id": 1, "entry_time": "2024-01-02 09:45", "exit_time": "2024-01-02 11:00", "exit_reason": "take_profit"},
-            {"entry_id": 2, "entry_time": "2024-01-02 11:01", "exit_time": "2024-01-02 14:00", "exit_reason": "dte_exit"},
+            {
+                "entry_id": 1,
+                "entry_time": "2024-01-02 09:45",
+                "exit_time": "2024-01-02 11:00",
+                "exit_reason": "take_profit",
+            },
+            {
+                "entry_id": 2,
+                "entry_time": "2024-01-02 11:01",
+                "exit_time": "2024-01-02 14:00",
+                "exit_reason": "dte_exit",
+            },
         ]
         entries, exits = _make_frames(rows)
         out_entries, _ = engine._enforce_max_entries_per_day(entries, exits, max_entries=1)
@@ -194,9 +247,24 @@ class TestRollReentryBypass:
         """A roll exit on day D does not exempt an entry on day D+1 from the cap."""
         engine = _make_engine(max_entries_per_day=1)
         rows = [
-            {"entry_id": 1, "entry_time": "2024-01-02 09:45", "exit_time": "2024-01-02 15:30", "exit_reason": "roll"},
-            {"entry_id": 2, "entry_time": "2024-01-03 09:45", "exit_time": "2024-01-03 14:00", "exit_reason": "dte_exit"},
-            {"entry_id": 3, "entry_time": "2024-01-03 11:00", "exit_time": "2024-01-03 15:00", "exit_reason": "expiry"},
+            {
+                "entry_id": 1,
+                "entry_time": "2024-01-02 09:45",
+                "exit_time": "2024-01-02 15:30",
+                "exit_reason": "roll",
+            },
+            {
+                "entry_id": 2,
+                "entry_time": "2024-01-03 09:45",
+                "exit_time": "2024-01-03 14:00",
+                "exit_reason": "dte_exit",
+            },
+            {
+                "entry_id": 3,
+                "entry_time": "2024-01-03 11:00",
+                "exit_time": "2024-01-03 15:00",
+                "exit_reason": "expiry",
+            },
         ]
         entries, exits = _make_frames(rows)
         # Roll happened on Jan 2; re-entry on Jan 3 09:45 is fresh, not a roll re-entry
@@ -210,8 +278,18 @@ class TestRollReentryBypass:
         """Passing roll_exit_ids=None falls back to standard daily cap behavior."""
         engine = _make_engine(max_entries_per_day=1)
         rows = [
-            {"entry_id": 1, "entry_time": "2024-01-02 09:45", "exit_time": "2024-01-02 11:00", "exit_reason": "take_profit"},
-            {"entry_id": 2, "entry_time": "2024-01-02 11:30", "exit_time": "2024-01-02 14:00", "exit_reason": "expiry"},
+            {
+                "entry_id": 1,
+                "entry_time": "2024-01-02 09:45",
+                "exit_time": "2024-01-02 11:00",
+                "exit_reason": "take_profit",
+            },
+            {
+                "entry_id": 2,
+                "entry_time": "2024-01-02 11:30",
+                "exit_time": "2024-01-02 14:00",
+                "exit_reason": "expiry",
+            },
         ]
         entries, exits = _make_frames(rows)
         out_entries, _ = engine._enforce_max_entries_per_day(
@@ -232,11 +310,26 @@ class TestRollReentryBypass:
         engine = _make_engine(max_entries_per_day=1)
         rows = [
             # Entry 1 opened Jan 2, exits via roll on Jan 3 10:00
-            {"entry_id": 1, "entry_time": "2024-01-02 09:45", "exit_time": "2024-01-03 10:00", "exit_reason": "roll"},
+            {
+                "entry_id": 1,
+                "entry_time": "2024-01-02 09:45",
+                "exit_time": "2024-01-03 10:00",
+                "exit_reason": "roll",
+            },
             # Entry 2: roll re-entry Jan 3 10:01 (exempt), TPs at 11:00
-            {"entry_id": 2, "entry_time": "2024-01-03 10:01", "exit_time": "2024-01-03 11:00", "exit_reason": "take_profit"},
+            {
+                "entry_id": 2,
+                "entry_time": "2024-01-03 10:01",
+                "exit_time": "2024-01-03 11:00",
+                "exit_reason": "take_profit",
+            },
             # Entry 3: first non-exempt entry on Jan 3 after TP — rank should be 1
-            {"entry_id": 3, "entry_time": "2024-01-03 11:01", "exit_time": "2024-01-03 15:00", "exit_reason": "dte_exit"},
+            {
+                "entry_id": 3,
+                "entry_time": "2024-01-03 11:01",
+                "exit_time": "2024-01-03 15:00",
+                "exit_reason": "dte_exit",
+            },
         ]
         entries, exits = _make_frames(rows)
         out_entries, _ = engine._enforce_max_entries_per_day(
@@ -249,15 +342,19 @@ class TestRollReentryBypass:
     def test_empty_entries_with_roll_exit_ids(self):
         """Empty inputs do not raise even when roll_exit_ids is provided."""
         engine = _make_engine(max_entries_per_day=1)
-        entries = pl.DataFrame({
-            "entry_id": pl.Series([], dtype=pl.Int64),
-            "entry_time": pl.Series([], dtype=pl.Datetime("us", "UTC")),
-        })
-        exits = pl.DataFrame({
-            "entry_id": pl.Series([], dtype=pl.Int64),
-            "exit_reason": pl.Series([], dtype=pl.String),
-            "exit_time": pl.Series([], dtype=pl.Datetime("us", "UTC")),
-        })
+        entries = pl.DataFrame(
+            {
+                "entry_id": pl.Series([], dtype=pl.Int64),
+                "entry_time": pl.Series([], dtype=pl.Datetime("us", "UTC")),
+            }
+        )
+        exits = pl.DataFrame(
+            {
+                "entry_id": pl.Series([], dtype=pl.Int64),
+                "exit_reason": pl.Series([], dtype=pl.String),
+                "exit_time": pl.Series([], dtype=pl.Datetime("us", "UTC")),
+            }
+        )
         out_entries, out_exits = engine._enforce_max_entries_per_day(
             entries, exits, max_entries=1, roll_exit_ids={99}
         )
@@ -289,15 +386,18 @@ class TestRollConditions:
         assert len(cfg.conditions) == 1
 
     def test_multiple_conditions(self):
-        cfg = RollConfig(conditions=[
-            "position_mark - open_mark >= 10.0",
-            "_spread_vega < 0.3 * open_vega",
-        ])
+        cfg = RollConfig(
+            conditions=[
+                "position_mark - open_mark >= 10.0",
+                "_spread_vega < 0.3 * open_vega",
+            ]
+        )
         assert len(cfg.conditions) == 2
 
     def test_need_vega_triggered_by_spread_vega_in_roll_condition(self):
         """_need_vega activates when a roll condition references _spread_vega."""
         from btkit.strategy.definition import ExitConfig
+
         roll = RollConfig(conditions=["_spread_vega < 0.5"])
         exit_cfg = ExitConfig()
         result = (
@@ -311,6 +411,7 @@ class TestRollConditions:
     def test_need_vega_triggered_by_open_vega_in_roll_condition(self):
         """_need_vega activates when a roll condition references open_vega."""
         from btkit.strategy.definition import ExitConfig
+
         roll = RollConfig(conditions=["_spread_vega < 0.3 * open_vega"])
         exit_cfg = ExitConfig()
         result = (
@@ -324,6 +425,7 @@ class TestRollConditions:
     def test_need_vega_not_triggered_by_unrelated_roll_condition(self):
         """_need_vega stays False when roll conditions don't reference vega columns."""
         from btkit.strategy.definition import ExitConfig
+
         roll = RollConfig(conditions=["position_mark - open_mark >= 10.0"])
         exit_cfg = ExitConfig()
         result = (
@@ -339,16 +441,19 @@ class TestRollConditions:
         Smoke-test: a roll condition expression is correctly parsed and ORed
         into the roll_trigger Polars expression without raising.
         """
-        from btkit.strategy.loader import parse_condition
         import polars as pl
+
+        from btkit.strategy.loader import parse_condition
 
         roll_cfg = RollConfig(conditions=["position_mark - open_mark >= 10.0"])
 
-        m = pl.DataFrame({
-            "position_mark": [5.0, 15.0, 8.0],
-            "open_mark":     [0.0,  0.0,  0.0],
-            "_local_sec":    [36900, 36900, 36900],
-        })
+        m = pl.DataFrame(
+            {
+                "position_mark": [5.0, 15.0, 8.0],
+                "open_mark": [0.0, 0.0, 0.0],
+                "_local_sec": [36900, 36900, 36900],
+            }
+        )
 
         roll_trigger = pl.lit(False)
         for cond_str in roll_cfg.conditions:
@@ -359,16 +464,19 @@ class TestRollConditions:
 
     def test_roll_condition_combined_with_dte_uses_or_logic(self):
         """Either the dte trigger OR the condition trigger should fire the roll."""
-        from btkit.strategy.loader import parse_condition
         import polars as pl
+
+        from btkit.strategy.loader import parse_condition
 
         roll_cfg = RollConfig(dte=5, conditions=["position_mark - open_mark >= 10.0"])
 
-        m = pl.DataFrame({
-            "position_mark": [15.0, 3.0,  3.0],
-            "open_mark":     [ 0.0, 0.0,  0.0],
-            "_dte_now":      [  20,  20,    3],
-        })
+        m = pl.DataFrame(
+            {
+                "position_mark": [15.0, 3.0, 3.0],
+                "open_mark": [0.0, 0.0, 0.0],
+                "_dte_now": [20, 20, 3],
+            }
+        )
 
         roll_trigger = pl.lit(False)
         if roll_cfg.dte is not None:
@@ -382,7 +490,6 @@ class TestRollConditions:
 
 
 class TestRollNoReentryInteraction:
-
     def test_roll_exit_does_not_block_reentry(self):
         """
         no_reentry_after_loss only blocks re-entries after stop_loss/gap_sl.
@@ -393,14 +500,20 @@ class TestRollNoReentryInteraction:
             {"entry_id": 1, "entry_time": "2024-01-02 09:45", "exit_reason": "roll"},
             {"entry_id": 2, "entry_time": "2024-01-02 11:01", "exit_reason": "expiry"},
         ]
-        entries = pl.DataFrame({
-            "entry_id":   [r["entry_id"] for r in rows],
-            "entry_time": pl.Series([_ts(r["entry_time"]) for r in rows]).dt.cast_time_unit("us"),
-        })
-        exits = pl.DataFrame({
-            "entry_id":    [r["entry_id"] for r in rows],
-            "exit_reason": [r["exit_reason"] for r in rows],
-        })
+        entries = pl.DataFrame(
+            {
+                "entry_id": [r["entry_id"] for r in rows],
+                "entry_time": pl.Series([_ts(r["entry_time"]) for r in rows]).dt.cast_time_unit(
+                    "us"
+                ),
+            }
+        )
+        exits = pl.DataFrame(
+            {
+                "entry_id": [r["entry_id"] for r in rows],
+                "exit_reason": [r["exit_reason"] for r in rows],
+            }
+        )
         out_entries, _ = engine._enforce_no_reentry_after_loss(entries, exits)
         assert sorted(out_entries["entry_id"].to_list()) == [1, 2]
 
@@ -408,6 +521,7 @@ class TestRollNoReentryInteraction:
 # ---------------------------------------------------------------------------
 # _enforce_entries ghost-gate regression tests
 # ---------------------------------------------------------------------------
+
 
 class TestEnforceEntriesGhostGate:
     """
@@ -434,11 +548,26 @@ class TestEnforceEntriesGhostGate:
         engine = _make_engine(max_entries_per_day=1)
         rows = [
             # E1: opens Jan 8 09:46, TPs 14:29
-            {"entry_id": 1, "entry_time": "2024-01-08 09:46", "exit_time": "2024-01-08 14:29", "exit_reason": "take_profit"},
+            {
+                "entry_id": 1,
+                "entry_time": "2024-01-08 09:46",
+                "exit_time": "2024-01-08 14:29",
+                "exit_reason": "take_profit",
+            },
             # E2b: ghost at exact TP time — accepted by >= gate but rank=2 for Jan 8
-            {"entry_id": 2, "entry_time": "2024-01-08 14:29", "exit_time": "2024-02-20 12:00", "exit_reason": "dte_exit"},
+            {
+                "entry_id": 2,
+                "entry_time": "2024-01-08 14:29",
+                "exit_time": "2024-02-20 12:00",
+                "exit_reason": "dte_exit",
+            },
             # E3: first valid candidate next day — should be accepted
-            {"entry_id": 3, "entry_time": "2024-01-09 09:46", "exit_time": "2024-02-23 10:00", "exit_reason": "dte_exit"},
+            {
+                "entry_id": 3,
+                "entry_time": "2024-01-09 09:46",
+                "exit_time": "2024-02-23 10:00",
+                "exit_reason": "dte_exit",
+            },
         ]
         entries, exits = _make_frames(rows)
         out_entries, _ = engine._enforce_entries(entries, exits, max_entries_per_day=1)
@@ -454,13 +583,38 @@ class TestEnforceEntriesGhostGate:
         engine = _make_engine(max_entries_per_day=1)
         rows = [
             # E2 opens May 5 09:55, TPs 10:38
-            {"entry_id": 2, "entry_time": "2022-05-05 09:55", "exit_time": "2022-05-05 10:38", "exit_reason": "take_profit"},
+            {
+                "entry_id": 2,
+                "entry_time": "2022-05-05 09:55",
+                "exit_time": "2022-05-05 10:38",
+                "exit_reason": "take_profit",
+            },
             # Ghost candidates on May 5 after the TP — all rank≥2
-            {"entry_id": 3, "entry_time": "2022-05-05 10:41", "exit_time": "2022-05-05 10:42", "exit_reason": "take_profit"},
-            {"entry_id": 4, "entry_time": "2022-05-05 10:42", "exit_time": "2022-05-05 10:43", "exit_reason": "take_profit"},
-            {"entry_id": 5, "entry_time": "2022-05-05 10:44", "exit_time": "2022-06-14 09:45", "exit_reason": "dte_exit"},
+            {
+                "entry_id": 3,
+                "entry_time": "2022-05-05 10:41",
+                "exit_time": "2022-05-05 10:42",
+                "exit_reason": "take_profit",
+            },
+            {
+                "entry_id": 4,
+                "entry_time": "2022-05-05 10:42",
+                "exit_time": "2022-05-05 10:43",
+                "exit_reason": "take_profit",
+            },
+            {
+                "entry_id": 5,
+                "entry_time": "2022-05-05 10:44",
+                "exit_time": "2022-06-14 09:45",
+                "exit_reason": "dte_exit",
+            },
             # Next-day candidate — should not be blocked by ghost gates
-            {"entry_id": 6, "entry_time": "2022-05-06 09:45", "exit_time": "2022-06-19 10:00", "exit_reason": "dte_exit"},
+            {
+                "entry_id": 6,
+                "entry_time": "2022-05-06 09:45",
+                "exit_time": "2022-06-19 10:00",
+                "exit_reason": "dte_exit",
+            },
         ]
         entries, exits = _make_frames(rows)
         out_entries, _ = engine._enforce_entries(entries, exits, max_entries_per_day=1)
@@ -474,23 +628,30 @@ class TestEnforceEntriesGhostGate:
         candidates on the same day are blocked by daily cap — NOT by a
         phantom gate — and the next-day entry fires normally.
         """
-        import zoneinfo
         engine = _make_engine(max_entries_per_day=1)
         # Build entries with one null exit_time
-        entries = pl.DataFrame({
-            "entry_id":   pl.Series([1, 2, 3], dtype=pl.Int64),
-            "entry_time": pl.Series([
-                _ts("2024-01-05 12:15"),
-                _ts("2024-01-05 12:16"),
-                _ts("2024-01-08 09:46"),
-            ]).dt.cast_time_unit("us"),
-        })
-        exits = pl.DataFrame({
-            "entry_id":   pl.Series([1, 2, 3], dtype=pl.Int64),
-            "exit_reason": pl.Series(["dte_exit", "dte_exit", "dte_exit"], dtype=pl.String),
-            "exit_time":  pl.Series([None, _ts("2024-02-09 09:45"), _ts("2024-01-08 14:29")],
-                                     dtype=pl.Datetime("us", "UTC")),
-        })
+        entries = pl.DataFrame(
+            {
+                "entry_id": pl.Series([1, 2, 3], dtype=pl.Int64),
+                "entry_time": pl.Series(
+                    [
+                        _ts("2024-01-05 12:15"),
+                        _ts("2024-01-05 12:16"),
+                        _ts("2024-01-08 09:46"),
+                    ]
+                ).dt.cast_time_unit("us"),
+            }
+        )
+        exits = pl.DataFrame(
+            {
+                "entry_id": pl.Series([1, 2, 3], dtype=pl.Int64),
+                "exit_reason": pl.Series(["dte_exit", "dte_exit", "dte_exit"], dtype=pl.String),
+                "exit_time": pl.Series(
+                    [None, _ts("2024-02-09 09:45"), _ts("2024-01-08 14:29")],
+                    dtype=pl.Datetime("us", "UTC"),
+                ),
+            }
+        )
         out_entries, _ = engine._enforce_entries(entries, exits, max_entries_per_day=1)
         # Entry 1 (null exit): accepted, gate=0.
         # Entry 2: gate=0 (clear), but daily cap for Jan 5 = 1 already hit → BLOCKED.
@@ -505,11 +666,26 @@ class TestEnforceEntriesGhostGate:
         engine = _make_engine(max_entries_per_day=1)
         rows = [
             # Original position opens Feb 1, rolls Feb 3 09:49
-            {"entry_id": 1, "entry_time": "2025-02-01 12:45", "exit_time": "2025-02-03 09:49", "exit_reason": "roll"},
+            {
+                "entry_id": 1,
+                "entry_time": "2025-02-01 12:45",
+                "exit_time": "2025-02-03 09:49",
+                "exit_reason": "roll",
+            },
             # Roll re-entry: first entry on Feb 3 after 09:49 — exempt from cap
-            {"entry_id": 2, "entry_time": "2025-02-03 09:54", "exit_time": "2025-02-03 10:25", "exit_reason": "take_profit"},
+            {
+                "entry_id": 2,
+                "entry_time": "2025-02-03 09:54",
+                "exit_time": "2025-02-03 10:25",
+                "exit_reason": "take_profit",
+            },
             # Regular candidate on Feb 3 after the TP — rank=1 (first non-exempt)
-            {"entry_id": 3, "entry_time": "2025-02-03 10:26", "exit_time": "2025-03-03 11:00", "exit_reason": "roll"},
+            {
+                "entry_id": 3,
+                "entry_time": "2025-02-03 10:26",
+                "exit_time": "2025-03-03 11:00",
+                "exit_reason": "roll",
+            },
         ]
         entries, exits = _make_frames(rows)
         # roll_exit_ids = {1} (original position rolls)

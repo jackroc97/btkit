@@ -44,11 +44,13 @@ EXP_DATE = date(2026, 4, 9)
 
 # Stable fake option instrument IDs used across tests
 SHORT_OPT_ID = 1001
-LONG_OPT_ID  = 1002
+LONG_OPT_ID = 1002
 UNDERLYING_ID = 999
 
 
-def _make_scanner(legs: list[LegConfig], expiry_close_time: time | None = time(16, 0)) -> ExitScanner:
+def _make_scanner(
+    legs: list[LegConfig], expiry_close_time: time | None = time(16, 0)
+) -> ExitScanner:
     strategy = StrategyDefinition(
         name="test",
         universe=UniverseConfig(
@@ -65,9 +67,7 @@ def _make_scanner(legs: list[LegConfig], expiry_close_time: time | None = time(1
                     expiry_close_time=expiry_close_time,
                     tick_size=0.05,
                 ),
-                entry=EntryConfig(
-                    window=EntryWindowConfig(start=time(9, 30), end=time(10, 0))
-                ),
+                entry=EntryConfig(window=EntryWindowConfig(start=time(9, 30), end=time(10, 0))),
                 legs=legs,
                 exit=ExitConfig(expiry_exit=True),
             )
@@ -102,7 +102,6 @@ def _entries(
     )
 
 
-
 def _scanner_with_settlement(legs: list[LegConfig], settlement: float) -> ExitScanner:
     scanner = _make_scanner(legs)
     scanner._opt_to_underlying = {SHORT_OPT_ID: UNDERLYING_ID}
@@ -116,7 +115,9 @@ def _scanner_with_settlement(legs: list[LegConfig], settlement: float) -> ExitSc
 
 PUT_LEGS = [
     LegConfig(name="short", right="put", action="sell_to_open", dte=0, delta={"target": -0.25}),
-    LegConfig(name="long", right="put", action="buy_to_open", strike_offset=-50.0, reference_leg="short"),
+    LegConfig(
+        name="long", right="put", action="buy_to_open", strike_offset=-50.0, reference_leg="short"
+    ),
 ]
 
 
@@ -163,7 +164,9 @@ class TestPutCreditSpread:
 
 CALL_LEGS = [
     LegConfig(name="short", right="call", action="sell_to_open", dte=0, delta={"target": 0.25}),
-    LegConfig(name="long", right="call", action="buy_to_open", strike_offset=50.0, reference_leg="short"),
+    LegConfig(
+        name="long", right="call", action="buy_to_open", strike_offset=50.0, reference_leg="short"
+    ),
 ]
 
 
@@ -294,8 +297,12 @@ class TestSettlementEdgeCases:
         scanner._opt_to_underlying = {SHORT_OPT_ID: UNDERLYING_ID}
         scanner._settlement_closes_by_key = {(UNDERLYING_ID, EXP_DATE): 5450.0}
         entries = _entries(
-            1, EXP_DATE, short_strike=5400.0, long_strike=5350.0,
-            right="P", short_opt_id=SHORT_OPT_ID,
+            1,
+            EXP_DATE,
+            short_strike=5400.0,
+            long_strike=5350.0,
+            right="P",
+            short_opt_id=SHORT_OPT_ID,
         )
         result = scanner._compute_settlement_marks(entries, TZ)
         # S=5450 → both OTM → mark=0

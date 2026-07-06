@@ -100,8 +100,13 @@ class ExitScanner:
             if global_max_exp is None or leg_max > global_max_exp:
                 global_max_exp = leg_max
         global_end_dt = datetime(
-            global_max_exp.year, global_max_exp.month, global_max_exp.day,
-            23, 59, 59, tzinfo=UTC,
+            global_max_exp.year,
+            global_max_exp.month,
+            global_max_exp.day,
+            23,
+            59,
+            59,
+            tzinfo=UTC,
         )
         all_option_bars = self.db.option_bars_for_legs(
             list(all_ids), global_min_entry, global_end_dt
@@ -120,8 +125,11 @@ class ExitScanner:
             unique_underlying_ids = list(set(self._opt_to_underlying.values()))
             tz_str_pre = self.strategy.universe.session.timezone
             settlement_df = self.db.settlement_closes_for_underlyings(
-                unique_underlying_ids, global_min_entry, global_end_dt,
-                tz_str_pre, close_time,
+                unique_underlying_ids,
+                global_min_entry,
+                global_end_dt,
+                tz_str_pre,
+                close_time,
             )
             self._settlement_closes_by_key = {
                 (int(row["underlying_id"]), row["exp_date"]): float(row["settlement_close"])
@@ -205,6 +213,7 @@ class ExitScanner:
             ts_tz = cached_bars.schema["ts_event"].time_zone
             if ts_tz and ts_tz != "UTC":
                 from zoneinfo import ZoneInfo
+
                 end_dt_cmp = end_dt.astimezone(ZoneInfo(ts_tz))
             else:
                 end_dt_cmp = end_dt
@@ -307,7 +316,9 @@ class ExitScanner:
         close_cols = [f"_leg_{leg.name}_mark_close" for leg in self.trade.legs]
         open_cols = [f"_leg_{leg.name}_mark_open" for leg in self.trade.legs]
         vol_cols = [f"_leg_{leg.name}_volume" for leg in self.trade.legs] if need_volume else []
-        spread_cols = [f"_leg_{leg.name}_spread_half" for leg in self.trade.legs] if need_spread else []
+        spread_cols = (
+            [f"_leg_{leg.name}_spread_half" for leg in self.trade.legs] if need_spread else []
+        )
 
         # Before forward-filling prices, record the last timestamp where each leg
         # had a real bar. This is used by the staleness gate to suppress TP/SL when
@@ -358,12 +369,19 @@ class ExitScanner:
                 active_vol_cols = short_vol_cols if short_vol_cols else vol_cols
             else:
                 active_vol_cols = vol_cols
-            aggregate_exprs.append(pl.min_horizontal(active_vol_cols).fill_null(0).alias("_min_leg_volume"))
+            aggregate_exprs.append(
+                pl.min_horizontal(active_vol_cols).fill_null(0).alias("_min_leg_volume")
+            )
         if need_spread:
-            aggregate_exprs.append(pl.sum_horizontal(spread_cols).fill_null(0).alias("_total_slippage"))
+            aggregate_exprs.append(
+                pl.sum_horizontal(spread_cols).fill_null(0).alias("_total_slippage")
+            )
         if need_staleness:
             stale_exprs = [
-                (pl.col("ts_event").dt.convert_time_zone("UTC") - pl.col(f"_leg_{leg.name}_last_bar_ts"))
+                (
+                    pl.col("ts_event").dt.convert_time_zone("UTC")
+                    - pl.col(f"_leg_{leg.name}_last_bar_ts")
+                )
                 .dt.total_minutes()
                 .cast(pl.Float64)
                 for leg in self.trade.legs
@@ -387,7 +405,7 @@ class ExitScanner:
     # ------------------------------------------------------------------
 
     def _parse_trigger_condition(self, condition: str | None, trigger: str) -> pl.Expr:
-        """Parse an AND-gate condition for stop_loss or take_profit. Returns lit(True) when absent."""
+        """Parse an AND-gate condition for stop_loss/take_profit; lit(True) when absent."""
         if condition is None:
             return pl.lit(True)
         try:
@@ -462,11 +480,20 @@ class ExitScanner:
         exp_cols = [f"leg_{leg.name}_expiration" for leg in self.trade.legs]
         entry_meta = (
             entries.select(
-                ["entry_id", "entry_time", "open_mark", "tp_price", "sl_price", "dte_exit"] + exp_cols
+                ["entry_id", "entry_time", "open_mark", "tp_price", "sl_price", "dte_exit"]
+                + exp_cols
             )
             .with_columns(pl.min_horizontal(exp_cols).alias("trade_expiration"))
             .select(
-                ["entry_id", "entry_time", "open_mark", "tp_price", "sl_price", "dte_exit", "trade_expiration"]
+                [
+                    "entry_id",
+                    "entry_time",
+                    "open_mark",
+                    "tp_price",
+                    "sl_price",
+                    "dte_exit",
+                    "trade_expiration",
+                ]
             )
             .join(settlement_marks, on="entry_id", how="left")
         )
@@ -484,8 +511,7 @@ class ExitScanner:
         # (e.g. -167 on a 50-pt-wide spread), and push the fallback expiry exit
         # weeks past the true expiration date.
         m = m.filter(
-            pl.col("ts_event").dt.convert_time_zone(tz_str).dt.date()
-            <= pl.col("trade_expiration")
+            pl.col("ts_event").dt.convert_time_zone(tz_str).dt.date() <= pl.col("trade_expiration")
         )
 
         # Running worst mark per entry — single pass, no second scan needed.
@@ -504,12 +530,14 @@ class ExitScanner:
             exit_cfg.vega_exit is not None
             or (self.trade.roll is not None and self.trade.roll.vega is not None)
             or any("_spread_vega" in c or "open_vega" in c for c in exit_cfg.conditions)
-            or (self.trade.roll is not None
-                and any("_spread_vega" in c or "open_vega" in c for c in self.trade.roll.conditions))
+            or (
+                self.trade.roll is not None
+                and any("_spread_vega" in c or "open_vega" in c for c in self.trade.roll.conditions)
+            )
         )
         if _need_vega:
             cohort_start = m["ts_event"].min()
-            cohort_end   = m["ts_event"].max()
+            cohort_end = m["ts_event"].max()
             instr_ids: list[int] = []
             for leg in self.trade.legs:
                 col_name = f"leg_{leg.name}_instrument_id"
@@ -529,18 +557,20 @@ class ExitScanner:
                         col_name = f"leg_{leg.name}_instrument_id"
                         if col_name not in entries.columns:
                             continue
-                        leg_instr_map = entries.select([
-                            "entry_id",
-                            pl.col(col_name).alias("instrument_id"),
-                        ])
-                        part = (
-                            greeks_df
-                            .join(leg_instr_map, on="instrument_id", how="inner")
-                            .select([
+                        leg_instr_map = entries.select(
+                            [
+                                "entry_id",
+                                pl.col(col_name).alias("instrument_id"),
+                            ]
+                        )
+                        part = greeks_df.join(
+                            leg_instr_map, on="instrument_id", how="inner"
+                        ).select(
+                            [
                                 "entry_id",
                                 "ts_event",
                                 (pl.col("vega") * pl.lit(signed_qty)).alias("_leg_vega_contrib"),
-                            ])
+                            ]
                         )
                         vega_parts.append(part)
 
@@ -643,9 +673,11 @@ class ExitScanner:
                     else 16 * 3600  # fallback: 16:00 local
                 )
             lock_start_sec = ref_close_sec - liq.pre_expiry_lock_minutes * 60
-            _locked = (pl.col("_dte_now") == 0) & (
-                pl.col("_local_sec") >= pl.lit(lock_start_sec)
-            ) & (pl.col("_local_sec") <= pl.lit(ref_close_sec))
+            _locked = (
+                (pl.col("_dte_now") == 0)
+                & (pl.col("_local_sec") >= pl.lit(lock_start_sec))
+                & (pl.col("_local_sec") <= pl.lit(ref_close_sec))
+            )
         else:
             _locked = pl.lit(False)
 
@@ -700,10 +732,26 @@ class ExitScanner:
 
         m = m.with_columns(
             [
-                (((pl.col("spread_open_mark") + trigger_slippage) >= pl.col("sl_price")) & _price_ok & sl_cond).alias("_gap_sl"),
-                (((pl.col("spread_open_mark") + trigger_slippage) <= pl.col("tp_price")) & _price_ok & tp_cond).alias("_gap_tp"),
-                (((pl.col("position_mark") + trigger_slippage) >= pl.col("sl_price")) & _price_ok & sl_cond).alias("_sl"),
-                (((pl.col("position_mark") + trigger_slippage) <= pl.col("tp_price")) & _price_ok & tp_cond).alias("_tp"),
+                (
+                    ((pl.col("spread_open_mark") + trigger_slippage) >= pl.col("sl_price"))
+                    & _price_ok
+                    & sl_cond
+                ).alias("_gap_sl"),
+                (
+                    ((pl.col("spread_open_mark") + trigger_slippage) <= pl.col("tp_price"))
+                    & _price_ok
+                    & tp_cond
+                ).alias("_gap_tp"),
+                (
+                    ((pl.col("position_mark") + trigger_slippage) >= pl.col("sl_price"))
+                    & _price_ok
+                    & sl_cond
+                ).alias("_sl"),
+                (
+                    ((pl.col("position_mark") + trigger_slippage) <= pl.col("tp_price"))
+                    & _price_ok
+                    & tp_cond
+                ).alias("_tp"),
             ]
         )
 
@@ -718,10 +766,7 @@ class ExitScanner:
             def _apply_tp_confirmation(df: pl.DataFrame) -> pl.DataFrame:
                 return df.sort("ts_event").with_columns(
                     (
-                        pl.col("_tp").cast(pl.Int8)
-                        .rolling_sum(window_size=cb)
-                        .fill_null(0)
-                        >= cb
+                        pl.col("_tp").cast(pl.Int8).rolling_sum(window_size=cb).fill_null(0) >= cb
                     ).alias("_tp")
                 )
 
@@ -772,28 +817,26 @@ class ExitScanner:
         if roll_cfg is not None:
             roll_window = roll_cfg.window or self.trade.entry.window
             roll_start_sec = roll_window.start.hour * 3600 + roll_window.start.minute * 60
-            roll_end_sec   = roll_window.end.hour   * 3600 + roll_window.end.minute   * 60
-            _in_roll_window = (
-                (pl.col("_local_sec") >= pl.lit(roll_start_sec))
-                & (pl.col("_local_sec") <= pl.lit(roll_end_sec))
+            roll_end_sec = roll_window.end.hour * 3600 + roll_window.end.minute * 60
+            _in_roll_window = (pl.col("_local_sec") >= pl.lit(roll_start_sec)) & (
+                pl.col("_local_sec") <= pl.lit(roll_end_sec)
             )
             roll_trigger = pl.lit(False)
             if roll_cfg.dte is not None:
                 roll_trigger = roll_trigger | (pl.col("_dte_now") <= pl.lit(int(roll_cfg.dte)))
             if roll_cfg.vega is not None and "_spread_vega" in m.columns:
-                roll_trigger = roll_trigger | (pl.col("_spread_vega") < pl.lit(float(roll_cfg.vega)))
+                roll_trigger = roll_trigger | (
+                    pl.col("_spread_vega") < pl.lit(float(roll_cfg.vega))
+                )
             for cond_str in roll_cfg.conditions:
                 roll_trigger = roll_trigger | parse_condition(cond_str)
-            m = m.with_columns(
-                (roll_trigger & _in_roll_window).alias("_roll")
-            )
+            m = m.with_columns((roll_trigger & _in_roll_window).alias("_roll"))
         else:
             m = m.with_columns(pl.lit(False).alias("_roll"))
 
         if exit_cfg.expiry_exit:
-            expiry_expr = (
-                pl.col("ts_event").dt.convert_time_zone(tz_str).dt.date()
-                >= pl.col("trade_expiration")
+            expiry_expr = pl.col("ts_event").dt.convert_time_zone(tz_str).dt.date() >= pl.col(
+                "trade_expiration"
             )
             close_time = self.trade.instrument.expiry_close_time
             if close_time is not None:
@@ -871,9 +914,7 @@ class ExitScanner:
         raw_exit_mark = (
             pl.when(pl.col("_priority").is_in([1, 2]))
             .then(pl.col("spread_open_mark") + slippage)
-            .when(
-                (pl.col("_priority") == 9) & pl.col("settlement_mark").is_not_null()
-            )
+            .when((pl.col("_priority") == 9) & pl.col("settlement_mark").is_not_null())
             .then(pl.col("settlement_mark"))
             .otherwise(_bar_mark_clipped)
         )
@@ -942,29 +983,32 @@ class ExitScanner:
                 )
                 no_settlement = missing.filter(~pl.col("entry_id").is_in(has_settlement))
                 fresh_pool = (
-                    no_settlement
-                    .filter(pl.col("_max_leg_stale_minutes") <= pl.lit(fresh_limit))
+                    no_settlement.filter(pl.col("_max_leg_stale_minutes") <= pl.lit(fresh_limit))
                     .sort(["entry_id", "ts_event"])
                     .unique(subset=["entry_id"], keep="last")
                 )
                 stale_pool = (
-                    no_settlement
-                    .filter(~pl.col("entry_id").is_in(fresh_pool["entry_id"].to_list()))
+                    no_settlement.filter(
+                        ~pl.col("entry_id").is_in(fresh_pool["entry_id"].to_list())
+                    )
                     .sort(["entry_id", "ts_event"])
                     .unique(subset=["entry_id"], keep="last")
                 )
                 parts = [p for p in [settlement_pool, fresh_pool, stale_pool] if not p.is_empty()]
-                fallback_pool = pl.concat(parts) if parts else missing.sort(["entry_id", "ts_event"]).unique(subset=["entry_id"], keep="last")
-            else:
                 fallback_pool = (
-                    missing
-                    .sort(["entry_id", "ts_event"])
-                    .unique(subset=["entry_id"], keep="last")
+                    pl.concat(parts)
+                    if parts
+                    else missing.sort(["entry_id", "ts_event"]).unique(
+                        subset=["entry_id"], keep="last"
+                    )
+                )
+            else:
+                fallback_pool = missing.sort(["entry_id", "ts_event"]).unique(
+                    subset=["entry_id"], keep="last"
                 )
 
             last_bars = (
-                fallback_pool
-                .with_columns(
+                fallback_pool.with_columns(
                     [
                         tick_round_expr(fallback_mark, tick).alias("exit_mark"),
                         pl.lit("expiry").alias("exit_reason"),
@@ -1136,13 +1180,15 @@ class ExitScanner:
             return _empty_continuation_df()
 
         if len(long_legs) > 1:
-            self.warnings.append({
-                "type": "continuation_skipped",
-                "message": (
-                    "on_sl_long_continuation with multiple long legs is not yet supported; "
-                    "continuation tracking skipped"
-                ),
-            })
+            self.warnings.append(
+                {
+                    "type": "continuation_skipped",
+                    "message": (
+                        "on_sl_long_continuation with multiple long legs is not yet supported; "
+                        "continuation tracking skipped"
+                    ),
+                }
+            )
             return _empty_continuation_df()
 
         leg = long_legs[0]
@@ -1154,35 +1200,32 @@ class ExitScanner:
             return _empty_continuation_df()
 
         # Per-entry context: instrument, expiration, strike, right
-        leg_ctx = entries.select([
-            "entry_id",
-            pl.col(f"leg_{leg.name}_instrument_id").alias("_instr_id"),
-            pl.col(f"leg_{leg.name}_expiration").alias("_leg_exp"),
-            pl.col(f"leg_{leg.name}_strike_price").alias("_strike"),
-            pl.col(f"leg_{leg.name}_right").alias("_right"),
-            pl.col(f"leg_{leg.name}_multiplier").cast(pl.Float64).alias("_multiplier"),
-            pl.lit(float(leg.quantity)).alias("_quantity"),
-        ])
+        leg_ctx = entries.select(
+            [
+                "entry_id",
+                pl.col(f"leg_{leg.name}_instrument_id").alias("_instr_id"),
+                pl.col(f"leg_{leg.name}_expiration").alias("_leg_exp"),
+                pl.col(f"leg_{leg.name}_strike_price").alias("_strike"),
+                pl.col(f"leg_{leg.name}_right").alias("_right"),
+                pl.col(f"leg_{leg.name}_multiplier").cast(pl.Float64).alias("_multiplier"),
+                pl.lit(float(leg.quantity)).alias("_quantity"),
+            ]
+        )
 
-        sl_ctx = (
-            sl_exits.select(["entry_id", "exit_time"])
-            .join(leg_ctx, on="entry_id", how="inner")
+        sl_ctx = sl_exits.select(["entry_id", "exit_time"]).join(
+            leg_ctx, on="entry_id", how="inner"
         )
 
         instr_ids = sl_ctx["_instr_id"].unique().to_list()
 
         # Bars for the long leg, joined with SL context, filtered to continuation window
         cont_bars = (
-            option_bars
-            .filter(pl.col("instrument_id").is_in(instr_ids))
+            option_bars.filter(pl.col("instrument_id").is_in(instr_ids))
             .select(["ts_event", "instrument_id", "close"])
             .join(sl_ctx.rename({"_instr_id": "instrument_id"}), on="instrument_id", how="inner")
             .filter(
                 (pl.col("ts_event") > pl.col("exit_time"))
-                & (
-                    pl.col("ts_event").dt.convert_time_zone(tz_str).dt.date()
-                    <= pl.col("_leg_exp")
-                )
+                & (pl.col("ts_event").dt.convert_time_zone(tz_str).dt.date() <= pl.col("_leg_exp"))
             )
             .sort(["entry_id", "ts_event"])
         )
@@ -1191,10 +1234,8 @@ class ExitScanner:
             return _empty_continuation_df()
 
         # Continuation entry price = first real bar per entry after SL exit
-        entry_prices = (
-            cont_bars
-            .group_by("entry_id", maintain_order=True)
-            .agg(pl.col("close").first().alias("continuation_entry_price"))
+        entry_prices = cont_bars.group_by("entry_id", maintain_order=True).agg(
+            pl.col("close").first().alias("continuation_entry_price")
         )
 
         # Trailing stop: track running peak, fire when close <= peak * (1 - pct)
@@ -1209,13 +1250,14 @@ class ExitScanner:
 
         # First trailing-stop bar per entry
         ts_exits = (
-            monitored
-            .filter(pl.col("_ts_hit"))
+            monitored.filter(pl.col("_ts_hit"))
             .group_by("entry_id", maintain_order=True)
-            .agg([
-                pl.col("ts_event").first().alias("continuation_exit_time"),
-                pl.col("close").first().alias("continuation_exit_price"),
-            ])
+            .agg(
+                [
+                    pl.col("ts_event").first().alias("continuation_exit_time"),
+                    pl.col("close").first().alias("continuation_exit_price"),
+                ]
+            )
             .with_columns(pl.lit("trailing_stop").alias("continuation_exit_reason"))
         )
 
@@ -1231,16 +1273,12 @@ class ExitScanner:
             underlying_id = self._opt_to_underlying.get(opt_id)
             settlement = (
                 self._settlement_closes_by_key.get((underlying_id, leg_exp))
-                if underlying_id is not None else None
+                if underlying_id is not None
+                else None
             )
 
             # Last bar before/at expiry as fallback when no settlement price
-            last_bar = (
-                cont_bars
-                .filter(pl.col("entry_id") == eid)
-                .sort("ts_event")
-                .tail(1)
-            )
+            last_bar = cont_bars.filter(pl.col("entry_id") == eid).sort("ts_event").tail(1)
             if last_bar.is_empty():
                 continue
 
@@ -1258,12 +1296,14 @@ class ExitScanner:
             else:
                 exit_price = last_close
 
-            expiry_rows.append({
-                "entry_id": eid,
-                "continuation_exit_time": last_ts,
-                "continuation_exit_price": exit_price,
-                "continuation_exit_reason": "expiry_continuation",
-            })
+            expiry_rows.append(
+                {
+                    "entry_id": eid,
+                    "continuation_exit_time": last_ts,
+                    "continuation_exit_price": exit_price,
+                    "continuation_exit_reason": "expiry_continuation",
+                }
+            )
 
         result_parts: list[pl.DataFrame] = [ts_exits]
         if expiry_rows:
@@ -1274,13 +1314,15 @@ class ExitScanner:
             )
 
         continuation = pl.concat(result_parts).join(entry_prices, on="entry_id", how="left")
-        return continuation.select([
-            "entry_id",
-            "continuation_entry_price",
-            "continuation_exit_time",
-            "continuation_exit_price",
-            "continuation_exit_reason",
-        ])
+        return continuation.select(
+            [
+                "entry_id",
+                "continuation_entry_price",
+                "continuation_exit_time",
+                "continuation_exit_price",
+                "continuation_exit_reason",
+            ]
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -1353,9 +1395,7 @@ class ExitScanner:
 
         # Attach settlement price per entry, then compute the intrinsic sum
         # vectorially in Polars.
-        settlement_prices = [
-            settlement_by_date.get(d) for d in entry_exps["_trade_exp"].to_list()
-        ]
+        settlement_prices = [settlement_by_date.get(d) for d in entry_exps["_trade_exp"].to_list()]
         entry_with_s = entries.join(
             entry_exps.with_columns(
                 pl.Series("_settlement", settlement_prices, dtype=pl.Float64)
@@ -1366,9 +1406,7 @@ class ExitScanner:
 
         intrinsic_exprs: list[pl.Expr] = []
         for leg in self.trade.legs:
-            signed_qty = (
-                (1.0 if leg.action == "sell_to_open" else -1.0) * float(leg.quantity)
-            )
+            signed_qty = (1.0 if leg.action == "sell_to_open" else -1.0) * float(leg.quantity)
             strike_col = f"leg_{leg.name}_strike_price"
             right_col = f"leg_{leg.name}_right"
             call_intr = (pl.col("_settlement") - pl.col(strike_col)).clip(lower_bound=0.0)

@@ -9,9 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from textwrap import dedent
 
-import pytest
-
-from btkit.study.definition import StudyDefinition, StrategyRef
+from btkit.study.definition import StrategyRef, StudyDefinition
 from btkit.study.expander import StudyExpander
 
 
@@ -52,24 +50,18 @@ class TestNoneStopLoss:
         """
 
     def test_none_and_value_produces_two_combinations(self, tmp_path):
-        expander = _write_strategy(
-            tmp_path, self._YAML.format(stop_loss="[null, 2.0]")
-        )
+        expander = _write_strategy(tmp_path, self._YAML.format(stop_loss="[null, 2.0]"))
         assert len(expander.combinations) == 2
 
     def test_none_combination_has_null_stop_loss(self, tmp_path):
-        expander = _write_strategy(
-            tmp_path, self._YAML.format(stop_loss="[null, 2.0]")
-        )
+        expander = _write_strategy(tmp_path, self._YAML.format(stop_loss="[null, 2.0]"))
         combos = expander.combinations
         sl_values = [defn.trades[0].exit.stop_loss for _, defn in combos]
         assert sl_values[0] is None
         assert float(sl_values[1]) == 2.0  # type: ignore[arg-type]
 
     def test_three_values_including_none(self, tmp_path):
-        expander = _write_strategy(
-            tmp_path, self._YAML.format(stop_loss="[null, 1.5, 2.0]")
-        )
+        expander = _write_strategy(tmp_path, self._YAML.format(stop_loss="[null, 1.5, 2.0]"))
         combos = expander.combinations
         assert len(combos) == 3
         sl_values = [defn.trades[0].exit.stop_loss for _, defn in combos]
@@ -86,16 +78,12 @@ class TestNoneStopLoss:
         assert defn.is_parameterized()
 
     def test_combination_ids_sequential(self, tmp_path):
-        expander = _write_strategy(
-            tmp_path, self._YAML.format(stop_loss="[null, 2.0]")
-        )
+        expander = _write_strategy(tmp_path, self._YAML.format(stop_loss="[null, 2.0]"))
         ids = [cid for cid, _ in expander.combinations]
         assert ids == [1, 2]
 
     def test_all_combinations_fully_scalar(self, tmp_path):
-        expander = _write_strategy(
-            tmp_path, self._YAML.format(stop_loss="[null, 2.0]")
-        )
+        expander = _write_strategy(tmp_path, self._YAML.format(stop_loss="[null, 2.0]"))
         for _, defn in expander.combinations:
             assert not defn.is_parameterized()
 
@@ -130,15 +118,11 @@ class TestNoneTakeProfit:
         """
 
     def test_none_and_value_produces_two_combinations(self, tmp_path):
-        expander = _write_strategy(
-            tmp_path, self._YAML.format(take_profit="[null, 0.50]")
-        )
+        expander = _write_strategy(tmp_path, self._YAML.format(take_profit="[null, 0.50]"))
         assert len(expander.combinations) == 2
 
     def test_none_combination_has_null_take_profit(self, tmp_path):
-        expander = _write_strategy(
-            tmp_path, self._YAML.format(take_profit="[null, 0.50]")
-        )
+        expander = _write_strategy(tmp_path, self._YAML.format(take_profit="[null, 0.50]"))
         combos = expander.combinations
         tp_values = [defn.trades[0].exit.take_profit for _, defn in combos]
         assert tp_values[0] is None
@@ -175,15 +159,11 @@ class TestNoneTakeProfitPct:
         """
 
     def test_none_and_pct_produces_two_combinations(self, tmp_path):
-        expander = _write_strategy(
-            tmp_path, self._YAML.format(take_profit_pct="[null, 0.70]")
-        )
+        expander = _write_strategy(tmp_path, self._YAML.format(take_profit_pct="[null, 0.70]"))
         assert len(expander.combinations) == 2
 
     def test_none_combination_has_null_pct(self, tmp_path):
-        expander = _write_strategy(
-            tmp_path, self._YAML.format(take_profit_pct="[null, 0.70]")
-        )
+        expander = _write_strategy(tmp_path, self._YAML.format(take_profit_pct="[null, 0.70]"))
         combos = expander.combinations
         pct_values = [defn.trades[0].exit.take_profit_pct for _, defn in combos]
         assert pct_values[0] is None
@@ -244,8 +224,10 @@ class TestCrossNoneSweep:
 
     def test_no_sl_no_tp_combination_exists(self, tmp_path):
         expander = _cross_sweep_expander(tmp_path)
-        combos = [(defn.trades[0].exit.stop_loss, defn.trades[0].exit.take_profit_pct)
-                  for _, defn in expander.combinations]
+        combos = [
+            (defn.trades[0].exit.stop_loss, defn.trades[0].exit.take_profit_pct)
+            for _, defn in expander.combinations
+        ]
         assert (None, None) in combos
 
     def test_all_sl_tp_pairs_present(self, tmp_path):
@@ -297,8 +279,7 @@ class TestTableCombinationsWithNone:
         combos = expander.combinations
         assert len(combos) == 3
         results = [
-            (defn.trades[0].exit.stop_loss, defn.trades[0].exit.take_profit)
-            for _, defn in combos
+            (defn.trades[0].exit.stop_loss, defn.trades[0].exit.take_profit) for _, defn in combos
         ]
         assert results[0] == (None, 0.50)
         assert results[1] == (2.0, None)

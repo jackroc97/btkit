@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from btkit.study.definition import StrategyRef, StudyDefinition
 from btkit.study.expander import StudyExpander
-from btkit.study.definition import StudyDefinition, StrategyRef
 
 STRATEGIES_DIR = Path(__file__).parent.parent / "fixtures" / "strategies"
 STUDIES_DIR = Path(__file__).parent.parent / "fixtures" / "studies"
@@ -68,9 +68,7 @@ strategy:
 """
         f = tmp_path / "sweep.yaml"
         f.write_text(yaml)
-        study = StudyDefinition(
-            name="s", strategies=[StrategyRef(path="sweep.yaml")]
-        )
+        study = StudyDefinition(name="s", strategies=[StrategyRef(path="sweep.yaml")])
         expander = StudyExpander(study, tmp_path)
         combos = expander.combinations
         # 3 deltas × 2 stop_losses = 6 combinations
@@ -216,6 +214,7 @@ class TestMultiStrategy:
     def test_multi_strategy_concatenated(self, tmp_path):
         # Two scalar strategies → 2 combinations
         import shutil
+
         shutil.copy(STRATEGIES_DIR / "short_put_spread.yaml", tmp_path / "a.yaml")
         shutil.copy(STRATEGIES_DIR / "short_put_spread.yaml", tmp_path / "b.yaml")
         study = StudyDefinition(
@@ -253,6 +252,7 @@ strategy:
         take_profit: 1.0
 """
         import shutil
+
         (tmp_path / "sweep.yaml").write_text(sweep_yaml)
         shutil.copy(STRATEGIES_DIR / "short_put_spread.yaml", tmp_path / "scalar.yaml")
         study = StudyDefinition(

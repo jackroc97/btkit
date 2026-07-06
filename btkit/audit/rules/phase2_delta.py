@@ -20,11 +20,11 @@ progress_cb: optional callable(done: int, total: int) invoked after each date
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Callable
 
-import numpy as np
 import duckdb
+import numpy as np
 import polars as pl
 
 from btkit.audit.schema import empty_audit_df
@@ -125,14 +125,16 @@ def run(
 
         flagged = df.filter(pl.Series(mask))
         n = int(mask.sum())
-        return pl.DataFrame({
-            "instrument_id": flagged["instrument_id"],
-            "ts_event":      flagged["ts_event"],
-            "flag_code":     pl.Series(["DELTA_INCONSISTENT"] * n, dtype=pl.Utf8),
-            "flag_severity": pl.Series(["soft"] * n, dtype=pl.Utf8),
-            "flag_value":    pl.Series(diff[mask], dtype=pl.Float64),
-            "threshold":     pl.Series([THRESHOLD] * n, dtype=pl.Float64),
-        })
+        return pl.DataFrame(
+            {
+                "instrument_id": flagged["instrument_id"],
+                "ts_event": flagged["ts_event"],
+                "flag_code": pl.Series(["DELTA_INCONSISTENT"] * n, dtype=pl.Utf8),
+                "flag_severity": pl.Series(["soft"] * n, dtype=pl.Utf8),
+                "flag_value": pl.Series(diff[mask], dtype=pl.Float64),
+                "threshold": pl.Series([THRESHOLD] * n, dtype=pl.Float64),
+            }
+        )
 
     def _drain_one() -> None:
         nonlocal completed

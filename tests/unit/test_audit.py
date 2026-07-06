@@ -7,33 +7,32 @@ and exercises one phase (or utility) in isolation.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import duckdb
 import numpy as np
 import polars as pl
 import pytest
 
-from btkit.audit.schema import (
-    FlagCode,
-    FlagSeverity,
-    HARD_FLAGS,
-    SOFT_FLAGS,
-    FLAG_SEVERITY,
-    resolve_audit_filter,
-)
 from btkit.audit.rules import phase1_iv, phase2_delta, phase3_coverage, phase4_integrity
 from btkit.audit.runner import AuditRunner
-
+from btkit.audit.schema import (
+    FLAG_SEVERITY,
+    HARD_FLAGS,
+    SOFT_FLAGS,
+    FlagCode,
+    FlagSeverity,
+    resolve_audit_filter,
+)
 
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-TS = datetime(2024, 1, 10, 14, 0, 0, tzinfo=timezone.utc)
-TS2 = datetime(2024, 1, 11, 14, 0, 0, tzinfo=timezone.utc)
-EXP_NEAR = date(2024, 2, 16)   # 37 days from TS
-EXP_FAR = date(2024, 3, 15)    # 65 days from TS
+TS = datetime(2024, 1, 10, 14, 0, 0, tzinfo=UTC)
+TS2 = datetime(2024, 1, 11, 14, 0, 0, tzinfo=UTC)
+EXP_NEAR = date(2024, 2, 16)  # 37 days from TS
+EXP_FAR = date(2024, 3, 15)  # 65 days from TS
 
 
 def _make_con() -> duckdb.DuckDBPyConnection:
@@ -119,9 +118,16 @@ def _base_greek(
     vega=0.30,
 ):
     return dict(
-        ts_event=ts, instrument_id=iid, underlying_id=uid,
-        dte=dte, T=T, iv=iv, delta=delta,
-        gamma=gamma, theta=theta, vega=vega,
+        ts_event=ts,
+        instrument_id=iid,
+        underlying_id=uid,
+        dte=dte,
+        T=T,
+        iv=iv,
+        delta=delta,
+        gamma=gamma,
+        theta=theta,
+        vega=vega,
     )
 
 
@@ -137,16 +143,26 @@ def _base_bar(
     close=10.0,
 ):
     return dict(
-        ts_event=ts, instrument_id=iid, underlying_id=uid,
-        symbol=symbol, expiration=expiration,
-        strike_price=strike, right=right, multiplier=multiplier,
-        open=close, high=close, low=close, close=close, volume=100,
+        ts_event=ts,
+        instrument_id=iid,
+        underlying_id=uid,
+        symbol=symbol,
+        expiration=expiration,
+        strike_price=strike,
+        right=right,
+        multiplier=multiplier,
+        open=close,
+        high=close,
+        low=close,
+        close=close,
+        volume=100,
     )
 
 
 # ---------------------------------------------------------------------------
 # Schema / utility tests
 # ---------------------------------------------------------------------------
+
 
 class TestSchema:
     def test_hard_soft_disjoint(self):
@@ -191,13 +207,17 @@ class TestResolveAuditFilter:
 # Phase 1 — IV flags
 # ---------------------------------------------------------------------------
 
+
 class TestPhase1IV:
     def test_iv_nan_flagged(self):
         con = _make_con()
-        _insert_option_greeks(con, [
-            _base_greek(iid=1, iv=float("nan")),
-            _base_greek(iid=2, iv=0.20),  # clean
-        ])
+        _insert_option_greeks(
+            con,
+            [
+                _base_greek(iid=1, iv=float("nan")),
+                _base_greek(iid=2, iv=0.20),  # clean
+            ],
+        )
         result = phase1_iv.run(con)
         assert set(result["instrument_id"].to_list()) == {1}
         assert result["flag_code"][0] == "IV_NAN"
@@ -234,10 +254,13 @@ class TestPhase1IV:
     def test_multiple_flags_per_instrument(self):
         # Two rows for same instrument: one NaN, one sentinel
         con = _make_con()
-        _insert_option_greeks(con, [
-            _base_greek(iid=3, ts=TS, iv=float("nan")),
-            _base_greek(iid=3, ts=TS2, iv=10.0),
-        ])
+        _insert_option_greeks(
+            con,
+            [
+                _base_greek(iid=3, ts=TS, iv=float("nan")),
+                _base_greek(iid=3, ts=TS2, iv=10.0),
+            ],
+        )
         result = phase1_iv.run(con)
         assert len(result) == 2
         codes = set(result["flag_code"].to_list())
@@ -248,6 +271,7 @@ class TestPhase1IV:
 # Phase 2 — Delta consistency
 # ---------------------------------------------------------------------------
 
+
 class TestPhase2Delta:
     def _setup(self, reported_delta: float, right: str = "P"):
         """
@@ -256,28 +280,48 @@ class TestPhase2Delta:
         """
         con = _make_con()
         # strike 5000, underlying 5200 (OTM put), iv=0.20, T=0.10 → delta ≈ -0.12 (approx)
-        _insert_option_greeks(con, [
-            _base_greek(iid=1, uid=100, iv=0.20, T=0.10, delta=reported_delta),
-        ])
-        _insert_option_bars(con, [
-            _base_bar(iid=1, uid=100, strike=5000.0, right=right),
-        ])
-        _insert_underlying_bars(con, [{
-            "ts_event": TS, "instrument_id": 100,
-            "symbol": "ES", "expiration": None,
-            "open": 5200.0, "high": 5200.0, "low": 5200.0, "close": 5200.0,
-            "volume": 1000,
-        }])
+        _insert_option_greeks(
+            con,
+            [
+                _base_greek(iid=1, uid=100, iv=0.20, T=0.10, delta=reported_delta),
+            ],
+        )
+        _insert_option_bars(
+            con,
+            [
+                _base_bar(iid=1, uid=100, strike=5000.0, right=right),
+            ],
+        )
+        _insert_underlying_bars(
+            con,
+            [
+                {
+                    "ts_event": TS,
+                    "instrument_id": 100,
+                    "symbol": "ES",
+                    "expiration": None,
+                    "open": 5200.0,
+                    "high": 5200.0,
+                    "low": 5200.0,
+                    "close": 5200.0,
+                    "volume": 1000,
+                }
+            ],
+        )
         return con
 
     def test_consistent_delta_not_flagged(self):
         # Compute Black-76 delta first with known params then use it as reported
         from btkit.pipeline.greeks import _greeks
-        import numpy as np
+
         F, K, T, r, iv = 5200.0, 5000.0, 0.10, 0.01, 0.20
         theoretical, _, _, _ = _greeks(
-            np.array([F]), np.array([K]), np.array([T]),
-            np.array([r]), np.array([iv]), np.array([0], dtype=np.int64),
+            np.array([F]),
+            np.array([K]),
+            np.array([T]),
+            np.array([r]),
+            np.array([iv]),
+            np.array([0], dtype=np.int64),
         )
         con = self._setup(reported_delta=float(theoretical[0]))
         result = phase2_delta.run(con)
@@ -311,6 +355,7 @@ class TestPhase2Delta:
 # Phase 3 — Coverage flags
 # ---------------------------------------------------------------------------
 
+
 class TestPhase3Coverage:
     def _insert_bars_for_instrument(
         self,
@@ -323,21 +368,26 @@ class TestPhase3Coverage:
         rows = []
         for d in days:
             for h in range(bars_per_day):
-                ts = datetime(d.year, d.month, d.day, 9, 30 + h, 0, tzinfo=timezone.utc)
-                rows.append(_base_bar(
-                    ts=ts, iid=iid, expiration=expiration, close=5.0,
-                ))
+                ts = datetime(d.year, d.month, d.day, 9, 30 + h, 0, tzinfo=UTC)
+                rows.append(
+                    _base_bar(
+                        ts=ts,
+                        iid=iid,
+                        expiration=expiration,
+                        close=5.0,
+                    )
+                )
         _insert_option_bars(con, rows)
 
     def test_bars_truncated_flagged(self):
         # observable_life = 40 days, last bar is 20 days before expiry → ratio = 0.50 > 0.15
         con = _make_con()
         first = date(2024, 1, 10)
-        last = date(2024, 2, 5)    # 20 days before expiration
+        last = date(2024, 2, 5)  # 20 days before expiration
         expiration = date(2024, 2, 25)
         # Only insert first and last day (for simplicity)
         for d in [first, last]:
-            ts = datetime(d.year, d.month, d.day, 14, 0, 0, tzinfo=timezone.utc)
+            ts = datetime(d.year, d.month, d.day, 14, 0, 0, tzinfo=UTC)
             _insert_option_bars(con, [_base_bar(ts=ts, iid=1, expiration=expiration)])
         result = phase3_coverage.run(con)
         truncated = result.filter(pl.col("flag_code") == "BARS_TRUNCATED")
@@ -350,7 +400,7 @@ class TestPhase3Coverage:
         con = _make_con()
         expiration = date(2024, 2, 25)
         for d in [date(2024, 1, 16), date(2024, 2, 23)]:
-            ts = datetime(d.year, d.month, d.day, 14, 0, 0, tzinfo=timezone.utc)
+            ts = datetime(d.year, d.month, d.day, 14, 0, 0, tzinfo=UTC)
             _insert_option_bars(con, [_base_bar(ts=ts, iid=1, expiration=expiration)])
         result = phase3_coverage.run(con)
         truncated = result.filter(pl.col("flag_code") == "BARS_TRUNCATED")
@@ -361,7 +411,7 @@ class TestPhase3Coverage:
         con = _make_con()
         expiration = date(2024, 3, 15)
         for d in [date(2024, 1, 10), date(2024, 1, 11)]:
-            ts = datetime(d.year, d.month, d.day, 10, 0, 0, tzinfo=timezone.utc)
+            ts = datetime(d.year, d.month, d.day, 10, 0, 0, tzinfo=UTC)
             _insert_option_bars(con, [_base_bar(ts=ts, iid=2, expiration=expiration)])
         result = phase3_coverage.run(con)
         sparse = result.filter(pl.col("flag_code") == "BARS_SPARSE")
@@ -373,7 +423,7 @@ class TestPhase3Coverage:
         con = _make_con()
         expiration = date(2024, 2, 16)
         for d in [date(2024, 1, 10), date(2024, 2, 15)]:
-            ts = datetime(d.year, d.month, d.day, 14, 0, 0, tzinfo=timezone.utc)
+            ts = datetime(d.year, d.month, d.day, 14, 0, 0, tzinfo=UTC)
             _insert_option_bars(con, [_base_bar(ts=ts, iid=3, expiration=expiration)])
         result = phase3_coverage.run(con)
         no_exp = result.filter(pl.col("flag_code") == "NO_EXPIRY_BARS")
@@ -384,7 +434,7 @@ class TestPhase3Coverage:
         con = _make_con()
         expiration = date(2024, 2, 16)
         for d in [date(2024, 1, 10), expiration]:
-            ts = datetime(d.year, d.month, d.day, 14, 0, 0, tzinfo=timezone.utc)
+            ts = datetime(d.year, d.month, d.day, 14, 0, 0, tzinfo=UTC)
             _insert_option_bars(con, [_base_bar(ts=ts, iid=4, expiration=expiration)])
         result = phase3_coverage.run(con)
         no_exp = result.filter(pl.col("flag_code") == "NO_EXPIRY_BARS")
@@ -394,6 +444,7 @@ class TestPhase3Coverage:
 # ---------------------------------------------------------------------------
 # Phase 4 — Integrity flags
 # ---------------------------------------------------------------------------
+
 
 class TestPhase4Integrity:
     def test_negative_close_flagged(self):
@@ -421,10 +472,8 @@ class TestPhase4Integrity:
     def test_zombie_bar_flagged(self):
         # ts_event is 1 day after expiration
         con = _make_con()
-        expired = date(2024, 1, 9)   # expiry in the past relative to TS
-        _insert_option_bars(con, [
-            _base_bar(iid=3, ts=TS, expiration=expired)
-        ])
+        expired = date(2024, 1, 9)  # expiry in the past relative to TS
+        _insert_option_bars(con, [_base_bar(iid=3, ts=TS, expiration=expired)])
         result = phase4_integrity.run(con)
         zombie = result.filter(pl.col("flag_code") == "ZOMBIE_BAR")
         assert len(zombie) == 1
@@ -477,6 +526,7 @@ class TestPhase4Integrity:
 # ---------------------------------------------------------------------------
 # AuditRunner integration
 # ---------------------------------------------------------------------------
+
 
 class TestAuditRunner:
     def _build_db(self, tmp_path) -> str:
@@ -544,8 +594,7 @@ class TestAuditRunner:
 
         con = duckdb.connect(db_path, read_only=True)
         table_exists = con.execute(
-            "SELECT COUNT(*) FROM information_schema.tables "
-            "WHERE table_name = 'option_audit'"
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'option_audit'"
         ).fetchone()[0]
         con.close()
         assert table_exists == 0

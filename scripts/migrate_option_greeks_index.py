@@ -28,8 +28,7 @@ def migrate(db_path: str) -> None:
     print("Creating idx_option_greeks_lookup (underlying_id, dte, ts_event) ...")
     t0 = time.perf_counter()
     con.execute(
-        "CREATE INDEX idx_option_greeks_lookup "
-        "ON option_greeks (underlying_id, dte, ts_event)"
+        "CREATE INDEX idx_option_greeks_lookup ON option_greeks (underlying_id, dte, ts_event)"
     )
     print(f"  created in {time.perf_counter() - t0:.1f}s")
 

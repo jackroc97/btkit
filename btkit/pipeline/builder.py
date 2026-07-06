@@ -50,7 +50,7 @@ import time
 import zipfile
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import duckdb
@@ -226,12 +226,8 @@ class DatabaseBuilder:
                     existing = self._instrument_map.get(iid)
                     if existing is None:
                         self._instrument_map[iid] = info
-                    elif (
-                        info.expiration is not None
-                        and (
-                            existing.expiration is None
-                            or info.expiration > existing.expiration
-                        )
+                    elif info.expiration is not None and (
+                        existing.expiration is None or info.expiration > existing.expiration
                     ):
                         # Later-expiration wins: handles Databento instrument ID
                         # recycling where an expired option's ID is reused for a
@@ -315,28 +311,23 @@ class DatabaseBuilder:
 
         # Pre-compute the max timestamp already in each table (once, before the loop).
         if self.append:
-            from datetime import timezone as _tz
-            ub_cutoff = self._con.execute(
-                "SELECT MAX(ts_event) FROM underlying_bars"
-            ).fetchone()[0]
-            ob_cutoff = self._con.execute(
-                "SELECT MAX(ts_event) FROM option_bars"
-            ).fetchone()[0]
+            ub_cutoff = self._con.execute("SELECT MAX(ts_event) FROM underlying_bars").fetchone()[0]
+            ob_cutoff = self._con.execute("SELECT MAX(ts_event) FROM option_bars").fetchone()[0]
             if ub_cutoff is not None:
-                ub_cutoff = ub_cutoff.astimezone(_tz.utc)
+                ub_cutoff = ub_cutoff.astimezone(UTC)
             if ob_cutoff is not None:
-                ob_cutoff = ob_cutoff.astimezone(_tz.utc)
+                ob_cutoff = ob_cutoff.astimezone(UTC)
             if ub_cutoff:
-                print(f"[ingest] existing coverage up to {ub_cutoff.date()} — "
-                      f"skipping NOT EXISTS for newer rows")
+                print(
+                    f"[ingest] existing coverage up to {ub_cutoff.date()} — "
+                    f"skipping NOT EXISTS for newer rows"
+                )
         else:
             ub_cutoff = ob_cutoff = None
 
         symbol_df = pl.DataFrame(
             {
-                "instrument_id": pl.Series(
-                    list(self._instrument_map.keys()), dtype=pl.Int64
-                ),
+                "instrument_id": pl.Series(list(self._instrument_map.keys()), dtype=pl.Int64),
                 "symbol": pl.Series(
                     [info.raw_symbol for info in self._instrument_map.values()],
                     dtype=pl.Utf8,
@@ -357,61 +348,98 @@ class DatabaseBuilder:
                     print(
                         f"\r[ingest] {completed}/{len(work_units)}  "
                         f"ub={total_ub:,}  ob={total_ob:,}",
-                        end="", flush=True,
+                        end="",
+                        flush=True,
                     )
                     continue
 
-                ohlcv = pl.concat(frames).unique(
-                    subset=["ts_event", "instrument_id"], keep="first"
-                )
+                ohlcv = pl.concat(frames).unique(subset=["ts_event", "instrument_id"], keep="first")
                 del frames
 
                 ohlcv = ohlcv.join(symbol_df, on="instrument_id", how="left")
 
                 # ── Underlying bars ────────────────────────────────────────
-                ub_raw = ohlcv.filter(
-                    pl.col("instrument_id").is_in(underlying_ids)
-                ).select(
-                    ["ts_event", "instrument_id", "symbol",
-                     "open", "high", "low", "close", "volume"]
+                ub_raw = ohlcv.filter(pl.col("instrument_id").is_in(underlying_ids)).select(
+                    [
+                        "ts_event",
+                        "instrument_id",
+                        "symbol",
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                        "volume",
+                    ]
                 )
                 ub = ub_raw.join(futures_meta, on="instrument_id", how="left").select(
-                    ["ts_event", "instrument_id", "symbol", "expiration",
-                     "open", "high", "low", "close", "volume"]
+                    [
+                        "ts_event",
+                        "instrument_id",
+                        "symbol",
+                        "expiration",
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                        "volume",
+                    ]
                 )
 
                 # ── Option bars ────────────────────────────────────────────
                 opt_raw = ohlcv.filter(pl.col("instrument_id").is_in(option_ids))
                 if not opt_raw.is_empty():
                     ob = opt_raw.join(opt_meta, on="instrument_id", how="left").select(
-                        ["ts_event", "instrument_id", "underlying_id", "symbol",
-                         "expiration", "strike_price", "right", "multiplier",
-                         "open", "high", "low", "close", "volume"]
+                        [
+                            "ts_event",
+                            "instrument_id",
+                            "underlying_id",
+                            "symbol",
+                            "expiration",
+                            "strike_price",
+                            "right",
+                            "multiplier",
+                            "open",
+                            "high",
+                            "low",
+                            "close",
+                            "volume",
+                        ]
                     )
                 else:
-                    ob = pl.DataFrame(schema={
-                        "ts_event": pl.Datetime("us", "UTC"), "instrument_id": pl.Int64,
-                        "underlying_id": pl.Int64, "symbol": pl.Utf8,
-                        "expiration": pl.Date, "strike_price": pl.Float64,
-                        "right": pl.Utf8, "multiplier": pl.Int64,
-                        "open": pl.Float64, "high": pl.Float64, "low": pl.Float64,
-                        "close": pl.Float64, "volume": pl.Int64,
-                    })
+                    ob = pl.DataFrame(
+                        schema={
+                            "ts_event": pl.Datetime("us", "UTC"),
+                            "instrument_id": pl.Int64,
+                            "underlying_id": pl.Int64,
+                            "symbol": pl.Utf8,
+                            "expiration": pl.Date,
+                            "strike_price": pl.Float64,
+                            "right": pl.Utf8,
+                            "multiplier": pl.Int64,
+                            "open": pl.Float64,
+                            "high": pl.Float64,
+                            "low": pl.Float64,
+                            "close": pl.Float64,
+                            "volume": pl.Int64,
+                        }
+                    )
 
                 del ohlcv, opt_raw
 
-                _write_df(self._con, "underlying_bars", ub,
-                          skip_existing=self.append, cutoff_ts=ub_cutoff)
-                _write_df(self._con, "option_bars", ob,
-                          skip_existing=self.append, cutoff_ts=ob_cutoff)
+                _write_df(
+                    self._con, "underlying_bars", ub, skip_existing=self.append, cutoff_ts=ub_cutoff
+                )
+                _write_df(
+                    self._con, "option_bars", ob, skip_existing=self.append, cutoff_ts=ob_cutoff
+                )
                 total_ub += len(ub)
                 total_ob += len(ob)
                 del ub, ob
 
                 print(
-                    f"\r[ingest] {completed}/{len(work_units)}  "
-                    f"ub={total_ub:,}  ob={total_ob:,}",
-                    end="", flush=True,
+                    f"\r[ingest] {completed}/{len(work_units)}  ub={total_ub:,}  ob={total_ob:,}",
+                    end="",
+                    flush=True,
                 )
 
         print(f"\n[ingest] Wrote {total_ub:,} underlying bars, {total_ob:,} option bars")
@@ -537,7 +565,7 @@ def _scan_definition_file(work: tuple[Path, str]) -> dict[int, _InstrumentInfo]:
         icls = row["instrument_class"].decode("ascii")
         exp_ns = int(row["expiration"])
         exp_date = (
-            datetime.fromtimestamp(exp_ns / 1_000_000_000, tz=timezone.utc).date()
+            datetime.fromtimestamp(exp_ns / 1_000_000_000, tz=UTC).date()
             if 0 < exp_ns < 9_000_000_000_000_000_000
             else None
         )
@@ -596,14 +624,13 @@ def _dbn_to_polars(store) -> pl.DataFrame:
     return pl.DataFrame(
         {
             "ts_event": (
-                pl.Series(arr["ts_event"].astype(np.int64) // 1_000)
-                .cast(pl.Datetime("us", "UTC"))
+                pl.Series(arr["ts_event"].astype(np.int64) // 1_000).cast(pl.Datetime("us", "UTC"))
             ),
             "instrument_id": pl.Series(arr["instrument_id"].astype(np.int64)),
-            "open":   pl.Series(arr["open"].astype(np.float64))  / 1e9,
-            "high":   pl.Series(arr["high"].astype(np.float64))  / 1e9,
-            "low":    pl.Series(arr["low"].astype(np.float64))   / 1e9,
-            "close":  pl.Series(arr["close"].astype(np.float64)) / 1e9,
+            "open": pl.Series(arr["open"].astype(np.float64)) / 1e9,
+            "high": pl.Series(arr["high"].astype(np.float64)) / 1e9,
+            "low": pl.Series(arr["low"].astype(np.float64)) / 1e9,
+            "close": pl.Series(arr["close"].astype(np.float64)) / 1e9,
             "volume": pl.Series(arr["volume"].astype(np.int64)),
         }
     )

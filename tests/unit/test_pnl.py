@@ -136,23 +136,25 @@ def _make_entries_2leg(
         "dte_exit": pl.Series([None], dtype=pl.Int32),
     }
     for leg_name in ("short_put", "long_put"):
-        row.update({
-            f"leg_{leg_name}_instrument_id": [1001],
-            f"leg_{leg_name}_symbol": [f"EW3K6 P4300"],
-            f"leg_{leg_name}_expiration": pl.Series(["2026-01-17"], dtype=pl.Date),
-            f"leg_{leg_name}_strike_price": [4300.0],
-            f"leg_{leg_name}_right": ["P"],
-            f"leg_{leg_name}_action": ["sell_to_open"],
-            f"leg_{leg_name}_quantity": [1],
-            f"leg_{leg_name}_multiplier": [multiplier],
-            f"leg_{leg_name}_close": [5.0],
-            f"leg_{leg_name}_delta": [-0.25],
-            f"leg_{leg_name}_iv": [0.20],
-            f"leg_{leg_name}_gamma": [0.01],
-            f"leg_{leg_name}_theta": [-0.05],
-            f"leg_{leg_name}_vega": [10.0],
-            f"leg_{leg_name}_dte": [21],
-        })
+        row.update(
+            {
+                f"leg_{leg_name}_instrument_id": [1001],
+                f"leg_{leg_name}_symbol": ["EW3K6 P4300"],
+                f"leg_{leg_name}_expiration": pl.Series(["2026-01-17"], dtype=pl.Date),
+                f"leg_{leg_name}_strike_price": [4300.0],
+                f"leg_{leg_name}_right": ["P"],
+                f"leg_{leg_name}_action": ["sell_to_open"],
+                f"leg_{leg_name}_quantity": [1],
+                f"leg_{leg_name}_multiplier": [multiplier],
+                f"leg_{leg_name}_close": [5.0],
+                f"leg_{leg_name}_delta": [-0.25],
+                f"leg_{leg_name}_iv": [0.20],
+                f"leg_{leg_name}_gamma": [0.01],
+                f"leg_{leg_name}_theta": [-0.05],
+                f"leg_{leg_name}_vega": [10.0],
+                f"leg_{leg_name}_dte": [21],
+            }
+        )
     return pl.DataFrame(row)
 
 
@@ -467,5 +469,5 @@ class TestStructuredFees:
         exits = _make_exits(exit_mark=4.0, exit_reason="take_profit")
         result = calc.compute({"trade1": entries}, {"trade1": exits})
         gross = (5.0 - 4.0) * 50.0  # 50.0
-        fee = (0.65 + 0.65) * 2     # 2.60
+        fee = (0.65 + 0.65) * 2  # 2.60
         assert result.positions["net_pnl"][0] == pytest.approx(gross - fee)

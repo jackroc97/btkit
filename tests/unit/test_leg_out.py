@@ -44,9 +44,7 @@ def _make_scanner(leg_out: bool = True) -> ExitScanner:
             TradeDefinition(
                 name="put_spread",
                 instrument=InstrumentConfig(root_symbol="ES", asset_class="future"),
-                entry=EntryConfig(
-                    window=EntryWindowConfig(start=time(9, 30), end=time(10, 0))
-                ),
+                entry=EntryConfig(window=EntryWindowConfig(start=time(9, 30), end=time(10, 0))),
                 legs=[
                     LegConfig(
                         name="short_put",
@@ -113,7 +111,7 @@ class TestAdjustLegOutExits:
         if long_fill_close is not None:
             rows.append((_ts(11, 31), 102, long_fill_close))
 
-        ts, instr, close = zip(*rows)
+        ts, instr, close = zip(*rows, strict=False)
         return pl.DataFrame(
             {
                 "ts_event": pl.Series(list(ts), dtype=pl.Datetime("us", "UTC")),
@@ -170,9 +168,7 @@ class TestAdjustLegOutExits:
         entries = pl.DataFrame(
             {
                 "entry_id": pl.Series([1, 2], dtype=pl.UInt32),
-                "entry_time": pl.Series(
-                    [_ts(9, 45), _ts(9, 46)], dtype=pl.Datetime("us", "UTC")
-                ),
+                "entry_time": pl.Series([_ts(9, 45), _ts(9, 46)], dtype=pl.Datetime("us", "UTC")),
                 "leg_short_put_instrument_id": pl.Series([101, 103], dtype=pl.Int64),
                 "leg_long_put_instrument_id": pl.Series([102, 104], dtype=pl.Int64),
                 "leg_short_put_expiration": pl.Series(
@@ -186,9 +182,7 @@ class TestAdjustLegOutExits:
         exits = pl.DataFrame(
             {
                 "entry_id": pl.Series([1, 2], dtype=pl.UInt32),
-                "exit_time": pl.Series(
-                    [_ts(11, 30), _ts(15, 59)], dtype=pl.Datetime("us", "UTC")
-                ),
+                "exit_time": pl.Series([_ts(11, 30), _ts(15, 59)], dtype=pl.Datetime("us", "UTC")),
                 "exit_mark": pl.Series([0.10, 0.40], dtype=pl.Float64),
                 "worst_mark": pl.Series([0.30, 0.50], dtype=pl.Float64),
                 "exit_reason": pl.Series(["take_profit", "expiry"], dtype=pl.Utf8),
@@ -230,9 +224,7 @@ class TestAdjustLegOutExits:
                 TradeDefinition(
                     name="naked_put",
                     instrument=InstrumentConfig(root_symbol="ES", asset_class="future"),
-                    entry=EntryConfig(
-                        window=EntryWindowConfig(start=time(9, 30), end=time(10, 0))
-                    ),
+                    entry=EntryConfig(window=EntryWindowConfig(start=time(9, 30), end=time(10, 0))),
                     legs=[
                         LegConfig(
                             name="short_put",
@@ -315,9 +307,7 @@ def _make_scanner_with_volume(leg_out: bool, min_exit_volume: int) -> ExitScanne
             TradeDefinition(
                 name="put_spread",
                 instrument=InstrumentConfig(root_symbol="ES", asset_class="future"),
-                entry=EntryConfig(
-                    window=EntryWindowConfig(start=time(9, 30), end=time(10, 0))
-                ),
+                entry=EntryConfig(window=EntryWindowConfig(start=time(9, 30), end=time(10, 0))),
                 legs=[
                     LegConfig(
                         name="short_put",
@@ -362,14 +352,12 @@ def _option_bars_with_volumes(short_volume: int, long_volume: int) -> pl.DataFra
     """One bar at 10:00 for each leg; long leg may have zero volume (sparse/illiquid)."""
     return pl.DataFrame(
         {
-            "ts_event": pl.Series(
-                [_ts(10, 0), _ts(10, 0)], dtype=pl.Datetime("us", "UTC")
-            ),
+            "ts_event": pl.Series([_ts(10, 0), _ts(10, 0)], dtype=pl.Datetime("us", "UTC")),
             "instrument_id": pl.Series([101, 102], dtype=pl.Int64),
-            "open":   pl.Series([0.25, 0.15], dtype=pl.Float64),
-            "high":   pl.Series([0.25, 0.15], dtype=pl.Float64),
-            "low":    pl.Series([0.25, 0.15], dtype=pl.Float64),
-            "close":  pl.Series([0.25, 0.15], dtype=pl.Float64),
+            "open": pl.Series([0.25, 0.15], dtype=pl.Float64),
+            "high": pl.Series([0.25, 0.15], dtype=pl.Float64),
+            "low": pl.Series([0.25, 0.15], dtype=pl.Float64),
+            "close": pl.Series([0.25, 0.15], dtype=pl.Float64),
             "volume": pl.Series([short_volume, long_volume], dtype=pl.Int64),
         }
     )
@@ -408,10 +396,10 @@ class TestVolumeGateLegOut:
             {
                 "ts_event": pl.Series([_ts(10, 0)], dtype=pl.Datetime("us", "UTC")),
                 "instrument_id": pl.Series([101], dtype=pl.Int64),  # short leg only
-                "open":   pl.Series([0.25], dtype=pl.Float64),
-                "high":   pl.Series([0.25], dtype=pl.Float64),
-                "low":    pl.Series([0.25], dtype=pl.Float64),
-                "close":  pl.Series([0.25], dtype=pl.Float64),
+                "open": pl.Series([0.25], dtype=pl.Float64),
+                "high": pl.Series([0.25], dtype=pl.Float64),
+                "low": pl.Series([0.25], dtype=pl.Float64),
+                "close": pl.Series([0.25], dtype=pl.Float64),
                 "volume": pl.Series([10], dtype=pl.Int64),
             }
         )
@@ -424,7 +412,7 @@ class TestVolumeGateLegOut:
 
     def test_both_legs_have_volume_unchanged_by_leg_out(self):
         # When both legs have volume, leg_out should not change the result.
-        scanner_lo = _make_scanner_with_volume(leg_out=True,  min_exit_volume=5)
+        scanner_lo = _make_scanner_with_volume(leg_out=True, min_exit_volume=5)
         scanner_no = _make_scanner_with_volume(leg_out=False, min_exit_volume=5)
         bars = _option_bars_with_volumes(short_volume=10, long_volume=8)
         entries = _entries_for_volume_test()

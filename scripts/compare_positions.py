@@ -31,8 +31,15 @@ def compare(dir_a: Path, dir_b: Path) -> None:
 
         if a.shape == b.shape:
             # Row-wise comparison on the key columns
-            key_cols = ["trade_name", "open_time", "exit_time", "exit_reason",
-                        "open_mark", "exit_mark", "net_pnl"]
+            key_cols = [
+                "trade_name",
+                "open_time",
+                "exit_time",
+                "exit_reason",
+                "open_mark",
+                "exit_mark",
+                "net_pnl",
+            ]
             key_cols = [c for c in key_cols if c in a.columns and c in b.columns]
             a_key = a.select(key_cols)
             b_key = b.select(key_cols)
@@ -41,14 +48,11 @@ def compare(dir_a: Path, dir_b: Path) -> None:
             else:
                 all_match = False
                 diffs = (
-                    a_key
-                    .with_row_index("row")
+                    a_key.with_row_index("row")
                     .join(b_key.with_row_index("row"), on="row", suffix="_b")
                     .filter(
                         pl.any_horizontal(
-                            pl.col(c) != pl.col(f"{c}_b")
-                            for c in key_cols
-                            if c != "trade_name"
+                            pl.col(c) != pl.col(f"{c}_b") for c in key_cols if c != "trade_name"
                         )
                     )
                 )
@@ -56,7 +60,7 @@ def compare(dir_a: Path, dir_b: Path) -> None:
                 print(diffs)
         else:
             all_match = False
-            print(f"[DIFF] {name}: {len(a)} vs {len(b)} positions (Δ={len(b)-len(a):+d})")
+            print(f"[DIFF] {name}: {len(a)} vs {len(b)} positions (Δ={len(b) - len(a):+d})")
             # Show which open_times exist in one but not the other
             a_times = set(a["open_time"].to_list())
             b_times = set(b["open_time"].to_list())
@@ -66,12 +70,18 @@ def compare(dir_a: Path, dir_b: Path) -> None:
                 print(f"  Only in baseline ({len(only_a)}):")
                 for t in only_a:
                     row = a.filter(pl.col("open_time") == t).to_dicts()[0]
-                    print(f"    {t}  exit_reason={row.get('exit_reason')}  net_pnl={row.get('net_pnl')}")
+                    print(
+                        f"    {t}  exit_reason={row.get('exit_reason')}  "
+                        f"net_pnl={row.get('net_pnl')}"
+                    )
             if only_b:
                 print(f"  Only in perf ({len(only_b)}):")
                 for t in only_b:
                     row = b.filter(pl.col("open_time") == t).to_dicts()[0]
-                    print(f"    {t}  exit_reason={row.get('exit_reason')}  net_pnl={row.get('net_pnl')}")
+                    print(
+                        f"    {t}  exit_reason={row.get('exit_reason')}  "
+                        f"net_pnl={row.get('net_pnl')}"
+                    )
 
     print()
     if all_match:

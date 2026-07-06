@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from btkit.audit.runner import AuditResult
 
 
-def format_report(result: "AuditResult", output_format: str = "text") -> str:
+def format_report(result: AuditResult, output_format: str = "text") -> str:
     """
     Format an AuditResult as text, JSON, or CSV.
 
@@ -58,9 +58,7 @@ def format_quintile_summary(df: pl.DataFrame) -> str:
         if subset.is_empty():
             continue
         lines.append(f"\n{label}")
-        lines.append(
-            f"  {'Q':<4}  {'Delta range':<25}  {'Total':>8}  {'Flagged':>8}  {'%':>6}"
-        )
+        lines.append(f"  {'Q':<4}  {'Delta range':<25}  {'Total':>8}  {'Flagged':>8}  {'%':>6}")
         lines.append("  " + "-" * 58)
         for row in subset.iter_rows(named=True):
             q = row["quintile"]
@@ -79,12 +77,12 @@ def format_quintile_summary(df: pl.DataFrame) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _format_text(result: "AuditResult") -> str:
+def _format_text(result: AuditResult) -> str:
     lines: list[str] = []
     db_name = result.db_path.split("/")[-1]
-    lines.append(f"\n{'='*62}")
+    lines.append(f"\n{'=' * 62}")
     lines.append(f"  btkit audit — {db_name}")
-    lines.append(f"{'='*62}")
+    lines.append(f"{'=' * 62}")
     lines.append(f"  Duration    : {result.elapsed_seconds:.1f}s")
     if result.dry_run:
         lines.append("  Mode        : dry-run (option_audit table NOT written)")
@@ -96,7 +94,7 @@ def _format_text(result: "AuditResult") -> str:
 
     if not result.flag_counts:
         lines.append("  No flags found. Database appears clean.")
-        lines.append(f"{'='*62}\n")
+        lines.append(f"{'=' * 62}\n")
         return "\n".join(lines)
 
     col_w = [25, 8, 12, 14]
@@ -120,12 +118,12 @@ def _format_text(result: "AuditResult") -> str:
         f"  {'TOTAL':<{col_w[0]}}  {'':^{col_w[1]}}"
         f"  {total_rows:>{col_w[2]},}  {result.total_flagged_instruments:>{col_w[3]},}"
     )
-    lines.append(f"{'='*62}\n")
+    lines.append(f"{'=' * 62}\n")
 
     return "\n".join(lines)
 
 
-def _format_json(result: "AuditResult") -> str:
+def _format_json(result: AuditResult) -> str:
     return json.dumps(
         {
             "db_path": result.db_path,
@@ -147,7 +145,7 @@ def _format_json(result: "AuditResult") -> str:
     )
 
 
-def _format_csv(result: "AuditResult") -> str:
+def _format_csv(result: AuditResult) -> str:
     rows = ["flag_code,severity,row_count,instrument_count"]
     for fc in result.flag_counts:
         rows.append(f"{fc.flag_code},{fc.severity},{fc.row_count},{fc.instrument_count}")

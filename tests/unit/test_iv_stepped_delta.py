@@ -6,6 +6,7 @@ Covers:
   - LegConfig acceptance of both config shapes
   - EntryScanner._build_step_exprs() step resolution logic
 """
+
 from __future__ import annotations
 
 from datetime import date, time
@@ -28,14 +29,12 @@ from btkit.strategy.definition import (
     UniverseConfig,
 )
 
-
 # ---------------------------------------------------------------------------
 # SimpleDeltaConfig
 # ---------------------------------------------------------------------------
 
 
 class TestSimpleDeltaConfig:
-
     def test_scalar_target(self):
         cfg = SimpleDeltaConfig(target=-0.25)
         assert cfg.target == -0.25
@@ -56,7 +55,6 @@ class TestSimpleDeltaConfig:
 
 
 class TestDeltaStep:
-
     def test_step_with_below(self):
         step = DeltaStep(below=15.0, target=-0.10, tolerance=0.03)
         assert step.below == 15.0
@@ -78,7 +76,6 @@ class TestDeltaStep:
 
 
 class TestSteppedDeltaConfig:
-
     def test_valid_stepped_config(self):
         cfg = SteppedDeltaConfig(
             step_source="ves1d_close",
@@ -110,7 +107,7 @@ class TestSteppedDeltaConfig:
             SteppedDeltaConfig(
                 step_source="iv",
                 steps=[
-                    DeltaStep(target=-0.10),       # catch-all in position 0
+                    DeltaStep(target=-0.10),  # catch-all in position 0
                     DeltaStep(below=15.0, target=-0.12),
                 ],
             )
@@ -130,7 +127,6 @@ class TestSteppedDeltaConfig:
 
 
 class TestLegConfigDelta:
-
     def test_simple_delta_dict(self):
         leg = LegConfig(
             name="sp",
@@ -193,6 +189,7 @@ class TestLegConfigDelta:
 def _make_entry_scanner(trade: TradeDefinition):
     """Return an EntryScanner without a real DB (for testing step exprs)."""
     from unittest.mock import MagicMock
+
     from btkit.backtest.entry import EntryScanner
 
     strategy = StrategyDefinition(
@@ -234,7 +231,6 @@ def _make_trade_with_stepped_delta(
 
 
 class TestBuildStepExprs:
-
     def test_two_steps_first_bucket(self):
         """IV < 10 → target -0.10, tolerance 0.03"""
         trade = _make_trade_with_stepped_delta(
@@ -261,7 +257,7 @@ class TestBuildStepExprs:
             source="iv",
             steps=[
                 DeltaStep(below=10.0, target=-0.10, tolerance=0.03),
-                DeltaStep(target=-0.15),   # catch-all, no explicit tolerance
+                DeltaStep(target=-0.15),  # catch-all, no explicit tolerance
             ],
             fallback_tolerance=0.08,
         )
@@ -275,7 +271,9 @@ class TestBuildStepExprs:
 
         assert d_vals == [-0.10, -0.15]
         assert t_vals[0] == 0.03
-        assert t_vals[1] == 0.08  # catch-all tolerance is None → falls back to SteppedDeltaConfig.tolerance
+        assert (
+            t_vals[1] == 0.08
+        )  # catch-all tolerance is None → falls back to SteppedDeltaConfig.tolerance
 
     def test_null_when_no_match_and_no_catch_all(self):
         """No step matches and no catch-all → null"""

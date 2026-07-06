@@ -1,6 +1,8 @@
 """Quick smoke test for the ingest + Greeks pipeline."""
+
 import os
 import sys
+
 import duckdb
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
@@ -21,7 +23,13 @@ builder.build()
 
 print("\n=== Verifying tables ===")
 con = duckdb.connect(db_path, read_only=True)
-for table in ("underlying_bars", "option_bars", "option_greeks", "indicator_definition", "indicator_bars"):
+for table in (
+    "underlying_bars",
+    "option_bars",
+    "option_greeks",
+    "indicator_definition",
+    "indicator_bars",
+):
     n = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
     print(f"{table}: {n:,} rows")
 

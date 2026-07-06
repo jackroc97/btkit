@@ -188,9 +188,11 @@ class TestExitReasons:
         marks are computed from underlying intrinsic values and are always >= 0.
         """
         _run("exit_expiry", input_db, output_db)
-        bad = _con(output_db).execute(
-            "SELECT COUNT(*) FROM position WHERE exit_reason = 'expiry' AND exit_mark < 0"
-        ).fetchone()[0]
+        bad = (
+            _con(output_db)
+            .execute("SELECT COUNT(*) FROM position WHERE exit_reason = 'expiry' AND exit_mark < 0")
+            .fetchone()[0]
+        )
         assert bad == 0, f"{bad} expiry exits have negative exit_mark"
 
 
@@ -335,9 +337,7 @@ class TestSteppedDelta:
         A catch-all stepped config (single step, no below) with the same target and
         tolerance as a flat SimpleDeltaConfig should produce identical positions.
         """
-        stepped_strat = _make_stepped_strategy(
-            steps=[DeltaStep(target=-0.25, tolerance=0.10)]
-        )
+        stepped_strat = _make_stepped_strategy(steps=[DeltaStep(target=-0.25, tolerance=0.10)])
         flat_strat = StrategyDefinition(
             name="flat_delta_test",
             universe=stepped_strat.universe,
@@ -360,8 +360,11 @@ class TestSteppedDelta:
             ],
         )
 
+        import pathlib
+        import tempfile
+
         from btkit.db.output_db import OutputDatabase
-        import tempfile, pathlib
+
         with tempfile.TemporaryDirectory() as tmp:
             flat_out = OutputDatabase(str(pathlib.Path(tmp) / "flat.db"))
             flat_out.create_schema()
@@ -398,16 +401,14 @@ class TestSteppedDelta:
 
         deltas = [
             row[0]
-            for row in output_db._con.execute(
-                "SELECT entry_delta FROM position_leg"
-            ).fetchall()
+            for row in output_db._con.execute("SELECT entry_delta FROM position_leg").fetchall()
             if row[0] is not None
         ]
         assert len(deltas) > 0, "No positions with delta data"
 
         midpoint = -0.175
-        near_shallow = sum(1 for d in deltas if d > midpoint)   # closer to -0.10
-        near_deep = sum(1 for d in deltas if d <= midpoint)     # closer to -0.25
+        near_shallow = sum(1 for d in deltas if d > midpoint)  # closer to -0.10
+        near_deep = sum(1 for d in deltas if d <= midpoint)  # closer to -0.25
 
         assert near_shallow > 0, (
             "No positions from step 1 (sma_5 < 7300, target -0.10). "
@@ -495,8 +496,6 @@ class TestForwardContractVisibility:
         ESM6-only period.  Total count with fix should exceed that of a strategy
         artificially restricted to ESM6-covered dates.
         """
-        import tempfile, pathlib
-        from btkit.db.output_db import OutputDatabase
 
         strat = self._make_45dte_strategy()
         engine = BacktestEngine(input_db, output_db, strat)

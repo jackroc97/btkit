@@ -20,6 +20,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from datetime import UTC
+
 import polars as pl
 
 from btkit.backtest.engine import BacktestEngine
@@ -32,20 +34,22 @@ from btkit.strategy.loader import load_strategy
 
 INPUT_DB = "/tmp/btkit_test_ingest.db"
 STRATEGY = "tests/fixtures/strategies/short_put_spread.yaml"
-N_RUNS   = 5   # timed repetitions after warm-up
+N_RUNS = 5  # timed repetitions after warm-up
 
 
 # ---------------------------------------------------------------------------
 # Timing utilities
 # ---------------------------------------------------------------------------
 
+
 class Timer:
     """Simple context-manager timer."""
+
     def __init__(self, label: str) -> None:
         self.label = label
         self.elapsed: float = 0.0
 
-    def __enter__(self) -> "Timer":
+    def __enter__(self) -> Timer:
         self._start = time.perf_counter()
         return self
 
@@ -56,20 +60,23 @@ class Timer:
 def _mean(xs: list[float]) -> float:
     return sum(xs) / len(xs) if xs else 0.0
 
+
 def _median(xs: list[float]) -> float:
     s = sorted(xs)
     n = len(s)
     return (s[n // 2 - 1] + s[n // 2]) / 2 if n % 2 == 0 else s[n // 2]
 
+
 def _fmt(s: float) -> str:
     if s >= 1.0:
         return f"{s:.3f}s"
-    return f"{s*1000:.1f}ms"
+    return f"{s * 1000:.1f}ms"
 
 
 # ---------------------------------------------------------------------------
 # Phase-level benchmark
 # ---------------------------------------------------------------------------
+
 
 def run_phases(db: InputDatabase, strategy, trade) -> dict[str, float]:
     """Run all phases for one trade and return per-phase wall times."""
@@ -87,16 +94,16 @@ def run_phases(db: InputDatabase, strategy, trade) -> dict[str, float]:
 
 
 def benchmark_phases(db: InputDatabase, strategy, n_runs: int) -> None:
-    print(f"\n{'─'*60}")
+    print(f"\n{'─' * 60}")
     print(f"Per-phase timing  ({n_runs} runs, first excluded as warm-up)")
-    print(f"{'─'*60}")
+    print(f"{'─' * 60}")
 
     phase_samples: dict[str, list[float]] = {}
 
     for i in range(n_runs + 1):
         run_times: dict[str, float] = {}
         all_entries: dict[str, pl.DataFrame] = {}
-        all_exits:   dict[str, pl.DataFrame] = {}
+        all_exits: dict[str, pl.DataFrame] = {}
 
         for trade in strategy.trades:
             times, entries, exits = run_phases(db, strategy, trade)
@@ -104,7 +111,7 @@ def benchmark_phases(db: InputDatabase, strategy, n_runs: int) -> None:
                 key = f"{trade.name}.{phase}"
                 run_times[key] = t
             all_entries[trade.name] = entries
-            all_exits[trade.name]   = exits
+            all_exits[trade.name] = exits
 
         with Timer("pnl") as t:
             PnLCalculator(strategy).compute(all_entries, all_exits)
@@ -124,10 +131,11 @@ def benchmark_phases(db: InputDatabase, strategy, n_runs: int) -> None:
 # Full engine benchmark (including one-at-a-time + DB writes)
 # ---------------------------------------------------------------------------
 
+
 def benchmark_engine(db: InputDatabase, strategy, n_runs: int) -> None:
-    print(f"\n{'─'*60}")
+    print(f"\n{'─' * 60}")
     print(f"Full engine.run()  ({n_runs} runs, first excluded as warm-up)")
-    print(f"{'─'*60}")
+    print(f"{'─' * 60}")
 
     samples: list[float] = []
 
@@ -151,22 +159,33 @@ def benchmark_engine(db: InputDatabase, strategy, n_runs: int) -> None:
 # Entry breakdown
 # ---------------------------------------------------------------------------
 
+
 def benchmark_entry_steps(db: InputDatabase, strategy, n_runs: int) -> None:
-    print(f"\n{'─'*60}")
+    print(f"\n{'─' * 60}")
     print(f"EntryScanner step breakdown  ({n_runs} runs, first excluded as warm-up)")
-    print(f"{'─'*60}")
+    print(f"{'─' * 60}")
 
     trade = strategy.trades[0]
 
-    from datetime import datetime, timezone
+    from datetime import datetime
     from zoneinfo import ZoneInfo
 
     tz = ZoneInfo(strategy.universe.session.timezone)
     universe = strategy.universe
-    start_dt = datetime(universe.start_date.year, universe.start_date.month, universe.start_date.day, tzinfo=tz).astimezone(timezone.utc)
-    end_dt   = datetime(universe.end_date.year, universe.end_date.month, universe.end_date.day, 23, 59, 59, tzinfo=tz).astimezone(timezone.utc)
+    start_dt = datetime(
+        universe.start_date.year, universe.start_date.month, universe.start_date.day, tzinfo=tz
+    ).astimezone(UTC)
+    end_dt = datetime(
+        universe.end_date.year,
+        universe.end_date.month,
+        universe.end_date.day,
+        23,
+        59,
+        59,
+        tzinfo=tz,
+    ).astimezone(UTC)
     underlying_id = db.instrument_id_for_symbol(trade.instrument.root_symbol)
-    indicators    = db.indicators(underlying_id, start_dt, end_dt)
+    indicators = db.indicators(underlying_id, start_dt, end_dt)
 
     step_samples: dict[str, list[float]] = {}
 
@@ -186,7 +205,12 @@ def benchmark_entry_steps(db: InputDatabase, strategy, n_runs: int) -> None:
 
         if i == 0:
             continue
-        for name, timer in [("1_window_filter", t), ("2_leg_selection", t2), ("3_open_mark", t3), ("4_conditions", t4)]:
+        for name, timer in [
+            ("1_window_filter", t),
+            ("2_leg_selection", t2),
+            ("3_open_mark", t3),
+            ("4_conditions", t4),
+        ]:
             step_samples.setdefault(name, []).append(timer.elapsed)
 
     for name, samples in step_samples.items():
@@ -197,10 +221,11 @@ def benchmark_entry_steps(db: InputDatabase, strategy, n_runs: int) -> None:
 # Exit breakdown
 # ---------------------------------------------------------------------------
 
+
 def benchmark_exit_steps(db: InputDatabase, strategy, n_runs: int) -> None:
-    print(f"\n{'─'*60}")
+    print(f"\n{'─' * 60}")
     print(f"ExitScanner step breakdown  ({n_runs} runs, first excluded as warm-up)")
-    print(f"{'─'*60}")
+    print(f"{'─' * 60}")
 
     trade = strategy.trades[0]
     # Pre-compute entries once (not part of exit timing)
@@ -220,7 +245,11 @@ def benchmark_exit_steps(db: InputDatabase, strategy, n_runs: int) -> None:
 
         if i == 0:
             continue
-        for name, timer in [("1_load_exit_data", t1), ("2_position_marks", t2), ("3_find_first_hit", t3)]:
+        for name, timer in [
+            ("1_load_exit_data", t1),
+            ("2_position_marks", t2),
+            ("3_find_first_hit", t3),
+        ]:
             step_samples.setdefault(name, []).append(timer.elapsed)
 
     for name, samples in step_samples.items():
@@ -230,6 +259,7 @@ def benchmark_exit_steps(db: InputDatabase, strategy, n_runs: int) -> None:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     print("btkit Backtest Benchmark")
@@ -242,6 +272,7 @@ def main() -> None:
 
     # Check DB exists
     from pathlib import Path
+
     if not Path(INPUT_DB).exists():
         print(f"\nERROR: Input database not found: {INPUT_DB}")
         print("Build it first with:  python scripts/test_ingest.py")

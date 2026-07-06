@@ -19,7 +19,7 @@ class StudyDefinition(BaseModel):
     name: str
     strategies: list[StrategyRef]
     max_combinations: int | None = None  # overrides per-strategy matrix.max_combinations
-    workers: int | None = None           # None → os.cpu_count()
+    workers: int | None = None  # None → os.cpu_count()
 
     @model_validator(mode="after")
     def at_least_one_strategy(self) -> StudyDefinition:

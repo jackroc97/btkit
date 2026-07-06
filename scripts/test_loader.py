@@ -1,10 +1,12 @@
 """Verify YAML loader and condition parser work with updated fixtures."""
+
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+
 from btkit.strategy.loader import load_strategy, parse_condition
-import polars as pl
 
 fixtures = Path("tests/fixtures/strategies")
 for yaml_file in sorted(fixtures.glob("*.yaml")):
@@ -12,7 +14,7 @@ for yaml_file in sorted(fixtures.glob("*.yaml")):
         strat = load_strategy(yaml_file)
         print(f"OK  {yaml_file.name}: {strat.name!r}, {len(strat.trades)} trade(s)")
         for trade in strat.trades:
-            print(f"      trade={trade.name!r}, legs={[l.name for l in trade.legs]}")
+            print(f"      trade={trade.name!r}, legs={[lg.name for lg in trade.legs]}")
     except Exception as e:
         print(f"ERR {yaml_file.name}: {e}")
 

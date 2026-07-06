@@ -203,12 +203,16 @@ class GreeksCalculator:
 
         When skip_existing=False every option_bars row is processed.
         """
-        new_only_filter = """
+        new_only_filter = (
+            """
             AND NOT EXISTS (
                 SELECT 1 FROM option_greeks og
                 WHERE og.ts_event = ob.ts_event AND og.instrument_id = ob.instrument_id
             )
-        """ if skip_existing else ""
+        """
+            if skip_existing
+            else ""
+        )
 
         # Step 1: Materialise pending rows once (expensive NOT EXISTS runs here,
         # not once per batch).
@@ -290,7 +294,8 @@ class GreeksCalculator:
             print(
                 f"\r[greeks] {date_d}  {completed}/{len(dates)} days"
                 f"  rows={written + accumulated_rows:,}",
-                end="", flush=True,
+                end="",
+                flush=True,
             )
             if len(accumulated) >= _BATCH_DAYS:
                 _flush()

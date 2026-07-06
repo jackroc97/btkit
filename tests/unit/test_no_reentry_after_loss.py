@@ -14,10 +14,8 @@ Terminology:
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, time
-from unittest.mock import MagicMock
 
 import polars as pl
-import pytest
 
 from btkit.backtest.engine import BacktestEngine
 from btkit.strategy.definition import (
@@ -30,7 +28,6 @@ from btkit.strategy.definition import (
     TradeDefinition,
     UniverseConfig,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -52,8 +49,21 @@ def _make_engine() -> BacktestEngine:
                 instrument=InstrumentConfig(root_symbol="ES", asset_class="future"),
                 entry=EntryConfig(window=EntryWindowConfig(start=time(9, 30), end=time(16, 0))),
                 legs=[
-                    LegConfig(name="short", right="put", action="sell_to_open", dte=0, delta={"target": -0.16}),
-                    LegConfig(name="long", right="put", action="buy_to_open", dte=0, strike_offset=-50.0, reference_leg="short"),
+                    LegConfig(
+                        name="short",
+                        right="put",
+                        action="sell_to_open",
+                        dte=0,
+                        delta={"target": -0.16},
+                    ),
+                    LegConfig(
+                        name="long",
+                        right="put",
+                        action="buy_to_open",
+                        dte=0,
+                        strike_offset=-50.0,
+                        reference_leg="short",
+                    ),
                 ],
                 exit=ExitConfig(stop_loss=1.5, take_profit=0.5),
             )
@@ -67,6 +77,7 @@ def _make_engine() -> BacktestEngine:
 def _ts(dt_str: str) -> datetime:
     """Parse 'YYYY-MM-DD HH:MM' as Eastern and return UTC datetime."""
     import zoneinfo
+
     naive = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
     return naive.replace(tzinfo=zoneinfo.ZoneInfo(TZ)).astimezone(UTC)
 
@@ -76,14 +87,18 @@ def _make_frames(rows: list[dict]) -> tuple[pl.DataFrame, pl.DataFrame]:
     Build entries and exits DataFrames from a list of dicts with keys:
         entry_id, entry_time (str), exit_reason (str)
     """
-    entries = pl.DataFrame({
-        "entry_id":   [r["entry_id"] for r in rows],
-        "entry_time": pl.Series([_ts(r["entry_time"]) for r in rows]).dt.cast_time_unit("us"),
-    })
-    exits = pl.DataFrame({
-        "entry_id":    [r["entry_id"] for r in rows],
-        "exit_reason": [r["exit_reason"] for r in rows],
-    })
+    entries = pl.DataFrame(
+        {
+            "entry_id": [r["entry_id"] for r in rows],
+            "entry_time": pl.Series([_ts(r["entry_time"]) for r in rows]).dt.cast_time_unit("us"),
+        }
+    )
+    exits = pl.DataFrame(
+        {
+            "entry_id": [r["entry_id"] for r in rows],
+            "exit_reason": [r["exit_reason"] for r in rows],
+        }
+    )
     return entries, exits
 
 
@@ -91,8 +106,8 @@ def _make_frames(rows: list[dict]) -> tuple[pl.DataFrame, pl.DataFrame]:
 # Tests
 # ---------------------------------------------------------------------------
 
-class TestNoReentryAfterLoss:
 
+class TestNoReentryAfterLoss:
     def test_no_loss_no_filtering(self):
         """When no positions are losses, all entries survive."""
         engine = _make_engine()
@@ -168,11 +183,27 @@ class TestNoReentryAfterLoss:
         engine = _make_engine()
         rows = [
             {"entry_id": 1, "entry_time": "2024-01-02 09:30", "exit_reason": "stop_loss"},
-            {"entry_id": 2, "entry_time": "2024-01-02 11:00", "exit_reason": "take_profit"},  # blocked
-            {"entry_id": 3, "entry_time": "2024-01-03 09:30", "exit_reason": "take_profit"},  # allowed
+            {
+                "entry_id": 2,
+                "entry_time": "2024-01-02 11:00",
+                "exit_reason": "take_profit",
+            },  # blocked
+            {
+                "entry_id": 3,
+                "entry_time": "2024-01-03 09:30",
+                "exit_reason": "take_profit",
+            },  # allowed
             {"entry_id": 4, "entry_time": "2024-01-04 09:30", "exit_reason": "stop_loss"},
-            {"entry_id": 5, "entry_time": "2024-01-04 11:00", "exit_reason": "take_profit"},  # blocked
-            {"entry_id": 6, "entry_time": "2024-01-05 09:30", "exit_reason": "take_profit"},  # allowed
+            {
+                "entry_id": 5,
+                "entry_time": "2024-01-04 11:00",
+                "exit_reason": "take_profit",
+            },  # blocked
+            {
+                "entry_id": 6,
+                "entry_time": "2024-01-05 09:30",
+                "exit_reason": "take_profit",
+            },  # allowed
         ]
         entries, exits = _make_frames(rows)
         out_entries, _ = engine._enforce_no_reentry_after_loss(entries, exits)
@@ -192,8 +223,18 @@ class TestNoReentryAfterLoss:
     def test_empty_entries_returns_empty(self):
         """Empty inputs don't raise and return empty DataFrames."""
         engine = _make_engine()
-        entries = pl.DataFrame({"entry_id": pl.Series([], dtype=pl.Int64), "entry_time": pl.Series([], dtype=pl.Datetime("us", "UTC"))})
-        exits = pl.DataFrame({"entry_id": pl.Series([], dtype=pl.Int64), "exit_reason": pl.Series([], dtype=pl.String)})
+        entries = pl.DataFrame(
+            {
+                "entry_id": pl.Series([], dtype=pl.Int64),
+                "entry_time": pl.Series([], dtype=pl.Datetime("us", "UTC")),
+            }
+        )
+        exits = pl.DataFrame(
+            {
+                "entry_id": pl.Series([], dtype=pl.Int64),
+                "exit_reason": pl.Series([], dtype=pl.String),
+            }
+        )
         out_entries, out_exits = engine._enforce_no_reentry_after_loss(entries, exits)
         assert out_entries.is_empty()
         assert out_exits.is_empty()
