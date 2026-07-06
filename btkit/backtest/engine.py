@@ -21,7 +21,8 @@ from __future__ import annotations
 import json
 import time
 import traceback
-from datetime import UTC, datetime, time as dtime, timedelta
+from datetime import UTC, datetime, timedelta
+from datetime import time as dtime
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -88,13 +89,18 @@ class BacktestEngine:
                 # Build gate overrides when continuation is enabled: re-entry is
                 # blocked until max(continuation_exit_time, next_trading_day_open).
                 gate_overrides: dict[int, int] | None = None
-                if trade.exit.on_sl_long_continuation and not exit_scanner.continuation_exits.is_empty():
+                if (
+                    trade.exit.on_sl_long_continuation
+                    and not exit_scanner.continuation_exits.is_empty()
+                ):
                     gate_overrides = self._build_gate_overrides(
                         exits, exit_scanner.continuation_exits, trade
                     )
 
                 entries, exits = self._enforce_entries(
-                    entries, exits, gate_overrides,
+                    entries,
+                    exits,
+                    gate_overrides,
                     max_entries_per_day=trade.entry.max_entries_per_day,
                 )
 
@@ -254,8 +260,12 @@ class BacktestEngine:
             break
         start = session.start_time if session.start_time is not None else dtime(0, 0)
         gate_local = datetime(
-            next_date.year, next_date.month, next_date.day,
-            start.hour, start.minute, tzinfo=tz,
+            next_date.year,
+            next_date.month,
+            next_date.day,
+            start.hour,
+            start.minute,
+            tzinfo=tz,
         )
         return gate_local.astimezone(UTC)
 
@@ -270,9 +280,9 @@ class BacktestEngine:
         as max(continuation_exit_time, next_trading_day_open_after_sl_exit).
         Returns a dict mapping entry_id → Int64 microseconds.
         """
-        sl_exits = exits.filter(
-            pl.col("exit_reason").is_in(["stop_loss", "gap_sl"])
-        ).select(["entry_id", "exit_time"])
+        sl_exits = exits.filter(pl.col("exit_reason").is_in(["stop_loss", "gap_sl"])).select(
+            ["entry_id", "exit_time"]
+        )
 
         sl_with_cont = sl_exits.join(
             continuation_exits.select(["entry_id", "continuation_exit_time"]),
@@ -330,7 +340,10 @@ class BacktestEngine:
 
         if gate_overrides:
             gate_times = np.array(
-                [gate_overrides.get(int(eid), int(et)) for eid, et in zip(entry_ids, exit_times)],
+                [
+                    gate_overrides.get(int(eid), int(et))
+                    for eid, et in zip(entry_ids, exit_times, strict=False)
+                ],
                 dtype=np.int64,
             )
         else:
@@ -388,14 +401,10 @@ class BacktestEngine:
             for row in roll_exit_times.iter_rows(named=True):
                 roll_date = row["_roll_date"]
                 roll_exit_t = row["exit_time"]
-                candidate = (
-                    entries_sorted
-                    .filter(
-                        (pl.col("_entry_date") == pl.lit(roll_date))
-                        & (pl.col("entry_time") > pl.lit(roll_exit_t))
-                    )
-                    .head(1)
-                )
+                candidate = entries_sorted.filter(
+                    (pl.col("_entry_date") == pl.lit(roll_date))
+                    & (pl.col("entry_time") > pl.lit(roll_exit_t))
+                ).head(1)
                 if not candidate.is_empty():
                     roll_reentry_ids.add(int(candidate["entry_id"][0]))
 
@@ -417,9 +426,7 @@ class BacktestEngine:
                 )
                 .alias("_day_rank")
             )
-            .filter(
-                pl.col("_is_roll_reentry") | (pl.col("_day_rank") <= max_entries)
-            )
+            .filter(pl.col("_is_roll_reentry") | (pl.col("_day_rank") <= max_entries))
             .drop(["_entry_date", "_day_rank", "_is_roll_reentry"])
         )
 
@@ -482,7 +489,10 @@ class BacktestEngine:
 
         if gate_overrides:
             gate_times = np.array(
-                [gate_overrides.get(int(eid), int(et)) for eid, et in zip(entry_ids, exit_times)],
+                [
+                    gate_overrides.get(int(eid), int(et))
+                    for eid, et in zip(entry_ids, exit_times, strict=False)
+                ],
                 dtype=np.int64,
             )
         else:
@@ -492,19 +502,9 @@ class BacktestEngine:
         exit_time_dates: list | None = None
         exit_reasons: list | None = None
         if max_entries_per_day is not None:
-            entry_dates = (
-                combined["entry_time"]
-                .dt.convert_time_zone(tz_str)
-                .dt.date()
-                .to_list()
-            )
+            entry_dates = combined["entry_time"].dt.convert_time_zone(tz_str).dt.date().to_list()
             # Exit date in tz — needed to identify which day the roll re-entry falls on.
-            exit_time_dates = (
-                combined["exit_time"]
-                .dt.convert_time_zone(tz_str)
-                .dt.date()
-                .to_list()
-            )
+            exit_time_dates = combined["exit_time"].dt.convert_time_zone(tz_str).dt.date().to_list()
             exit_reasons = (
                 combined["exit_reason"].to_list()
                 if "exit_reason" in combined.columns
@@ -531,10 +531,7 @@ class BacktestEngine:
                 if pending_roll_reentry_date is not None and d > pending_roll_reentry_date:
                     pending_roll_reentry_date = None
 
-                is_exempt = (
-                    pending_roll_reentry_date is not None
-                    and d == pending_roll_reentry_date
-                )
+                is_exempt = pending_roll_reentry_date is not None and d == pending_roll_reentry_date
 
                 if not is_exempt:
                     if day_counts.get(d, 0) >= max_entries_per_day:
@@ -582,10 +579,7 @@ class BacktestEngine:
             .join(exits.select(["entry_id", "exit_reason"]), on="entry_id", how="left")
             .sort("entry_time")
             .with_columns(
-                pl.col("entry_time")
-                .dt.convert_time_zone(tz_str)
-                .dt.date()
-                .alias("_date")
+                pl.col("entry_time").dt.convert_time_zone(tz_str).dt.date().alias("_date")
             )
         )
 

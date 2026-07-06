@@ -28,16 +28,16 @@ class TestWriteStudy:
 
     def test_study_row_stored(self, odb):
         odb.write_study("hello", "yaml_content", 7)
-        row = odb._con.execute("SELECT name, strategy_yaml, total_combinations FROM study").fetchone()
+        row = odb._con.execute(
+            "SELECT name, strategy_yaml, total_combinations FROM study"
+        ).fetchone()
         assert row[0] == "hello"
         assert row[1] == "yaml_content"
         assert row[2] == 7
 
     def test_finished_at_is_null_before_finalize(self, odb):
         sid = odb.write_study("s", "y", 1)
-        row = odb._con.execute(
-            "SELECT finished_at FROM study WHERE id = ?", [sid]
-        ).fetchone()
+        row = odb._con.execute("SELECT finished_at FROM study WHERE id = ?", [sid]).fetchone()
         assert row[0] is None
 
 
@@ -45,9 +45,7 @@ class TestFinalizeStudy:
     def test_sets_finished_at(self, odb):
         sid = odb.write_study("s", "y", 1)
         odb.finalize_study(sid)
-        row = odb._con.execute(
-            "SELECT finished_at FROM study WHERE id = ?", [sid]
-        ).fetchone()
+        row = odb._con.execute("SELECT finished_at FROM study WHERE id = ?", [sid]).fetchone()
         assert row[0] is not None
 
 
@@ -56,17 +54,19 @@ class TestBacktestStudyId:
         from datetime import UTC, datetime
 
         sid = odb.write_study("s", "y", 2)
-        bid = odb.write_backtest({
-            "study_id": sid,
-            "combination_id": 1,
-            "strategy_name": "test",
-            "strategy_version": "1.0",
-            "strategy_params": {},
-            "initial_equity": 100_000.0,
-            "slippage_pct": 0.0,
-            "fee_per_contract": 0.0,
-            "created_at": datetime.now(UTC),
-        })
+        bid = odb.write_backtest(
+            {
+                "study_id": sid,
+                "combination_id": 1,
+                "strategy_name": "test",
+                "strategy_version": "1.0",
+                "strategy_params": {},
+                "initial_equity": 100_000.0,
+                "slippage_pct": 0.0,
+                "fee_per_contract": 0.0,
+                "created_at": datetime.now(UTC),
+            }
+        )
         row = odb._con.execute(
             "SELECT study_id, combination_id FROM backtest WHERE id = ?", [bid]
         ).fetchone()
@@ -76,17 +76,17 @@ class TestBacktestStudyId:
     def test_scalar_run_has_null_study_id(self, odb):
         from datetime import UTC, datetime
 
-        bid = odb.write_backtest({
-            "strategy_name": "test",
-            "strategy_params": {},
-            "initial_equity": 100_000.0,
-            "slippage_pct": 0.0,
-            "fee_per_contract": 0.0,
-            "created_at": datetime.now(UTC),
-        })
-        row = odb._con.execute(
-            "SELECT study_id FROM backtest WHERE id = ?", [bid]
-        ).fetchone()
+        bid = odb.write_backtest(
+            {
+                "strategy_name": "test",
+                "strategy_params": {},
+                "initial_equity": 100_000.0,
+                "slippage_pct": 0.0,
+                "fee_per_contract": 0.0,
+                "created_at": datetime.now(UTC),
+            }
+        )
+        row = odb._con.execute("SELECT study_id FROM backtest WHERE id = ?", [bid]).fetchone()
         assert row[0] is None
 
 
@@ -125,9 +125,12 @@ class TestMigration:
 
         # Verify the column was renamed
         con = duckdb.connect(db_path, read_only=True)
-        cols = {row[0] for row in con.execute(
-            "SELECT column_name FROM information_schema.columns WHERE table_name = 'backtest'"
-        ).fetchall()}
+        cols = {
+            row[0]
+            for row in con.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'backtest'"
+            ).fetchall()
+        }
         con.close()
         assert "study_id" in cols
         assert "matrix_id" not in cols

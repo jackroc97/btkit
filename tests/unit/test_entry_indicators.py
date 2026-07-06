@@ -5,7 +5,10 @@ Regression test for the bug where _get_indicators used only the first
 front-month contract's underlying_id, causing null indicator values for
 all bars after the first quarterly roll.
 """
+
 from __future__ import annotations
+
+from datetime import date, time
 
 import duckdb
 import polars as pl
@@ -19,12 +22,11 @@ from btkit.strategy.definition import (
     ExitConfig,
     InstrumentConfig,
     LegConfig,
+    SessionConfig,
     StrategyDefinition,
     TradeDefinition,
     UniverseConfig,
-    SessionConfig,
 )
-from datetime import date, time
 
 
 def _make_db_with_two_contracts() -> InputDatabase:
@@ -121,7 +123,9 @@ def _make_scanner(db: InputDatabase, conditions: list[str]) -> EntryScanner:
             conditions=conditions,
         ),
         legs=[
-            LegConfig(name="short", right="put", action="sell_to_open", dte=30, delta={"target": -0.16}),
+            LegConfig(
+                name="short", right="put", action="sell_to_open", dte=30, delta={"target": -0.16}
+            ),
         ],
         exit=ExitConfig(),
     )
@@ -135,16 +139,24 @@ class TestIndicatorStitchingAcrossRolls:
 
     def test_stitched_indicators_cover_both_contracts(self):
         """Both contracts' indicator bars should appear in the concatenated result."""
-        from datetime import datetime, UTC
-        schedule = pl.DataFrame({
-            "date": pl.Series([
-                date(2024, 1, 2), date(2024, 2, 1),
-                date(2024, 4, 1), date(2024, 5, 1),
-            ], dtype=pl.Date),
-            "underlying_id": pl.Series([1, 1, 2, 2], dtype=pl.Int64),
-        })
+        from datetime import UTC, datetime
+
+        schedule = pl.DataFrame(
+            {
+                "date": pl.Series(
+                    [
+                        date(2024, 1, 2),
+                        date(2024, 2, 1),
+                        date(2024, 4, 1),
+                        date(2024, 5, 1),
+                    ],
+                    dtype=pl.Date,
+                ),
+                "underlying_id": pl.Series([1, 1, 2, 2], dtype=pl.Int64),
+            }
+        )
         start_dt = datetime(2024, 1, 1, tzinfo=UTC)
-        end_dt   = datetime(2024, 5, 31, 23, 59, 59, tzinfo=UTC)
+        end_dt = datetime(2024, 5, 31, 23, 59, 59, tzinfo=UTC)
 
         scanner = _make_scanner(self.db, conditions=["ves1d > 20"])
         result = scanner._get_indicators_for_schedule(schedule, start_dt, end_dt)
@@ -154,16 +166,24 @@ class TestIndicatorStitchingAcrossRolls:
 
     def test_stitched_indicators_values_are_correct(self):
         """Values from both contracts should be present without corruption."""
-        from datetime import datetime, UTC
-        schedule = pl.DataFrame({
-            "date": pl.Series([
-                date(2024, 1, 2), date(2024, 2, 1),
-                date(2024, 4, 1), date(2024, 5, 1),
-            ], dtype=pl.Date),
-            "underlying_id": pl.Series([1, 1, 2, 2], dtype=pl.Int64),
-        })
+        from datetime import UTC, datetime
+
+        schedule = pl.DataFrame(
+            {
+                "date": pl.Series(
+                    [
+                        date(2024, 1, 2),
+                        date(2024, 2, 1),
+                        date(2024, 4, 1),
+                        date(2024, 5, 1),
+                    ],
+                    dtype=pl.Date,
+                ),
+                "underlying_id": pl.Series([1, 1, 2, 2], dtype=pl.Int64),
+            }
+        )
         start_dt = datetime(2024, 1, 1, tzinfo=UTC)
-        end_dt   = datetime(2024, 5, 31, 23, 59, 59, tzinfo=UTC)
+        end_dt = datetime(2024, 5, 31, 23, 59, 59, tzinfo=UTC)
 
         scanner = _make_scanner(self.db, conditions=["ves1d > 20"])
         result = scanner._get_indicators_for_schedule(schedule, start_dt, end_dt).sort("ts_event")
@@ -173,9 +193,10 @@ class TestIndicatorStitchingAcrossRolls:
 
     def test_first_contract_only_would_miss_later_bars(self):
         """Confirm the old single-contract fetch only returns 2 of the 4 rows."""
-        from datetime import datetime, UTC
+        from datetime import UTC, datetime
+
         start_dt = datetime(2024, 1, 1, tzinfo=UTC)
-        end_dt   = datetime(2024, 5, 31, 23, 59, 59, tzinfo=UTC)
+        end_dt = datetime(2024, 5, 31, 23, 59, 59, tzinfo=UTC)
 
         # Simulate the old broken path: query only ESH (id=1)
         old_result = self.db.indicators(1, start_dt, end_dt)
@@ -183,13 +204,16 @@ class TestIndicatorStitchingAcrossRolls:
 
     def test_no_conditions_returns_empty(self):
         """No conditions means no indicator fetch needed."""
-        from datetime import datetime, UTC
-        schedule = pl.DataFrame({
-            "date": pl.Series([date(2024, 1, 2)], dtype=pl.Date),
-            "underlying_id": pl.Series([1], dtype=pl.Int64),
-        })
+        from datetime import UTC, datetime
+
+        schedule = pl.DataFrame(
+            {
+                "date": pl.Series([date(2024, 1, 2)], dtype=pl.Date),
+                "underlying_id": pl.Series([1], dtype=pl.Int64),
+            }
+        )
         start_dt = datetime(2024, 1, 1, tzinfo=UTC)
-        end_dt   = datetime(2024, 5, 31, 23, 59, 59, tzinfo=UTC)
+        end_dt = datetime(2024, 5, 31, 23, 59, 59, tzinfo=UTC)
 
         scanner = _make_scanner(self.db, conditions=[])
         result = scanner._get_indicators_for_schedule(schedule, start_dt, end_dt)
@@ -197,17 +221,22 @@ class TestIndicatorStitchingAcrossRolls:
 
     def test_preloaded_indicators_bypass_schedule(self):
         """Preloaded indicators should be returned as-is without any DB query."""
-        from datetime import datetime, UTC
-        preloaded = pl.DataFrame({
-            "ts_event": pl.Series([], dtype=pl.Datetime("us", "UTC")),
-            "ves1d": pl.Series([], dtype=pl.Float64),
-        })
-        schedule = pl.DataFrame({
-            "date": pl.Series([date(2024, 1, 2)], dtype=pl.Date),
-            "underlying_id": pl.Series([1], dtype=pl.Int64),
-        })
+        from datetime import UTC, datetime
+
+        preloaded = pl.DataFrame(
+            {
+                "ts_event": pl.Series([], dtype=pl.Datetime("us", "UTC")),
+                "ves1d": pl.Series([], dtype=pl.Float64),
+            }
+        )
+        schedule = pl.DataFrame(
+            {
+                "date": pl.Series([date(2024, 1, 2)], dtype=pl.Date),
+                "underlying_id": pl.Series([1], dtype=pl.Int64),
+            }
+        )
         start_dt = datetime(2024, 1, 1, tzinfo=UTC)
-        end_dt   = datetime(2024, 5, 31, 23, 59, 59, tzinfo=UTC)
+        end_dt = datetime(2024, 5, 31, 23, 59, 59, tzinfo=UTC)
 
         universe = UniverseConfig(
             start_date=date(2024, 1, 1),
@@ -227,7 +256,13 @@ class TestIndicatorStitchingAcrossRolls:
                 conditions=["ves1d > 20"],
             ),
             legs=[
-                LegConfig(name="short", right="put", action="sell_to_open", dte=30, delta={"target": -0.16}),
+                LegConfig(
+                    name="short",
+                    right="put",
+                    action="sell_to_open",
+                    dte=30,
+                    delta={"target": -0.16},
+                ),
             ],
             exit=ExitConfig(),
         )

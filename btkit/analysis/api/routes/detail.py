@@ -1,4 +1,5 @@
 """Per-study and per-backtest detail endpoints."""
+
 from __future__ import annotations
 
 import json
@@ -10,8 +11,9 @@ import numpy as np
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse, Response
 
-from ..db import cache_get, cache_set, query
 from btkit.analysis.metrics import PostProcessor
+
+from ..db import cache_get, cache_set, query
 
 _BACKTEST_TAGS_SQL = """
 SELECT bt.backtest_id, t.id, t.name, t.color
@@ -38,6 +40,7 @@ def _load_backtest_tags() -> dict[int, list[dict]]:
     for bt_id, t_id, t_name, t_color in rows:
         tags_by_bt.setdefault(bt_id, []).append({"id": t_id, "name": t_name, "color": t_color})
     return tags_by_bt
+
 
 router = APIRouter()
 
@@ -76,15 +79,15 @@ def _study_fingerprint(study_id: int) -> str:
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
 EXIT_REASON_MAP = {
-    "take_profit":          "TP",
-    "stop_loss":            "SL",
-    "gap_sl":               "Gap SL",
-    "gap_tp":               "Gap TP",
-    "expiry":               "Expiry",
-    "trailing_stop":        "Trailing Stop",
-    "expiry_continuation":  "Expiry (continuation)",
-    "dte_exit":             "DTE Exit",
-    "condition":            "Condition",
+    "take_profit": "TP",
+    "stop_loss": "SL",
+    "gap_sl": "Gap SL",
+    "gap_tp": "Gap TP",
+    "expiry": "Expiry",
+    "trailing_stop": "Trailing Stop",
+    "expiry_continuation": "Expiry (continuation)",
+    "dte_exit": "DTE Exit",
+    "condition": "Condition",
 }
 
 
@@ -99,7 +102,7 @@ def _clean(v: Any) -> Any:
 
 
 def _row_to_dict(cols: list[str], row: tuple) -> dict:
-    return {c: _clean(v) for c, v in zip(cols, row)}
+    return {c: _clean(v) for c, v in zip(cols, row, strict=False)}
 
 
 def _extract_params(params_json: str | None) -> dict:
@@ -111,16 +114,16 @@ def _extract_params(params_json: str | None) -> dict:
         for trade in p.get("trades", []):
             legs = trade.get("legs", [])
             short = next(
-                (l for l in legs if "sell" in l.get("action", "")),
+                (leg for leg in legs if "sell" in leg.get("action", "")),
                 legs[0] if legs else {},
             )
             _delta = short.get("delta") or {}
-            result["delta"]           = _delta.get("target") if isinstance(_delta, dict) else _delta
-            result["dte"]             = short.get("dte")
+            result["delta"] = _delta.get("target") if isinstance(_delta, dict) else _delta
+            result["dte"] = short.get("dte")
             ex = trade.get("exit", {})
             result["take_profit_pct"] = ex.get("take_profit_pct")
-            result["stop_loss"]       = ex.get("stop_loss")
-            result["min_credit"]      = trade.get("entry", {}).get("min_credit")
+            result["stop_loss"] = ex.get("stop_loss")
+            result["min_credit"] = trade.get("entry", {}).get("min_credit")
             break
     except Exception:
         return {}
@@ -531,6 +534,7 @@ ORDER BY l.id
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+
 @router.get("/studies/{study_id}")
 def study_detail(study_id: int) -> Response:
     fp = _study_fingerprint(study_id)
@@ -560,9 +564,9 @@ def study_detail(study_id: int) -> Response:
     for row in bt_rows:
         d = _row_to_dict(bt_cols, row)
         params = _extract_params(d.pop("strategy_params"))
-        d["params"]          = params
-        d["strategy_label"]  = _strategy_label(d["strategy_name"])
-        d["tags"]            = tags_by_bt.get(d["id"], [])
+        d["params"] = params
+        d["strategy_label"] = _strategy_label(d["strategy_name"])
+        d["tags"] = tags_by_bt.get(d["id"], [])
         backtests.append(d)
 
         if d["status"] == "completed":
@@ -576,7 +580,9 @@ def study_detail(study_id: int) -> Response:
                 if best_return is None or d["total_return_pct"] > best_return:
                     best_return = round(d["total_return_pct"], 2)
             if d["start_date"] is not None:
-                data_start = d["start_date"] if data_start is None else min(data_start, d["start_date"])
+                data_start = (
+                    d["start_date"] if data_start is None else min(data_start, d["start_date"])
+                )
             if d["end_date"] is not None:
                 data_end = d["end_date"] if data_end is None else max(data_end, d["end_date"])
 
@@ -610,15 +616,15 @@ def study_detail(study_id: int) -> Response:
 
     payload = {
         **study,
-        "strategies":      strats,
+        "strategies": strats,
         "strategy_labels": [_strategy_label(n) for n in strats],
-        "sweep_axes":      sweep_axes,
-        "data_start":      data_start,
-        "data_end":        data_end,
-        "total_trades":    total_trades,
-        "best_sharpe":     best_sharpe,
+        "sweep_axes": sweep_axes,
+        "data_start": data_start,
+        "data_end": data_end,
+        "total_trades": total_trades,
+        "best_sharpe": best_sharpe,
         "best_return_pct": best_return,
-        "backtests":       backtests,
+        "backtests": backtests,
     }
     body = json.dumps(payload)
     cache_set(cache_key, body, fp)
@@ -634,10 +640,10 @@ def study_equity(study_id: int) -> JSONResponse:
         bid = d["backtest_id"]
         if bid not in curves:
             curves[bid] = {
-                "backtest_id":    bid,
+                "backtest_id": bid,
                 "initial_equity": d["initial_equity"] or 100_000,
-                "cum_pnl":        [],
-                "exit_dates":     [],
+                "cum_pnl": [],
+                "exit_dates": [],
             }
         curves[bid]["cum_pnl"].append(d["cum_pnl"])
         curves[bid]["exit_dates"].append(d["exit_date"])
@@ -657,23 +663,26 @@ GROUP BY CAST(p.open_time AS DATE)
 ORDER BY trade_date ASC
 """
 
+
 @router.get("/studies/{study_id}/daily-pnl")
 def study_daily_pnl(study_id: int) -> JSONResponse:
     cols, rows = query(_STUDY_DAILY_PNL_SQL, [study_id])
-    return JSONResponse([dict(zip(cols, r)) for r in rows])
+    return JSONResponse([dict(zip(cols, r, strict=False)) for r in rows])
 
 
 @router.get("/backtests/{backtest_id}")
 def backtest_detail(backtest_id: int) -> JSONResponse:
-    cols, rows = query(_BACKTEST_DETAIL_SQL, [backtest_id, backtest_id, backtest_id, backtest_id, backtest_id])
+    cols, rows = query(
+        _BACKTEST_DETAIL_SQL, [backtest_id, backtest_id, backtest_id, backtest_id, backtest_id]
+    )
     if not rows:
         raise HTTPException(status_code=404, detail="Backtest not found")
     d = _row_to_dict(cols, rows[0])
-    d["params"]         = _extract_params(d.pop("strategy_params"))
+    d["params"] = _extract_params(d.pop("strategy_params"))
     d["strategy_label"] = _strategy_label(d["strategy_name"])
     try:
         tag_cols, tag_rows = query(_SINGLE_BACKTEST_TAGS_SQL, [backtest_id])
-        d["tags"] = [dict(zip(tag_cols, r)) for r in tag_rows]
+        d["tags"] = [dict(zip(tag_cols, r, strict=False)) for r in tag_rows]
     except Exception:
         d["tags"] = []
     return JSONResponse(d)
@@ -690,9 +699,8 @@ def backtest_positions(backtest_id: int) -> JSONResponse:
             d["continuation_exit_reason"] = EXIT_REASON_MAP.get(
                 d["continuation_exit_reason"], d["continuation_exit_reason"]
             )
-        d["return_pct"]  = (
-            round(d["net_pnl"] / d["initial_equity"] * 100, 4)
-            if d["initial_equity"] else None
+        d["return_pct"] = (
+            round(d["net_pnl"] / d["initial_equity"] * 100, 4) if d["initial_equity"] else None
         )
         d.pop("initial_equity", None)
         result.append(d)
@@ -707,9 +715,9 @@ def position_detail(position_id: int) -> JSONResponse:
     d = _row_to_dict(cols, rows[0])
 
     params = _extract_params(d.pop("strategy_params"))
-    d["exit_reason"]    = EXIT_REASON_MAP.get(d["exit_reason"], d["exit_reason"])
+    d["exit_reason"] = EXIT_REASON_MAP.get(d["exit_reason"], d["exit_reason"])
     d["strategy_label"] = _strategy_label(d["strategy_name"])
-    d["params"]         = params
+    d["params"] = params
 
     # Legs
     leg_cols, leg_rows = query(_POSITION_LEGS_SQL, [position_id])
@@ -724,15 +732,11 @@ def position_detail(position_id: int) -> JSONResponse:
         * (leg["quantity"] or 1)
         for leg in legs
     )
-    d["credit_received"]      = round(credit, 2)
-    d["take_profit_dollars"]  = (
-        round(credit * params["take_profit_pct"], 2)
-        if params.get("take_profit_pct") else None
+    d["credit_received"] = round(credit, 2)
+    d["take_profit_dollars"] = (
+        round(credit * params["take_profit_pct"], 2) if params.get("take_profit_pct") else None
     )
-    d["stop_loss_dollars"]    = (
-        -abs(params["stop_loss"])
-        if params.get("stop_loss") else None
-    )
+    d["stop_loss_dollars"] = -abs(params["stop_loss"]) if params.get("stop_loss") else None
 
     # Continuation (populated when on_sl_long_continuation strategy was used)
     try:

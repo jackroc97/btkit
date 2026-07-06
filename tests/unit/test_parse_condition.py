@@ -1,6 +1,7 @@
 """
 Unit tests for parse_condition arithmetic and abs() extensions.
 """
+
 from __future__ import annotations
 
 import polars as pl
@@ -17,7 +18,6 @@ def _eval(expr_str: str, **col_values: float) -> bool:
 
 
 class TestArithmetic:
-
     def test_subtraction_in_comparison(self):
         assert _eval("a - b >= 1.0", a=3.0, b=1.5) is True
         assert _eval("a - b >= 1.0", a=2.0, b=1.5) is False
@@ -41,21 +41,26 @@ class TestArithmetic:
     def test_mtm_gain_condition(self):
         # position_mark - open_mark >= 2.0 * abs(open_mark)
         # 5.0 - (-2.0) = 7.0 >= 2.0 * 2.0 = 4.0 → True
-        assert _eval(
-            "position_mark - open_mark >= 2.0 * abs(open_mark)",
-            position_mark=5.0,
-            open_mark=-2.0,
-        ) is True
+        assert (
+            _eval(
+                "position_mark - open_mark >= 2.0 * abs(open_mark)",
+                position_mark=5.0,
+                open_mark=-2.0,
+            )
+            is True
+        )
         # 1.0 - (-2.0) = 3.0 < 2.0 * 2.0 = 4.0 → False
-        assert _eval(
-            "position_mark - open_mark >= 2.0 * abs(open_mark)",
-            position_mark=1.0,
-            open_mark=-2.0,
-        ) is False
+        assert (
+            _eval(
+                "position_mark - open_mark >= 2.0 * abs(open_mark)",
+                position_mark=1.0,
+                open_mark=-2.0,
+            )
+            is False
+        )
 
 
 class TestAbsFunction:
-
     def test_abs_positive(self):
         assert _eval("abs(a) < 0.30", a=0.20) is True
         assert _eval("abs(a) < 0.30", a=0.35) is False
@@ -74,7 +79,6 @@ class TestAbsFunction:
 
 
 class TestArithmeticWithBooleans:
-
     def test_arithmetic_combined_with_and(self):
         assert _eval("a - b > 1.0 and c < 10.0", a=5.0, b=2.0, c=8.0) is True
         assert _eval("a - b > 1.0 and c < 10.0", a=5.0, b=2.0, c=12.0) is False
@@ -86,7 +90,6 @@ class TestArithmeticWithBooleans:
 
 
 class TestUnsupportedSyntax:
-
     def test_unsupported_operator_raises(self):
         with pytest.raises(ValueError, match="Unsupported arithmetic operator"):
             parse_condition("a ** 2 > 4")

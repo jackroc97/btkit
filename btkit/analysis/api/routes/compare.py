@@ -1,11 +1,11 @@
 """Equity-curve overlay endpoints (buy & hold, live-trade CSV)."""
+
 from __future__ import annotations
 
 import csv as _csv
-from datetime import datetime, date
-from typing import Optional
+from datetime import date, datetime
 
-from fastapi import APIRouter, HTTPException, Query, UploadFile, File
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse
 
 router = APIRouter()
@@ -13,15 +13,15 @@ router = APIRouter()
 
 @router.get("/compare/buyhold")
 def compare_buyhold(
-    ticker: str         = Query(...),
-    qty:    float       = Query(1.0),
-    start:  Optional[str] = Query(None),
-    end:    Optional[str] = Query(None),
+    ticker: str = Query(...),
+    qty: float = Query(1.0),
+    start: str | None = Query(None),
+    end: str | None = Query(None),
 ) -> JSONResponse:
     try:
         import yfinance as yf
     except ImportError:
-        raise HTTPException(400, "yfinance not installed — run: pip install yfinance")
+        raise HTTPException(400, "yfinance not installed — run: pip install yfinance") from None
 
     kw: dict = dict(auto_adjust=True, progress=False)
     if start:
@@ -42,21 +42,23 @@ def compare_buyhold(
 
     first_price = float(close.iloc[0])
     dates = [d.strftime("%Y-%m-%d") for d in close.index]
-    pnls  = [round((float(p) - first_price) * qty, 2) for p in close.values.flatten()]
+    pnls = [round((float(p) - first_price) * qty, 2) for p in close.values.flatten()]
 
     qty_label = f" × {qty:g}" if qty != 1 else ""
-    return JSONResponse({
-        "x":    dates,
-        "y":    pnls,
-        "name": f"{ticker.upper()} Buy & Hold{qty_label}",
-    })
+    return JSONResponse(
+        {
+            "x": dates,
+            "y": pnls,
+            "name": f"{ticker.upper()} Buy & Hold{qty_label}",
+        }
+    )
 
 
 @router.post("/compare/livetrades")
 async def compare_livetrades(
-    file:  UploadFile      = File(...),
-    start: Optional[str]  = Query(None),
-    end:   Optional[str]  = Query(None),
+    file: UploadFile = File(...),
+    start: str | None = Query(None),
+    end: str | None = Query(None),
 ) -> JSONResponse:
     raw = await file.read()
     try:
@@ -65,7 +67,7 @@ async def compare_livetrades(
         text = raw.decode("latin-1")
 
     start_date = date.fromisoformat(start) if start else None
-    end_date   = date.fromisoformat(end)   if end   else None
+    end_date = date.fromisoformat(end) if end else None
 
     lines = text.splitlines()
     if not lines:
@@ -77,7 +79,7 @@ async def compare_livetrades(
 
     fl = {h.strip().lower(): h.strip() for h in reader.fieldnames}
     date_key = next((fl[k] for k in ("date", "datetime", "time", "timestamp") if k in fl), None)
-    pnl_key  = next((fl[k] for k in ("pnl", "net_pnl", "profit", "realized_pnl") if k in fl), None)
+    pnl_key = next((fl[k] for k in ("pnl", "net_pnl", "profit", "realized_pnl") if k in fl), None)
 
     if date_key is None:
         raise HTTPException(400, "CSV must have a 'date', 'datetime', or 'timestamp' column")
@@ -87,7 +89,7 @@ async def compare_livetrades(
     rows: list[tuple[datetime, float]] = []
     for row in reader:
         date_str = (row.get(date_key) or "").strip()
-        pnl_str  = (row.get(pnl_key)  or "0").strip()
+        pnl_str = (row.get(pnl_key) or "0").strip()
         try:
             pnl = float(pnl_str)
         except ValueError:
@@ -120,8 +122,10 @@ async def compare_livetrades(
         cumulative.append(round(total, 2))
 
     fname = file.filename or "CSV"
-    return JSONResponse({
-        "x":    dates,
-        "y":    cumulative,
-        "name": f"Live Trades ({fname})",
-    })
+    return JSONResponse(
+        {
+            "x": dates,
+            "y": cumulative,
+            "name": f"Live Trades ({fname})",
+        }
+    )

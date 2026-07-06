@@ -5,6 +5,7 @@ Uses an in-memory DuckDB populated with a small fixture dataset so that
 option_greeks() and option_bars() can be tested end-to-end without a real
 input database file.
 """
+
 from __future__ import annotations
 
 import textwrap
@@ -12,15 +13,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import duckdb
-import polars as pl
 import pytest
 
 from btkit.pipeline.indicators import IndicatorContext, IndicatorRunner
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture()
 def con():
@@ -93,28 +93,80 @@ def con():
         ("2024-01-02 14:31:00+00", 1, "ESH4", 4805.0, 4815.0, 4800.0, 4810.0, 1100),
         ("2024-01-02 14:32:00+00", 1, "ESH4", 4810.0, 4820.0, 4805.0, 4815.0, 900),
     ]
-    c.executemany(
-        "INSERT INTO underlying_bars VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows
-    )
+    c.executemany("INSERT INTO underlying_bars VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
 
     # Seed option_greeks — three instruments, two DTE buckets
     greeks_rows = [
-        ("2024-01-02 14:30:00+00", 101, 1, 7,  0.019, 0.18, -0.20, 0.01, -0.05, 0.10),
+        ("2024-01-02 14:30:00+00", 101, 1, 7, 0.019, 0.18, -0.20, 0.01, -0.05, 0.10),
         ("2024-01-02 14:30:00+00", 102, 1, 21, 0.058, 0.20, -0.30, 0.008, -0.03, 0.25),
-        ("2024-01-02 14:30:00+00", 103, 1, 21, 0.058, 0.22,  0.30, 0.008, -0.03, 0.24),
-        ("2024-01-02 14:31:00+00", 101, 1, 7,  0.019, 0.19, -0.21, 0.011, -0.05, 0.11),
+        ("2024-01-02 14:30:00+00", 103, 1, 21, 0.058, 0.22, 0.30, 0.008, -0.03, 0.24),
+        ("2024-01-02 14:31:00+00", 101, 1, 7, 0.019, 0.19, -0.21, 0.011, -0.05, 0.11),
         ("2024-01-02 14:31:00+00", 102, 1, 21, 0.058, 0.21, -0.31, 0.009, -0.03, 0.26),
     ]
-    c.executemany(
-        "INSERT INTO option_greeks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", greeks_rows
-    )
+    c.executemany("INSERT INTO option_greeks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", greeks_rows)
 
     # Seed option_bars — calls and puts across two expirations
     bar_rows = [
-        ("2024-01-02 14:30:00+00", 101, 1, "ES240109P04750", "2024-01-09", 4750.0, "P", 50, 10.0, 11.0, 9.5, 10.5, 200),
-        ("2024-01-02 14:30:00+00", 102, 1, "ES240123P04725", "2024-01-23", 4725.0, "P", 50, 20.0, 21.0, 19.0, 20.5, 300),
-        ("2024-01-02 14:30:00+00", 103, 1, "ES240123C04850", "2024-01-23", 4850.0, "C", 50, 15.0, 16.0, 14.5, 15.5, 250),
-        ("2024-01-02 14:31:00+00", 101, 1, "ES240109P04750", "2024-01-09", 4750.0, "P", 50, 10.5, 11.5, 10.0, 11.0, 180),
+        (
+            "2024-01-02 14:30:00+00",
+            101,
+            1,
+            "ES240109P04750",
+            "2024-01-09",
+            4750.0,
+            "P",
+            50,
+            10.0,
+            11.0,
+            9.5,
+            10.5,
+            200,
+        ),
+        (
+            "2024-01-02 14:30:00+00",
+            102,
+            1,
+            "ES240123P04725",
+            "2024-01-23",
+            4725.0,
+            "P",
+            50,
+            20.0,
+            21.0,
+            19.0,
+            20.5,
+            300,
+        ),
+        (
+            "2024-01-02 14:30:00+00",
+            103,
+            1,
+            "ES240123C04850",
+            "2024-01-23",
+            4850.0,
+            "C",
+            50,
+            15.0,
+            16.0,
+            14.5,
+            15.5,
+            250,
+        ),
+        (
+            "2024-01-02 14:31:00+00",
+            101,
+            1,
+            "ES240109P04750",
+            "2024-01-09",
+            4750.0,
+            "P",
+            50,
+            10.5,
+            11.5,
+            10.0,
+            11.0,
+            180,
+        ),
     ]
     c.executemany(
         "INSERT INTO option_bars VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", bar_rows
@@ -126,7 +178,7 @@ def con():
 
 def _make_ctx(con, underlying_id=1) -> IndicatorContext:
     start = datetime(2024, 1, 2, 14, 30, tzinfo=UTC)
-    end   = datetime(2024, 1, 2, 14, 32, tzinfo=UTC)
+    end = datetime(2024, 1, 2, 14, 32, tzinfo=UTC)
     return IndicatorContext(con, underlying_id, start, end)
 
 
@@ -134,8 +186,8 @@ def _make_ctx(con, underlying_id=1) -> IndicatorContext:
 # IndicatorContext — attribute
 # ---------------------------------------------------------------------------
 
-class TestIndicatorContextAttributes:
 
+class TestIndicatorContextAttributes:
     def test_underlying_id_exposed(self, con):
         ctx = _make_ctx(con, underlying_id=42)
         assert ctx.underlying_id == 42
@@ -145,8 +197,8 @@ class TestIndicatorContextAttributes:
 # IndicatorContext.option_greeks()
 # ---------------------------------------------------------------------------
 
-class TestOptionGreeks:
 
+class TestOptionGreeks:
     def test_returns_all_greeks_in_window(self, con):
         ctx = _make_ctx(con)
         df = ctx.option_greeks()
@@ -192,7 +244,17 @@ class TestOptionGreeks:
     def test_columns_present(self, con):
         ctx = _make_ctx(con)
         df = ctx.option_greeks()
-        expected = {"ts_event", "instrument_id", "dte", "T", "iv", "delta", "gamma", "theta", "vega"}
+        expected = {
+            "ts_event",
+            "instrument_id",
+            "dte",
+            "T",
+            "iv",
+            "delta",
+            "gamma",
+            "theta",
+            "vega",
+        }
         assert expected.issubset(set(df.columns))
 
     def test_no_underlying_id_in_output(self, con):
@@ -205,8 +267,8 @@ class TestOptionGreeks:
 # IndicatorContext.option_bars()
 # ---------------------------------------------------------------------------
 
-class TestOptionBars:
 
+class TestOptionBars:
     def test_returns_bars_in_window(self, con):
         ctx = _make_ctx(con)
         df = ctx.option_bars()
@@ -252,8 +314,18 @@ class TestOptionBars:
     def test_columns_present(self, con):
         ctx = _make_ctx(con)
         df = ctx.option_bars()
-        expected = {"ts_event", "instrument_id", "symbol", "expiration",
-                    "strike_price", "right", "multiplier", "open", "close", "volume"}
+        expected = {
+            "ts_event",
+            "instrument_id",
+            "symbol",
+            "expiration",
+            "strike_price",
+            "right",
+            "multiplier",
+            "open",
+            "close",
+            "volume",
+        }
         assert expected.issubset(set(df.columns))
 
 
@@ -261,8 +333,8 @@ class TestOptionBars:
 # IndicatorRunner — arity detection and context forwarding
 # ---------------------------------------------------------------------------
 
-class TestIndicatorRunnerArityDetection:
 
+class TestIndicatorRunnerArityDetection:
     def _write_script(self, tmp_path: Path, source: str) -> Path:
         p = tmp_path / "indicator.py"
         p.write_text(textwrap.dedent(source))
@@ -270,33 +342,42 @@ class TestIndicatorRunnerArityDetection:
 
     def test_single_arg_script_runs_without_context(self, con, tmp_path):
         """A compute(df) script runs normally — no context passed."""
-        script = self._write_script(tmp_path, """
+        script = self._write_script(
+            tmp_path,
+            """
             import polars as pl
 
             def compute(df):
                 return df.with_columns(pl.lit(1.0).alias("my_ind"))
-        """)
+        """,
+        )
         runner = IndicatorRunner(con, script)
         assert runner._wants_context is False
 
     def test_two_arg_script_detected(self, con, tmp_path):
         """A compute(df, ctx) script is detected as wanting context."""
-        script = self._write_script(tmp_path, """
+        script = self._write_script(
+            tmp_path,
+            """
             def compute(df, ctx):
                 return df.with_columns(__import__('polars').lit(0.0).alias("x"))
-        """)
+        """,
+        )
         runner = IndicatorRunner(con, script)
         assert runner._wants_context is True
 
     def test_single_arg_script_writes_indicator(self, con, tmp_path):
         """Single-arg compute produces indicator rows in indicator_bars."""
         # Need at least one underlying_bars row for runner.run() to proceed
-        script = self._write_script(tmp_path, """
+        script = self._write_script(
+            tmp_path,
+            """
             import polars as pl
 
             def compute(df):
                 return df.with_columns(pl.lit(42.0).alias("test_ind"))
-        """)
+        """,
+        )
         runner = IndicatorRunner(con, script)
         runner.run(underlying_id=1)
 
@@ -309,7 +390,9 @@ class TestIndicatorRunnerArityDetection:
 
     def test_two_arg_script_receives_context_and_writes_indicator(self, con, tmp_path):
         """Two-arg compute receives a live IndicatorContext and can call option_greeks()."""
-        script = self._write_script(tmp_path, """
+        script = self._write_script(
+            tmp_path,
+            """
             import polars as pl
 
             def compute(df, ctx):
@@ -317,7 +400,8 @@ class TestIndicatorRunnerArityDetection:
                 # Count rows returned as a constant indicator value
                 count = float(len(greeks))
                 return df.with_columns(pl.lit(count).alias("greeks_count"))
-        """)
+        """,
+        )
         runner = IndicatorRunner(con, script)
         runner.run(underlying_id=1)
 
@@ -331,13 +415,16 @@ class TestIndicatorRunnerArityDetection:
 
     def test_two_arg_script_receives_correct_underlying_id(self, con, tmp_path):
         """ctx.underlying_id matches the underlying being processed."""
-        script = self._write_script(tmp_path, """
+        script = self._write_script(
+            tmp_path,
+            """
             import polars as pl
 
             def compute(df, ctx):
                 uid = float(ctx.underlying_id)
                 return df.with_columns(pl.lit(uid).alias("uid_check"))
-        """)
+        """,
+        )
         runner = IndicatorRunner(con, script)
         runner.run(underlying_id=1)
 
@@ -350,23 +437,29 @@ class TestIndicatorRunnerArityDetection:
 
     def test_script_missing_compute_raises(self, con, tmp_path):
         """A script without a compute() function raises AttributeError at load time."""
-        script = self._write_script(tmp_path, """
+        script = self._write_script(
+            tmp_path,
+            """
             def not_compute(df):
                 return df
-        """)
+        """,
+        )
         with pytest.raises(AttributeError, match="compute"):
             IndicatorRunner(con, script)
 
     def test_two_arg_script_option_bars(self, con, tmp_path):
         """ctx.option_bars() is accessible from a two-arg compute script."""
-        script = self._write_script(tmp_path, """
+        script = self._write_script(
+            tmp_path,
+            """
             import polars as pl
 
             def compute(df, ctx):
                 bars = ctx.option_bars(right='P')
                 count = float(len(bars))
                 return df.with_columns(pl.lit(count).alias("put_bar_count"))
-        """)
+        """,
+        )
         runner = IndicatorRunner(con, script)
         runner.run(underlying_id=1)
 

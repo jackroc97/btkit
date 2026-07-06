@@ -5,8 +5,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-import pytest
-
 from btkit.db.output_db import OutputDatabase
 from btkit.study.merger import OutputMerger
 
@@ -19,63 +17,74 @@ def _make_worker_db(
 ) -> None:
     """Helpers: populate a worker DB with synthetic rows."""
     import polars as pl
+
     with OutputDatabase(path) as odb:
         odb.create_schema()
         for i in range(backtest_rows):
-            bid = odb.write_backtest({
-                "study_id": 1,
-                "combination_id": i + 1,
-                "strategy_name": "test",
-                "strategy_params": {},
-                "initial_equity": 100_000.0,
-                "slippage_pct": 0.0,
-                "fee_per_contract": 0.0,
-                "created_at": datetime.now(UTC),
-            })
-            odb.finalize_backtest(
-                bid, status="completed", duration_s=1.0, warnings=[]
+            bid = odb.write_backtest(
+                {
+                    "study_id": 1,
+                    "combination_id": i + 1,
+                    "strategy_name": "test",
+                    "strategy_params": {},
+                    "initial_equity": 100_000.0,
+                    "slippage_pct": 0.0,
+                    "fee_per_contract": 0.0,
+                    "created_at": datetime.now(UTC),
+                }
             )
-            positions = pl.DataFrame({
-                "entry_id": list(range(positions_per_backtest)),
-                "trade_name": ["t1"] * positions_per_backtest,
-                "open_time": [datetime.now(UTC)] * positions_per_backtest,
-                "exit_time": [datetime.now(UTC)] * positions_per_backtest,
-                "exit_reason": ["tp"] * positions_per_backtest,
-                "open_mark": [1.0] * positions_per_backtest,
-                "exit_mark": [0.5] * positions_per_backtest,
-                "worst_mark": [1.5] * positions_per_backtest,
-                "slippage_cost": [0.0] * positions_per_backtest,
-                "fee_cost": [0.0] * positions_per_backtest,
-                "net_pnl": [50.0] * positions_per_backtest,
-            })
-            legs = pl.DataFrame({
-                "entry_id": list(range(positions_per_backtest)),
-                "instrument_id": [1001] * positions_per_backtest,
-                "symbol": ["ESZ26 P4500"] * positions_per_backtest,
-                "expiration": [datetime.now(UTC).date()] * positions_per_backtest,
-                "strike_price": [4500.0] * positions_per_backtest,
-                "right": ["P"] * positions_per_backtest,
-                "action": ["STO"] * positions_per_backtest,
-                "quantity": [1] * positions_per_backtest,
-                "multiplier": [50] * positions_per_backtest,
-                "open_price": [1.0] * positions_per_backtest,
-                "exit_price": [0.5] * positions_per_backtest,
-                "entry_delta": [-0.25] * positions_per_backtest,
-                "entry_iv": [0.20] * positions_per_backtest,
-                "entry_gamma": [0.01] * positions_per_backtest,
-                "entry_theta": [-0.05] * positions_per_backtest,
-                "entry_vega": [2.0] * positions_per_backtest,
-                "entry_dte": [21] * positions_per_backtest,
-            })
+            odb.finalize_backtest(bid, status="completed", duration_s=1.0, warnings=[])
+            positions = pl.DataFrame(
+                {
+                    "entry_id": list(range(positions_per_backtest)),
+                    "trade_name": ["t1"] * positions_per_backtest,
+                    "open_time": [datetime.now(UTC)] * positions_per_backtest,
+                    "exit_time": [datetime.now(UTC)] * positions_per_backtest,
+                    "exit_reason": ["tp"] * positions_per_backtest,
+                    "open_mark": [1.0] * positions_per_backtest,
+                    "exit_mark": [0.5] * positions_per_backtest,
+                    "worst_mark": [1.5] * positions_per_backtest,
+                    "slippage_cost": [0.0] * positions_per_backtest,
+                    "fee_cost": [0.0] * positions_per_backtest,
+                    "net_pnl": [50.0] * positions_per_backtest,
+                }
+            )
+            legs = pl.DataFrame(
+                {
+                    "entry_id": list(range(positions_per_backtest)),
+                    "instrument_id": [1001] * positions_per_backtest,
+                    "symbol": ["ESZ26 P4500"] * positions_per_backtest,
+                    "expiration": [datetime.now(UTC).date()] * positions_per_backtest,
+                    "strike_price": [4500.0] * positions_per_backtest,
+                    "right": ["P"] * positions_per_backtest,
+                    "action": ["STO"] * positions_per_backtest,
+                    "quantity": [1] * positions_per_backtest,
+                    "multiplier": [50] * positions_per_backtest,
+                    "open_price": [1.0] * positions_per_backtest,
+                    "exit_price": [0.5] * positions_per_backtest,
+                    "entry_delta": [-0.25] * positions_per_backtest,
+                    "entry_iv": [0.20] * positions_per_backtest,
+                    "entry_gamma": [0.01] * positions_per_backtest,
+                    "entry_theta": [-0.05] * positions_per_backtest,
+                    "entry_vega": [2.0] * positions_per_backtest,
+                    "entry_dte": [21] * positions_per_backtest,
+                }
+            )
             cont_count = min(continuations_per_backtest, positions_per_backtest)
-            continuations = pl.DataFrame({
-                "entry_id": list(range(cont_count)),
-                "continuation_entry_price": [2.0] * cont_count,
-                "continuation_exit_time": [datetime.now(UTC)] * cont_count,
-                "continuation_exit_price": [5.0] * cont_count,
-                "continuation_exit_reason": ["trailing_stop"] * cont_count,
-                "continuation_pnl": [150.0] * cont_count,
-            }) if cont_count > 0 else None
+            continuations = (
+                pl.DataFrame(
+                    {
+                        "entry_id": list(range(cont_count)),
+                        "continuation_entry_price": [2.0] * cont_count,
+                        "continuation_exit_time": [datetime.now(UTC)] * cont_count,
+                        "continuation_exit_price": [5.0] * cont_count,
+                        "continuation_exit_reason": ["trailing_stop"] * cont_count,
+                        "continuation_pnl": [150.0] * cont_count,
+                    }
+                )
+                if cont_count > 0
+                else None
+            )
             odb.write_results(bid, positions, legs, continuations)
 
 
@@ -164,7 +173,9 @@ class TestIdResequencing:
         OutputMerger().merge([w1, w2], output, cleanup=False)
 
         with OutputDatabase(output) as odb:
-            ids = [r[0] for r in odb._con.execute("SELECT id FROM position_leg ORDER BY id").fetchall()]
+            ids = [
+                r[0] for r in odb._con.execute("SELECT id FROM position_leg ORDER BY id").fetchall()
+            ]
         assert len(ids) == len(set(ids))
 
     def test_position_backtest_id_fk_preserved(self, tmp_path):
@@ -219,11 +230,9 @@ class TestIdResequencing:
         OutputMerger().merge([w1], output, cleanup=False)
 
         with OutputDatabase(output) as odb:
-            row = odb._con.execute(
-                "SELECT study_id, combination_id FROM backtest"
-            ).fetchone()
-        assert row[0] == 1   # study_id preserved
-        assert row[1] == 1   # combination_id preserved
+            row = odb._con.execute("SELECT study_id, combination_id FROM backtest").fetchone()
+        assert row[0] == 1  # study_id preserved
+        assert row[1] == 1  # combination_id preserved
 
 
 class TestContinuationMerge:
@@ -240,9 +249,7 @@ class TestContinuationMerge:
         OutputMerger().merge([w1, w2], output, cleanup=False)
 
         with OutputDatabase(output) as odb:
-            pc_count = odb._con.execute(
-                "SELECT COUNT(*) FROM position_continuation"
-            ).fetchone()[0]
+            pc_count = odb._con.execute("SELECT COUNT(*) FROM position_continuation").fetchone()[0]
         assert pc_count == 5
 
     def test_continuation_ids_unique(self, tmp_path):
@@ -297,9 +304,7 @@ class TestContinuationMerge:
         OutputMerger().merge([w1], output, cleanup=False)
 
         with OutputDatabase(output) as odb:
-            pc_count = odb._con.execute(
-                "SELECT COUNT(*) FROM position_continuation"
-            ).fetchone()[0]
+            pc_count = odb._con.execute("SELECT COUNT(*) FROM position_continuation").fetchone()[0]
         assert pc_count == 0
 
 
@@ -309,9 +314,7 @@ class TestEdgeCases:
         with OutputDatabase(output) as odb:
             odb.create_schema()
         # Should not raise even if the path doesn't exist
-        OutputMerger().merge(
-            [str(tmp_path / "nonexistent.db")], output, cleanup=False
-        )
+        OutputMerger().merge([str(tmp_path / "nonexistent.db")], output, cleanup=False)
 
     def test_cleanup_removes_tmp_dir(self, tmp_path):
         w1 = str(tmp_path / "worker_dir" / "w1.db")

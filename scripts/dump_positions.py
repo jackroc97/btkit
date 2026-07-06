@@ -14,14 +14,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import polars as pl
 
 from btkit.backtest.engine import BacktestEngine
 from btkit.db.input_db import InputDatabase
 from btkit.db.output_db import OutputDatabase
 from btkit.strategy.loader import load_strategy
 
-INPUT_DB   = "/tmp/btkit_test_ingest.db"
+INPUT_DB = "/tmp/btkit_test_ingest.db"
 STRATEGIES = sorted(Path("tests/fixtures/strategies").glob("*.yaml"))
 
 

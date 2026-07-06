@@ -34,14 +34,16 @@ def run(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
 
     if not neg_close.is_empty():
         results.append(
-            neg_close.select([
-                pl.col("instrument_id"),
-                pl.col("ts_event"),
-                pl.lit("NEGATIVE_CLOSE").alias("flag_code"),
-                pl.lit("hard").alias("flag_severity"),
-                pl.col("flag_value"),
-                pl.lit(0.0).alias("threshold"),
-            ])
+            neg_close.select(
+                [
+                    pl.col("instrument_id"),
+                    pl.col("ts_event"),
+                    pl.lit("NEGATIVE_CLOSE").alias("flag_code"),
+                    pl.lit("hard").alias("flag_severity"),
+                    pl.col("flag_value"),
+                    pl.lit(0.0).alias("threshold"),
+                ]
+            )
         )
 
     # NEGATIVE_DTE -----------------------------------------------------------------
@@ -57,14 +59,16 @@ def run(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
 
     if not neg_dte.is_empty():
         results.append(
-            neg_dte.select([
-                pl.col("instrument_id"),
-                pl.col("ts_event"),
-                pl.lit("NEGATIVE_DTE").alias("flag_code"),
-                pl.lit("hard").alias("flag_severity"),
-                pl.col("flag_value"),
-                pl.lit(0.0).alias("threshold"),
-            ])
+            neg_dte.select(
+                [
+                    pl.col("instrument_id"),
+                    pl.col("ts_event"),
+                    pl.lit("NEGATIVE_DTE").alias("flag_code"),
+                    pl.lit("hard").alias("flag_severity"),
+                    pl.col("flag_value"),
+                    pl.lit(0.0).alias("threshold"),
+                ]
+            )
         )
 
     # ZOMBIE_BAR -------------------------------------------------------------------
@@ -80,14 +84,16 @@ def run(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
 
     if not zombie.is_empty():
         results.append(
-            zombie.select([
-                pl.col("instrument_id"),
-                pl.col("ts_event"),
-                pl.lit("ZOMBIE_BAR").alias("flag_code"),
-                pl.lit("hard").alias("flag_severity"),
-                pl.col("flag_value"),
-                pl.lit(0.0).alias("threshold"),
-            ])
+            zombie.select(
+                [
+                    pl.col("instrument_id"),
+                    pl.col("ts_event"),
+                    pl.lit("ZOMBIE_BAR").alias("flag_code"),
+                    pl.lit("hard").alias("flag_severity"),
+                    pl.col("flag_value"),
+                    pl.lit(0.0).alias("threshold"),
+                ]
+            )
         )
 
     # DELTA_SIGN_ERROR and DELTA_MAGNITUDE_ERROR ------------------------------------
@@ -114,34 +120,37 @@ def run(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
     ).pl()
 
     if not delta_issues.is_empty():
-        sign_mask = (
-            ((delta_issues["right"] == "P") & (delta_issues["delta"] > 0))
-            | ((delta_issues["right"] == "C") & (delta_issues["delta"] < 0))
+        sign_mask = ((delta_issues["right"] == "P") & (delta_issues["delta"] > 0)) | (
+            (delta_issues["right"] == "C") & (delta_issues["delta"] < 0)
         )
         sign_df = delta_issues.filter(sign_mask)
         if not sign_df.is_empty():
             results.append(
-                sign_df.select([
-                    pl.col("instrument_id"),
-                    pl.col("ts_event"),
-                    pl.lit("DELTA_SIGN_ERROR").alias("flag_code"),
-                    pl.lit("hard").alias("flag_severity"),
-                    pl.col("delta").alias("flag_value"),
-                    pl.lit(0.0).alias("threshold"),
-                ])
+                sign_df.select(
+                    [
+                        pl.col("instrument_id"),
+                        pl.col("ts_event"),
+                        pl.lit("DELTA_SIGN_ERROR").alias("flag_code"),
+                        pl.lit("hard").alias("flag_severity"),
+                        pl.col("delta").alias("flag_value"),
+                        pl.lit(0.0).alias("threshold"),
+                    ]
+                )
             )
 
         mag_df = delta_issues.filter(pl.col("delta").abs() > 1.0)
         if not mag_df.is_empty():
             results.append(
-                mag_df.select([
-                    pl.col("instrument_id"),
-                    pl.col("ts_event"),
-                    pl.lit("DELTA_MAGNITUDE_ERROR").alias("flag_code"),
-                    pl.lit("hard").alias("flag_severity"),
-                    pl.col("delta").abs().alias("flag_value"),
-                    pl.lit(1.0).alias("threshold"),
-                ])
+                mag_df.select(
+                    [
+                        pl.col("instrument_id"),
+                        pl.col("ts_event"),
+                        pl.lit("DELTA_MAGNITUDE_ERROR").alias("flag_code"),
+                        pl.lit("hard").alias("flag_severity"),
+                        pl.col("delta").abs().alias("flag_value"),
+                        pl.lit(1.0).alias("threshold"),
+                    ]
+                )
             )
 
     if not results:

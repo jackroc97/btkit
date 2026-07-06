@@ -1,10 +1,12 @@
 """UI preference persistence: GET/PUT /api/preferences/{key}."""
+
 from __future__ import annotations
+
+from typing import Any
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import Any
 
 from ..db import pref_get, pref_set
 

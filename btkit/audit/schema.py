@@ -4,12 +4,12 @@ Audit schema: FlagCode / FlagSeverity enums, severity maps, DDL, and filter reso
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 import polars as pl
 
 
-class FlagCode(str, Enum):
+class FlagCode(StrEnum):
     # Phase 1 — implied volatility
     IV_NAN = "IV_NAN"
     IV_SENTINEL = "IV_SENTINEL"
@@ -28,28 +28,32 @@ class FlagCode(str, Enum):
     DELTA_MAGNITUDE_ERROR = "DELTA_MAGNITUDE_ERROR"
 
 
-class FlagSeverity(str, Enum):
+class FlagSeverity(StrEnum):
     HARD = "hard"
     SOFT = "soft"
 
 
-HARD_FLAGS: frozenset[FlagCode] = frozenset({
-    FlagCode.BARS_TRUNCATED,
-    FlagCode.NEGATIVE_CLOSE,
-    FlagCode.NEGATIVE_DTE,
-    FlagCode.ZOMBIE_BAR,
-    FlagCode.DELTA_SIGN_ERROR,
-    FlagCode.DELTA_MAGNITUDE_ERROR,
-})
+HARD_FLAGS: frozenset[FlagCode] = frozenset(
+    {
+        FlagCode.BARS_TRUNCATED,
+        FlagCode.NEGATIVE_CLOSE,
+        FlagCode.NEGATIVE_DTE,
+        FlagCode.ZOMBIE_BAR,
+        FlagCode.DELTA_SIGN_ERROR,
+        FlagCode.DELTA_MAGNITUDE_ERROR,
+    }
+)
 
-SOFT_FLAGS: frozenset[FlagCode] = frozenset({
-    FlagCode.IV_NAN,
-    FlagCode.IV_SENTINEL,
-    FlagCode.IV_HIGH,
-    FlagCode.DELTA_INCONSISTENT,
-    FlagCode.BARS_SPARSE,
-    FlagCode.NO_EXPIRY_BARS,
-})
+SOFT_FLAGS: frozenset[FlagCode] = frozenset(
+    {
+        FlagCode.IV_NAN,
+        FlagCode.IV_SENTINEL,
+        FlagCode.IV_HIGH,
+        FlagCode.DELTA_INCONSISTENT,
+        FlagCode.BARS_SPARSE,
+        FlagCode.NO_EXPIRY_BARS,
+    }
+)
 
 FLAG_SEVERITY: dict[FlagCode, FlagSeverity] = {
     **{c: FlagSeverity.HARD for c in HARD_FLAGS},

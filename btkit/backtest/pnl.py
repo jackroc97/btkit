@@ -32,7 +32,7 @@ class BacktestPositions:
     """Computed results ready to be written to the output database."""
 
     positions: pl.DataFrame  # matches position table schema
-    legs: pl.DataFrame       # matches position_leg table schema
+    legs: pl.DataFrame  # matches position_leg table schema
     continuations: pl.DataFrame  # matches position_continuation table schema (may be empty)
 
 
@@ -186,14 +186,18 @@ class PnLCalculator:
                             * pl.lit(ll_quantity)
                         ).alias("continuation_pnl")
                     ).drop("_mult")
-                    continuations_list.append(cont.select([
-                        "entry_id",
-                        "continuation_entry_price",
-                        "continuation_exit_time",
-                        "continuation_exit_price",
-                        "continuation_exit_reason",
-                        "continuation_pnl",
-                    ]))
+                    continuations_list.append(
+                        cont.select(
+                            [
+                                "entry_id",
+                                "continuation_entry_price",
+                                "continuation_exit_time",
+                                "continuation_exit_price",
+                                "continuation_exit_reason",
+                                "continuation_pnl",
+                            ]
+                        )
+                    )
 
         if not positions_list:
             return BacktestPositions(

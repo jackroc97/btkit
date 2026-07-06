@@ -73,10 +73,12 @@ _DASHBOARD_PID_FILE = Path.home() / ".btkit" / "dashboard.pid"
 def _pid_on_port(port: int) -> int | None:
     """Return the PID listening on *port*, or None if the port is free."""
     import subprocess
+
     try:
         r = subprocess.run(
             ["lsof", "-ti", f"TCP:{port}", "-sTCP:LISTEN"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         pids = [int(p) for p in r.stdout.split() if p.strip().isdigit()]
         return pids[0] if pids else None
@@ -100,7 +102,7 @@ def _kill_dashboard(port: int = 8050) -> None:
             typer.echo(f"PID {pid} was not running — stale PID file removed.")
         except PermissionError:
             typer.echo(f"Error: permission denied stopping PID {pid}.", err=True)
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=1) from None
 
     # Also kill anything still holding the port (catches sessions started outside --background).
     port_pid = _pid_on_port(port)
@@ -152,20 +154,14 @@ def _ensure_indicators(input_db_path: str, strategy: StrategyDefinition) -> None
     typer.echo("Checking strategy indicators...")
     con = duckdb.connect(input_db_path)
     try:
-        underlyings = con.execute(
-            "SELECT DISTINCT instrument_id FROM underlying_bars"
-        ).fetchall()
+        underlyings = con.execute("SELECT DISTINCT instrument_id FROM underlying_bars").fetchall()
 
-        max_underlying_ts = con.execute(
-            "SELECT MAX(ts_event) FROM underlying_bars"
-        ).fetchone()[0]
+        max_underlying_ts = con.execute("SELECT MAX(ts_event) FROM underlying_bars").fetchone()[0]
 
         for script_str in strategy.indicators:
             script_path = Path(script_str)
             if not script_path.exists():
-                typer.echo(
-                    f"  WARNING: indicator script not found: {script_path}", err=True
-                )
+                typer.echo(f"  WARNING: indicator script not found: {script_path}", err=True)
                 continue
 
             script_source = script_path.read_text()
@@ -290,9 +286,7 @@ def analyze(
 
     _require_output_db(output_db)
     with OutputDatabase(output_db) as odb:
-        processor = PostProcessor(
-            odb, backtest_id=backtest_id, study_id=effective_study_id
-        )
+        processor = PostProcessor(odb, backtest_id=backtest_id, study_id=effective_study_id)
         summary = processor.summarize(formatted=True)
 
     typer.echo(summary)
@@ -429,7 +423,7 @@ def dashboard(
             _DASHBOARD_PID_FILE.write_text(str(pid))
             typer.echo(f"Dashboard started in background (PID {pid})")
             typer.echo(f"  http://localhost:{port}")
-            typer.echo(f"  Stop with:  btkit dashboard --kill")
+            typer.echo("  Stop with:  btkit dashboard --kill")
             os._exit(0)
 
         # Child: detach from the terminal and silence stdio.
@@ -458,9 +452,7 @@ def study_run(
     study: str = typer.Option(..., help="Path to the study YAML file."),
     input_db: str = typer.Option(..., help="Path to the input database."),
     output_db: str = typer.Option(..., help="Path for the output database (created if absent)."),
-    workers: int = typer.Option(
-        default=None, help="Worker process count (default: cpu_count)."
-    ),
+    workers: int = typer.Option(default=None, help="Worker process count (default: cpu_count)."),
     max_combinations: int = typer.Option(
         default=None, help="Abort if expansion exceeds this many combinations."
     ),
@@ -501,9 +493,7 @@ def study_run(
     study_id, failed = runner.run()
 
     if failed:
-        typer.echo(
-            f"\nStudy complete with {len(failed)} failed combination(s):", err=True
-        )
+        typer.echo(f"\nStudy complete with {len(failed)} failed combination(s):", err=True)
         for f in failed:
             cid = f["combination_id"]
             label = f"combination_id={cid}" if cid >= 0 else "runner error"
@@ -653,8 +643,8 @@ def audit(
         btkit audit --input-db /path/to/input.db --skip-phase2 --output-format json
         btkit audit --input-db /path/to/input.db --dry-run
     """
+    from btkit.audit.report import format_quintile_summary, format_report
     from btkit.audit.runner import AuditRunner
-    from btkit.audit.report import format_report, format_quintile_summary
 
     if not Path(input_db).exists():
         typer.echo(f"Error: input database not found: {input_db}", err=True)

@@ -112,13 +112,17 @@ def _ast_to_polars(node, source: str) -> pl.Expr:
         return result
 
     if isinstance(node, _ast.BinOp):
-        left  = _ast_to_polars(node.left,  source)
+        left = _ast_to_polars(node.left, source)
         right = _ast_to_polars(node.right, source)
         op = node.op
-        if isinstance(op, _ast.Add):  return left + right
-        if isinstance(op, _ast.Sub):  return left - right
-        if isinstance(op, _ast.Mult): return left * right
-        if isinstance(op, _ast.Div):  return left / right
+        if isinstance(op, _ast.Add):
+            return left + right
+        if isinstance(op, _ast.Sub):
+            return left - right
+        if isinstance(op, _ast.Mult):
+            return left * right
+        if isinstance(op, _ast.Div):
+            return left / right
         raise ValueError(f"Unsupported arithmetic operator in: {source!r}")
 
     if isinstance(node, _ast.Call):
@@ -129,9 +133,7 @@ def _ast_to_polars(node, source: str) -> pl.Expr:
             and not node.keywords
         ):
             return _ast_to_polars(node.args[0], source).abs()
-        raise ValueError(
-            f"Only abs() is supported as a function call in: {source!r}"
-        )
+        raise ValueError(f"Only abs() is supported as a function call in: {source!r}")
 
     if isinstance(node, _ast.UnaryOp):
         if isinstance(node.op, _ast.Not):

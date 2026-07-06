@@ -329,6 +329,7 @@ class TestBootstrapMeanCI:
     def test_ci_contains_true_mean(self):
         """With 1000 identical values, the CI should tightly bracket the mean."""
         import numpy as np
+
         pnl = np.full(200, 50.0)
         lo, hi = PostProcessor._bootstrap_mean_ci(pnl, n_boot=2000, rng=np.random.default_rng(0))
         assert lo <= 50.0 <= hi
@@ -336,20 +337,27 @@ class TestBootstrapMeanCI:
     def test_ci_width_shrinks_with_more_data(self):
         """Wider sample → narrower CI (law of large numbers)."""
         import numpy as np
+
         rng = np.random.default_rng(42)
         small = rng.normal(0, 10, size=20)
         large = rng.normal(0, 10, size=500)
-        lo_s, hi_s = PostProcessor._bootstrap_mean_ci(small, n_boot=5000, rng=np.random.default_rng(0))
-        lo_l, hi_l = PostProcessor._bootstrap_mean_ci(large, n_boot=5000, rng=np.random.default_rng(0))
+        lo_s, hi_s = PostProcessor._bootstrap_mean_ci(
+            small, n_boot=5000, rng=np.random.default_rng(0)
+        )
+        lo_l, hi_l = PostProcessor._bootstrap_mean_ci(
+            large, n_boot=5000, rng=np.random.default_rng(0)
+        )
         assert (hi_s - lo_s) > (hi_l - lo_l)
 
     def test_empty_returns_zeros(self):
         import numpy as np
+
         lo, hi = PostProcessor._bootstrap_mean_ci(np.array([]))
         assert lo == 0.0 and hi == 0.0
 
     def test_seed_reproducible(self):
         import numpy as np
+
         pnl = np.random.default_rng(7).normal(100, 20, size=100)
         r1 = PostProcessor._bootstrap_mean_ci(pnl, n_boot=1000, rng=np.random.default_rng(99))
         r2 = PostProcessor._bootstrap_mean_ci(pnl, n_boot=1000, rng=np.random.default_rng(99))
@@ -360,8 +368,13 @@ class TestBootstrapMeanCI:
             output_db,
             [
                 {"open_mark": 5.0, "exit_mark": 4.0, "worst_mark": 5.5, "net_pnl": 100.0},
-                {"open_mark": 5.0, "exit_mark": 6.0, "worst_mark": 6.0, "net_pnl": -50.0,
-                 "exit_reason": "stop_loss"},
+                {
+                    "open_mark": 5.0,
+                    "exit_mark": 6.0,
+                    "worst_mark": 6.0,
+                    "net_pnl": -50.0,
+                    "exit_reason": "stop_loss",
+                },
             ],
         )
         m = PostProcessor(db, backtest_id=bid).metrics(seed=0)
@@ -403,8 +416,13 @@ class TestWilsonWinRateCI:
             [
                 {"open_mark": 5.0, "exit_mark": 4.0, "worst_mark": 5.5, "net_pnl": 100.0},
                 {"open_mark": 5.0, "exit_mark": 4.0, "worst_mark": 5.5, "net_pnl": 100.0},
-                {"open_mark": 5.0, "exit_mark": 6.0, "worst_mark": 6.0, "net_pnl": -50.0,
-                 "exit_reason": "stop_loss"},
+                {
+                    "open_mark": 5.0,
+                    "exit_mark": 6.0,
+                    "worst_mark": 6.0,
+                    "net_pnl": -50.0,
+                    "exit_reason": "stop_loss",
+                },
             ],
         )
         m = PostProcessor(db, backtest_id=bid).metrics(seed=0)

@@ -332,15 +332,17 @@ class OutputDatabase:
             cont_rows = continuations.with_columns(
                 pl.Series("id", cont_ids),
                 pl.Series("position_id", position_ids_for_cont),
-            ).select([
-                "id",
-                "position_id",
-                "continuation_entry_price",
-                "continuation_exit_time",
-                "continuation_exit_price",
-                "continuation_exit_reason",
-                "continuation_pnl",
-            ])
+            ).select(
+                [
+                    "id",
+                    "position_id",
+                    "continuation_entry_price",
+                    "continuation_exit_time",
+                    "continuation_exit_price",
+                    "continuation_exit_reason",
+                    "continuation_pnl",
+                ]
+            )
             self._con.register("_continuations", cont_rows)
             self._con.execute("INSERT INTO position_continuation SELECT * FROM _continuations")
             self._con.unregister("_continuations")
@@ -405,8 +407,7 @@ class OutputDatabase:
         tables = {
             row[0]
             for row in self._con.execute(
-                "SELECT table_name FROM information_schema.tables "
-                "WHERE table_schema = 'main'"
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
             ).fetchall()
         }
         if "backtest" not in tables:
@@ -414,8 +415,7 @@ class OutputDatabase:
         bt_cols = {
             row[0]
             for row in self._con.execute(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_name = 'backtest'"
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'backtest'"
             ).fetchall()
         }
         if "matrix_id" in bt_cols and "study_id" not in bt_cols:
@@ -427,8 +427,7 @@ class OutputDatabase:
             st_cols = {
                 row[0]
                 for row in self._con.execute(
-                    "SELECT column_name FROM information_schema.columns "
-                    "WHERE table_name = 'study'"
+                    "SELECT column_name FROM information_schema.columns WHERE table_name = 'study'"
                 ).fetchall()
             }
             if "note" not in st_cols:

@@ -1,8 +1,10 @@
 """DuckDB connection management for the btkit API."""
+
 import json
 import os
-import duckdb
 from pathlib import Path
+
+import duckdb
 
 DB_PATH: str = os.getenv(
     "BTKIT_DB",
@@ -42,6 +44,7 @@ def execute(sql: str, params: list | None = None) -> None:
 
 # ── Cache helpers ─────────────────────────────────────────────────────────────
 
+
 def cache_get(cache_key: str, fingerprint: str) -> str | None:
     """Return cached JSON string if fingerprint matches, else None."""
     try:
@@ -69,6 +72,7 @@ def cache_set(cache_key: str, result_json: str, fingerprint: str) -> None:
 
 
 # ── Preference helpers ────────────────────────────────────────────────────────
+
 
 def pref_get(pref_key: str) -> object | None:
     """Return the stored preference value (parsed from JSON), or None."""

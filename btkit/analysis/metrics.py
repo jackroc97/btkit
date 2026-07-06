@@ -249,18 +249,22 @@ class PostProcessor:
             bid = row["id"]
             pp = PostProcessor(self.output_db, backtest_id=bid)
             m = pp.metrics()
-            rows.append({
-                "backtest_id": bid,
-                "combination_id": row["combination_id"],
-                "strategy_name": row["strategy_name"],
-                "status": row["status"],
-                "net_profit": m["net_profit"],
-                "total_trades": m["total_trades"],
-                "percent_profitable": m["percent_profitable"],
-                "sharpe_ratio": m["sharpe_ratio"],
-                "profit_factor": m["profit_factor"] if math.isfinite(m["profit_factor"]) else None,
-                "max_drawdown_pct": m["max_drawdown_pct"],
-            })
+            rows.append(
+                {
+                    "backtest_id": bid,
+                    "combination_id": row["combination_id"],
+                    "strategy_name": row["strategy_name"],
+                    "status": row["status"],
+                    "net_profit": m["net_profit"],
+                    "total_trades": m["total_trades"],
+                    "percent_profitable": m["percent_profitable"],
+                    "sharpe_ratio": m["sharpe_ratio"],
+                    "profit_factor": m["profit_factor"]
+                    if math.isfinite(m["profit_factor"])
+                    else None,
+                    "max_drawdown_pct": m["max_drawdown_pct"],
+                }
+            )
         return pl.DataFrame(rows)
 
     def summarize(self, formatted: bool = False) -> str:
@@ -293,8 +297,14 @@ class PostProcessor:
             f"  Avg MAE:              ${m['avg_mae']:>10.2f}",
             f"  Median MAE:           ${m['median_mae']:>10.2f}",
             f"  Worst MAE:            ${m['worst_mae']:>10.2f}",
-            f"  Mean PnL 95% CI:      [${m['mean_pnl_ci_lower']:>8.2f}, ${m['mean_pnl_ci_upper']:>8.2f}]",
-            f"  Win Rate 95% CI:      [{m['win_rate_ci_lower'] * 100:>7.1f}%, {m['win_rate_ci_upper'] * 100:>7.1f}%]",
+            (
+                f"  Mean PnL 95% CI:      [${m['mean_pnl_ci_lower']:>8.2f}, "
+                f"${m['mean_pnl_ci_upper']:>8.2f}]"
+            ),
+            (
+                f"  Win Rate 95% CI:      [{m['win_rate_ci_lower'] * 100:>7.1f}%, "
+                f"{m['win_rate_ci_upper'] * 100:>7.1f}%]"
+            ),
         ]
         return "\n".join(lines)
 
@@ -311,9 +321,7 @@ class PostProcessor:
         fixed_params filters the study to a specific slice when more than
         two parameters were swept.
         """
-        raise NotImplementedError(
-            "heatmap() requires study_id and params_df — not yet implemented"
-        )
+        raise NotImplementedError("heatmap() requires study_id and params_df — not yet implemented")
 
     # ------------------------------------------------------------------
     # Private helpers

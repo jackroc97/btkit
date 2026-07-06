@@ -248,6 +248,7 @@ class TestExitConfig:
 class TestLegConfig:
     def test_delta_mode(self):
         from btkit.strategy.definition import SimpleDeltaConfig
+
         leg = _make_leg()
         assert isinstance(leg.delta, SimpleDeltaConfig)
         assert leg.delta.target == -0.25
@@ -312,6 +313,7 @@ class TestLegConfig:
 
     def test_default_tolerances(self):
         from btkit.strategy.definition import SimpleDeltaConfig
+
         leg = _make_leg()
         assert isinstance(leg.delta, SimpleDeltaConfig)
         assert leg.delta.tolerance == 0.10
@@ -319,6 +321,7 @@ class TestLegConfig:
 
     def test_custom_tolerances(self):
         from btkit.strategy.definition import SimpleDeltaConfig
+
         leg = LegConfig(
             name="leg",
             right="put",

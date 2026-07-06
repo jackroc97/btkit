@@ -95,16 +95,18 @@ class EntryScanner:
             if leg.targets is None:
                 continue
             if any(t.size_multiplier != 1.0 for t in leg.targets.values()):
-                self.warnings.append({
-                    "phase": "entry",
-                    "trade": self.trade.name,
-                    "type": "size_multiplier_ignored",
-                    "leg": leg.name,
-                    "message": (
-                        "target size_multiplier is reserved and currently a no-op; "
-                        "quantity is unchanged"
-                    ),
-                })
+                self.warnings.append(
+                    {
+                        "phase": "entry",
+                        "trade": self.trade.name,
+                        "type": "size_multiplier_ignored",
+                        "leg": leg.name,
+                        "message": (
+                            "target size_multiplier is reserved and currently a no-op; "
+                            "quantity is unchanged"
+                        ),
+                    }
+                )
 
         universe = self.strategy.universe
         start_dt = datetime(
@@ -262,17 +264,23 @@ class EntryScanner:
         # Options at high DTE are listed under the next contract once the front-month
         # option chain runs out, so querying only the front contract misses them.
         _max_dte_needed: int | None = None
-        if delta_legs and "expiry" in candidates.columns and "next_underlying_id" in candidates.columns:
+        if (
+            delta_legs
+            and "expiry" in candidates.columns
+            and "next_underlying_id" in candidates.columns
+        ):
             _dte_reach: list[int] = []
             for leg in delta_legs:
                 if leg.stepped is not None:
                     _dte_reach.extend(
-                        int(s.dte) + (s.dte_tolerance if s.dte_tolerance is not None else leg.dte_tolerance)
+                        int(s.dte)
+                        + (s.dte_tolerance if s.dte_tolerance is not None else leg.dte_tolerance)
                         for s in leg.stepped.steps
                     )
                 elif leg.targets is not None:
                     _dte_reach.extend(
-                        int(t.dte) + (t.dte_tolerance if t.dte_tolerance is not None else leg.dte_tolerance)
+                        int(t.dte)
+                        + (t.dte_tolerance if t.dte_tolerance is not None else leg.dte_tolerance)
                         for t in leg.targets.values()
                     )
                 elif leg.dte is not None:
@@ -283,9 +291,15 @@ class EntryScanner:
             expiry_col = candidates["expiry"].to_list()
             next_uid_col = candidates["next_underlying_id"].to_list()
             ts_event_underlying: list[tuple] = []
-            for ts, uid, exp, nuid in zip(ts_events, underlying_ids, expiry_col, next_uid_col, strict=False):
+            for ts, uid, exp, nuid in zip(
+                ts_events, underlying_ids, expiry_col, next_uid_col, strict=False
+            ):
                 ts_event_underlying.append((ts, uid))
-                if nuid is not None and exp is not None and (exp - ts.date()).days <= _max_dte_needed:
+                if (
+                    nuid is not None
+                    and exp is not None
+                    and (exp - ts.date()).days <= _max_dte_needed
+                ):
                     ts_event_underlying.append((ts, int(nuid)))
         else:
             ts_event_underlying = list(zip(ts_events, underlying_ids, strict=False))
@@ -401,10 +415,20 @@ class EntryScanner:
                             strict=False,
                         ):
                             teu.append((ts, uid))
-                            if nuid is not None and exp is not None and (exp - ts.date()).days <= grp_max_dte:
+                            if (
+                                nuid is not None
+                                and exp is not None
+                                and (exp - ts.date()).days <= grp_max_dte
+                            ):
                                 teu.append((ts, int(nuid)))
                     else:
-                        teu = list(zip(grp["ts_event"].to_list(), grp["underlying_id"].to_list(), strict=False))
+                        teu = list(
+                            zip(
+                                grp["ts_event"].to_list(),
+                                grp["underlying_id"].to_list(),
+                                strict=False,
+                            )
+                        )
                     specs = [
                         {
                             "name": leg.name,
@@ -559,9 +583,7 @@ class EntryScanner:
         staleness.  Candidates with no match are dropped.
         """
         best_per_ts = (
-            leg_df.with_columns(
-                (pl.col("delta") - pl.lit(target_delta)).abs().alias("_delta_diff")
-            )
+            leg_df.with_columns((pl.col("delta") - pl.lit(target_delta)).abs().alias("_delta_diff"))
             .sort(["ts_event", "_delta_diff"])
             .unique(subset=["ts_event"], keep="first")
             .drop(["_delta_diff", "leg_name"])
@@ -584,10 +606,12 @@ class EntryScanner:
             )
             .drop("_asof_date")
             .filter(pl.col(f"leg_{leg.name}_instrument_id").is_not_null())
-            .with_columns([
-                pl.lit(leg.action).alias(f"leg_{leg.name}_action"),
-                pl.lit(leg.quantity).alias(f"leg_{leg.name}_quantity"),
-            ])
+            .with_columns(
+                [
+                    pl.lit(leg.action).alias(f"leg_{leg.name}_action"),
+                    pl.lit(leg.quantity).alias(f"leg_{leg.name}_quantity"),
+                ]
+            )
         )
 
     # ------------------------------------------------------------------
@@ -603,9 +627,7 @@ class EntryScanner:
             mark_expr = mark_expr + pl.col(f"leg_{leg.name}_close") * pl.lit(sign * leg.quantity)
 
         exit_cfg = self.trade.exit
-        entries = entries.with_columns(
-            [tick_round_expr(mark_expr, tick).alias("open_mark")]
-        )
+        entries = entries.with_columns([tick_round_expr(mark_expr, tick).alias("open_mark")])
 
         if isinstance(exit_cfg.take_profit, TakeProfitConfig):
             if exit_cfg.take_profit.pct is not None:
@@ -634,9 +656,9 @@ class EntryScanner:
                 if isinstance(exit_cfg.stop_loss, StopLossConfig)
                 else float(exit_cfg.stop_loss)
             )
-            sl_expr = tick_round_expr(
-                pl.col("open_mark") + pl.lit(sl_price), tick
-            ).alias("sl_price")
+            sl_expr = tick_round_expr(pl.col("open_mark") + pl.lit(sl_price), tick).alias(
+                "sl_price"
+            )
 
         entries = entries.with_columns(
             [
@@ -726,9 +748,7 @@ class EntryScanner:
         if indicators.is_empty() or "ts_event" not in indicators.columns:
             return frame
 
-        new_cols = [
-            c for c in indicators.columns if c != "ts_event" and c not in frame.columns
-        ]
+        new_cols = [c for c in indicators.columns if c != "ts_event" and c not in frame.columns]
         if not new_cols:
             return frame
 
@@ -747,12 +767,8 @@ class EntryScanner:
 
         return (
             frame.sort(ts_col)
-            .with_columns(
-                pl.col(ts_col).dt.convert_time_zone(tz_str).dt.date().alias("_session")
-            )
-            .join_asof(
-                ind, on=ts_col, by="_session", strategy="backward", check_sortedness=False
-            )
+            .with_columns(pl.col(ts_col).dt.convert_time_zone(tz_str).dt.date().alias("_session"))
+            .join_asof(ind, on=ts_col, by="_session", strategy="backward", check_sortedness=False)
             .drop("_session")
         )
 
@@ -815,7 +831,9 @@ class EntryScanner:
         for s in with_below:
             cond = pl.col(source) < pl.lit(float(s.below))
             d_val = pl.lit(float(s.target))
-            t_val = pl.lit(float(s.tolerance) if s.tolerance is not None else float(stepped.tolerance))
+            t_val = pl.lit(
+                float(s.tolerance) if s.tolerance is not None else float(stepped.tolerance)
+            )
             if d_chain is None:
                 d_chain = pl.when(cond).then(d_val)
                 t_chain = pl.when(cond).then(t_val)
@@ -825,7 +843,11 @@ class EntryScanner:
 
         if catch_all is not None:
             fallback_d = pl.lit(float(catch_all.target))
-            fallback_t = pl.lit(float(catch_all.tolerance) if catch_all.tolerance is not None else float(stepped.tolerance))
+            fallback_t = pl.lit(
+                float(catch_all.tolerance)
+                if catch_all.tolerance is not None
+                else float(stepped.tolerance)
+            )
         else:
             fallback_d = pl.lit(None).cast(pl.Float64)
             fallback_t = pl.lit(None).cast(pl.Float64)

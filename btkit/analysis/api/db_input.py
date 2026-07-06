@@ -1,4 +1,5 @@
 """Read-only connection to the input (market data) database."""
+
 from __future__ import annotations
 
 import os
@@ -7,7 +8,7 @@ import duckdb
 
 
 def connect() -> duckdb.DuckDBPyConnection | None:
-    """Return a new read-only connection, or None if BTKIT_INPUT_DB is not set or the file is missing."""
+    """Return a read-only connection, or None if BTKIT_INPUT_DB is unset or missing."""
     path = os.environ.get("BTKIT_INPUT_DB")
     if not path:
         return None

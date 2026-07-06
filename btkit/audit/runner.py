@@ -32,9 +32,8 @@ from pathlib import Path
 import duckdb
 import polars as pl
 
-from btkit.audit.schema import OPTION_AUDIT_DDL, empty_audit_df
 from btkit.audit.rules import phase1_iv, phase2_delta, phase3_coverage, phase4_integrity
-
+from btkit.audit.schema import OPTION_AUDIT_DDL, empty_audit_df
 
 # ---------------------------------------------------------------------------
 # Result types
@@ -102,9 +101,7 @@ class AuditRunner:
 
         elapsed = time.perf_counter() - t0
         flag_counts = self._compute_flag_counts(all_flags)
-        total_instruments = (
-            all_flags["instrument_id"].n_unique() if not all_flags.is_empty() else 0
-        )
+        total_instruments = all_flags["instrument_id"].n_unique() if not all_flags.is_empty() else 0
 
         return AuditResult(
             db_path=self.db_path,
@@ -134,10 +131,13 @@ class AuditRunner:
 
         con = duckdb.connect(self.db_path)
         try:
-            audit_exists = con.execute(
-                "SELECT COUNT(*) FROM information_schema.tables "
-                "WHERE table_name = 'option_audit'"
-            ).fetchone()[0] > 0
+            audit_exists = (
+                con.execute(
+                    "SELECT COUNT(*) FROM information_schema.tables "
+                    "WHERE table_name = 'option_audit'"
+                ).fetchone()[0]
+                > 0
+            )
 
             if not audit_exists:
                 return pl.DataFrame()
@@ -306,12 +306,13 @@ class AuditRunner:
             return []
 
         summary = (
-            flags
-            .group_by(["flag_code", "flag_severity"])
-            .agg([
-                pl.len().alias("row_count"),
-                pl.col("instrument_id").n_unique().alias("instrument_count"),
-            ])
+            flags.group_by(["flag_code", "flag_severity"])
+            .agg(
+                [
+                    pl.len().alias("row_count"),
+                    pl.col("instrument_id").n_unique().alias("instrument_count"),
+                ]
+            )
             .sort("flag_code")
         )
 

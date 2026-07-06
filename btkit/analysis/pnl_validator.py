@@ -128,13 +128,11 @@ def validate_positions(
     # For each right, cross-join all STO/BTO pairs and take the maximum width,
     # then take the max across rights.
     # ------------------------------------------------------------------
-    sto = (
-        legs.filter(pl.col("action") == "STO")
-        .select(["position_id", "opt_right", pl.col("strike_price").alias("sto_strike")])
+    sto = legs.filter(pl.col("action") == "STO").select(
+        ["position_id", "opt_right", pl.col("strike_price").alias("sto_strike")]
     )
-    bto = (
-        legs.filter(pl.col("action") == "BTO")
-        .select(["position_id", "opt_right", pl.col("strike_price").alias("bto_strike")])
+    bto = legs.filter(pl.col("action") == "BTO").select(
+        ["position_id", "opt_right", pl.col("strike_price").alias("bto_strike")]
     )
     spread_widths = (
         sto.join(bto, on=["position_id", "opt_right"], how="inner")
@@ -146,10 +144,7 @@ def validate_positions(
     # ------------------------------------------------------------------
     # Multiplier: same for every leg in a position; take from any leg.
     # ------------------------------------------------------------------
-    multipliers = (
-        legs.group_by("position_id")
-        .agg(pl.col("multiplier").first())
-    )
+    multipliers = legs.group_by("position_id").agg(pl.col("multiplier").first())
 
     # ------------------------------------------------------------------
     # open_mark cross-check: Σ(open_price × sign × qty) per position.
@@ -172,15 +167,13 @@ def validate_positions(
     # Assemble: join derived values onto positions
     # ------------------------------------------------------------------
     df = (
-        positions
-        .join(spread_widths, on="position_id", how="left")
+        positions.join(spread_widths, on="position_id", how="left")
         .join(multipliers, on="position_id", how="left")
         .join(open_mark_recomputed, on="position_id", how="left")
     )
 
     df = df.with_columns(
-        ((pl.col("open_mark") - pl.col("exit_mark")) * pl.col("multiplier"))
-        .alias("gross_pnl")
+        ((pl.col("open_mark") - pl.col("exit_mark")) * pl.col("multiplier")).alias("gross_pnl")
     )
 
     # Theoretical PnL bounds (before costs):
@@ -190,65 +183,70 @@ def validate_positions(
     #   debit spread (open_mark < 0):
     #     max profit = (open_mark + width) × mult (exit_mark → −width)
     #     max loss   = open_mark × mult            (exit_mark → 0)
-    df = df.with_columns([
-        pl.when(pl.col("open_mark") >= 0)
-        .then(pl.col("open_mark") * pl.col("multiplier"))
-        .otherwise((pl.col("open_mark") + pl.col("spread_width")) * pl.col("multiplier"))
-        .alias("max_gross_pnl"),
-
-        pl.when(pl.col("open_mark") >= 0)
-        .then((pl.col("open_mark") - pl.col("spread_width")) * pl.col("multiplier"))
-        .otherwise(pl.col("open_mark") * pl.col("multiplier"))
-        .alias("min_gross_pnl"),
-
-        (pl.col("gross_pnl") - pl.col("slippage_cost") - pl.col("fee_cost"))
-        .alias("net_pnl_expected"),
-    ])
+    df = df.with_columns(
+        [
+            pl.when(pl.col("open_mark") >= 0)
+            .then(pl.col("open_mark") * pl.col("multiplier"))
+            .otherwise((pl.col("open_mark") + pl.col("spread_width")) * pl.col("multiplier"))
+            .alias("max_gross_pnl"),
+            pl.when(pl.col("open_mark") >= 0)
+            .then((pl.col("open_mark") - pl.col("spread_width")) * pl.col("multiplier"))
+            .otherwise(pl.col("open_mark") * pl.col("multiplier"))
+            .alias("min_gross_pnl"),
+            (pl.col("gross_pnl") - pl.col("slippage_cost") - pl.col("fee_cost")).alias(
+                "net_pnl_expected"
+            ),
+        ]
+    )
 
     tol = float(tolerance)
 
     # ------------------------------------------------------------------
     # Individual check flags
     # ------------------------------------------------------------------
-    df = df.with_columns([
-        # 1. exit_mark sign
-        (
-            ((pl.col("open_mark") > 0) & (pl.col("exit_mark") < -tol))
-            | ((pl.col("open_mark") < 0) & (pl.col("exit_mark") > tol))
-        ).alias("_flag_sign"),
-
-        # 2. exit_mark magnitude
-        (pl.col("exit_mark").abs() > pl.col("spread_width") + tol).alias("_flag_magnitude"),
-
-        # 3. gross_pnl ceiling: profit must not exceed theoretical max
-        (pl.col("gross_pnl") > pl.col("max_gross_pnl") + tol * pl.col("multiplier"))
-        .alias("_flag_ceiling"),
-
-        # 4. gross_pnl floor: loss must not exceed theoretical max
-        (pl.col("gross_pnl") < pl.col("min_gross_pnl") - tol * pl.col("multiplier"))
-        .alias("_flag_floor"),
-
-        # 5. open_mark vs leg sum
-        ((pl.col("open_mark") - pl.col("open_mark_expected")).abs() > tol)
-        .fill_null(False)
-        .alias("_flag_open_mark"),
-
-        # 6. net_pnl = gross_pnl - costs
-        ((pl.col("net_pnl") - pl.col("net_pnl_expected")).abs() > tol * pl.col("multiplier"))
-        .alias("_flag_net_pnl"),
-    ])
+    df = df.with_columns(
+        [
+            # 1. exit_mark sign
+            (
+                ((pl.col("open_mark") > 0) & (pl.col("exit_mark") < -tol))
+                | ((pl.col("open_mark") < 0) & (pl.col("exit_mark") > tol))
+            ).alias("_flag_sign"),
+            # 2. exit_mark magnitude
+            (pl.col("exit_mark").abs() > pl.col("spread_width") + tol).alias("_flag_magnitude"),
+            # 3. gross_pnl ceiling: profit must not exceed theoretical max
+            (pl.col("gross_pnl") > pl.col("max_gross_pnl") + tol * pl.col("multiplier")).alias(
+                "_flag_ceiling"
+            ),
+            # 4. gross_pnl floor: loss must not exceed theoretical max
+            (pl.col("gross_pnl") < pl.col("min_gross_pnl") - tol * pl.col("multiplier")).alias(
+                "_flag_floor"
+            ),
+            # 5. open_mark vs leg sum
+            ((pl.col("open_mark") - pl.col("open_mark_expected")).abs() > tol)
+            .fill_null(False)
+            .alias("_flag_open_mark"),
+            # 6. net_pnl = gross_pnl - costs
+            (
+                (pl.col("net_pnl") - pl.col("net_pnl_expected")).abs() > tol * pl.col("multiplier")
+            ).alias("_flag_net_pnl"),
+        ]
+    )
 
     _flag_cols = [
-        "_flag_sign", "_flag_magnitude", "_flag_ceiling",
-        "_flag_floor", "_flag_open_mark", "_flag_net_pnl",
+        "_flag_sign",
+        "_flag_magnitude",
+        "_flag_ceiling",
+        "_flag_floor",
+        "_flag_open_mark",
+        "_flag_net_pnl",
     ]
     _flag_labels = {
-        "_flag_sign":       "exit_mark_sign",
-        "_flag_magnitude":  "exit_mark_magnitude",
-        "_flag_ceiling":    "gross_pnl_exceeds_max_profit",
-        "_flag_floor":      "gross_pnl_exceeds_max_loss",
-        "_flag_open_mark":  "open_mark_inconsistent",
-        "_flag_net_pnl":    "net_pnl_inconsistent",
+        "_flag_sign": "exit_mark_sign",
+        "_flag_magnitude": "exit_mark_magnitude",
+        "_flag_ceiling": "gross_pnl_exceeds_max_profit",
+        "_flag_floor": "gross_pnl_exceeds_max_loss",
+        "_flag_open_mark": "open_mark_inconsistent",
+        "_flag_net_pnl": "net_pnl_inconsistent",
     }
 
     any_flag = pl.fold(
@@ -265,21 +263,31 @@ def validate_positions(
     # Evaluate per-row in Python — only called on flagged rows (expected to be rare).
     flag_records = flagged.select(_flag_cols).to_dicts()
     violations = [
-        " | ".join(label for col, label in _flag_labels.items() if rec[col])
-        for rec in flag_records
+        " | ".join(label for col, label in _flag_labels.items() if rec[col]) for rec in flag_records
     ]
 
     return (
-        flagged
-        .with_columns(pl.Series("violation", violations, dtype=pl.Utf8))
+        flagged.with_columns(pl.Series("violation", violations, dtype=pl.Utf8))
         .drop(_flag_cols)
-        .select([
-            "position_id", "backtest_id", "trade_name", "exit_reason",
-            "open_mark", "exit_mark", "worst_mark", "net_pnl",
-            "gross_pnl", "max_gross_pnl", "min_gross_pnl",
-            "spread_width", "open_mark_expected", "net_pnl_expected",
-            "violation",
-        ])
+        .select(
+            [
+                "position_id",
+                "backtest_id",
+                "trade_name",
+                "exit_reason",
+                "open_mark",
+                "exit_mark",
+                "worst_mark",
+                "net_pnl",
+                "gross_pnl",
+                "max_gross_pnl",
+                "min_gross_pnl",
+                "spread_width",
+                "open_mark_expected",
+                "net_pnl_expected",
+                "violation",
+            ]
+        )
         .sort(pl.col("gross_pnl").abs(), descending=True)
     )
 
@@ -293,25 +301,27 @@ def summarise_violations(flags: pl.DataFrame) -> pl.DataFrame:
     Useful for understanding the scale and composition of data quality issues.
     """
     if flags.is_empty():
-        return pl.DataFrame({
-            "violation_type": pl.Series([], dtype=pl.Utf8),
-            "count": pl.Series([], dtype=pl.Int32),
-            "total_gross_pnl_impact": pl.Series([], dtype=pl.Float64),
-        })
+        return pl.DataFrame(
+            {
+                "violation_type": pl.Series([], dtype=pl.Utf8),
+                "count": pl.Series([], dtype=pl.Int32),
+                "total_gross_pnl_impact": pl.Series([], dtype=pl.Float64),
+            }
+        )
 
     # Explode the pipe-separated violation string into one row per type
     exploded = (
-        flags
-        .with_columns(pl.col("violation").str.split(" | ").alias("_types"))
+        flags.with_columns(pl.col("violation").str.split(" | ").alias("_types"))
         .explode("_types")
         .rename({"_types": "violation_type"})
     )
     return (
-        exploded
-        .group_by("violation_type")
-        .agg([
-            pl.len().alias("count"),
-            pl.col("gross_pnl").sum().alias("total_gross_pnl_impact"),
-        ])
+        exploded.group_by("violation_type")
+        .agg(
+            [
+                pl.len().alias("count"),
+                pl.col("gross_pnl").sum().alias("total_gross_pnl_impact"),
+            ]
+        )
         .sort("count", descending=True)
     )

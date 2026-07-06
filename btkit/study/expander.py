@@ -25,9 +25,9 @@ import polars as pl
 
 from btkit.strategy.definition import (
     SimpleDeltaConfig,
-    SweepRange,
     StopLossConfig,
     StrategyDefinition,
+    SweepRange,
     TableCombinations,
     TakeProfitConfig,
 )
@@ -171,7 +171,10 @@ class StudyExpander:
             return [{}]
 
         keys = list(sweep_axes)
-        return [dict(zip(keys, combo)) for combo in itertools.product(*[sweep_axes[k] for k in keys])]
+        return [
+            dict(zip(keys, combo, strict=False))
+            for combo in itertools.product(*[sweep_axes[k] for k in keys])
+        ]
 
     def _expand_combinations(self, defn: StrategyDefinition) -> list[dict[str, Any]]:
         """
@@ -182,7 +185,7 @@ class StudyExpander:
 
         if isinstance(combs, TableCombinations):
             # columns are already full dot-paths
-            return [dict(zip(combs.columns, row)) for row in combs.rows]
+            return [dict(zip(combs.columns, row, strict=False)) for row in combs.rows]
 
         # Structured mode: list[dict[section_key, dict[field, value]]]
         # section_key is a leg name (globally unique across trades) or "exit".
@@ -250,7 +253,8 @@ class StudyExpander:
             parts = dot_path.split(".", 3)
             if len(parts) < 3:
                 raise ValueError(
-                    f"Override dot-path must have at least 3 parts (trade.section.field): {dot_path!r}"
+                    f"Override dot-path must have at least 3 parts "
+                    f"(trade.section.field): {dot_path!r}"
                 )
             trade_name, section = parts[0], parts[1]
             if trade_name not in trade_by_name:
@@ -275,9 +279,7 @@ class StudyExpander:
                     field = parts[2]
                     raw["trades"][ti]["exit"][field] = value
             else:
-                leg_by_name = {
-                    leg["name"]: j for j, leg in enumerate(raw["trades"][ti]["legs"])
-                }
+                leg_by_name = {leg["name"]: j for j, leg in enumerate(raw["trades"][ti]["legs"])}
                 if section not in leg_by_name:
                     raise ValueError(f"Unknown leg {section!r} in dot-path {dot_path!r}")
                 lj = leg_by_name[section]

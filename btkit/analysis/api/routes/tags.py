@@ -1,11 +1,12 @@
 """Tag management endpoints."""
+
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from ..db import query, execute
+from ..db import execute, query
 
 router = APIRouter()
 
@@ -18,7 +19,7 @@ class TagCreate(BaseModel):
 @router.get("/tags")
 def list_tags() -> JSONResponse:
     cols, rows = query("SELECT id, name, color FROM tag ORDER BY name")
-    return JSONResponse([dict(zip(cols, r)) for r in rows])
+    return JSONResponse([dict(zip(cols, r, strict=False)) for r in rows])
 
 
 @router.post("/tags", status_code=201)

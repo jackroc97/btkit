@@ -53,17 +53,19 @@ def run(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
 
     if not truncated.is_empty():
         results.append(
-            truncated.select([
-                pl.col("instrument_id"),
-                pl.col("min_ts").alias("ts_event"),
-                pl.lit("BARS_TRUNCATED").alias("flag_code"),
-                pl.lit("hard").alias("flag_severity"),
-                (
-                    pl.col("days_remaining").cast(pl.Float64)
-                    / pl.col("observable_life").cast(pl.Float64)
-                ).alias("flag_value"),
-                pl.lit(_TRUNCATED_THRESHOLD).alias("threshold"),
-            ])
+            truncated.select(
+                [
+                    pl.col("instrument_id"),
+                    pl.col("min_ts").alias("ts_event"),
+                    pl.lit("BARS_TRUNCATED").alias("flag_code"),
+                    pl.lit("hard").alias("flag_severity"),
+                    (
+                        pl.col("days_remaining").cast(pl.Float64)
+                        / pl.col("observable_life").cast(pl.Float64)
+                    ).alias("flag_value"),
+                    pl.lit(_TRUNCATED_THRESHOLD).alias("threshold"),
+                ]
+            )
         )
 
     # BARS_SPARSE -------------------------------------------------------------------
@@ -83,23 +85,25 @@ def run(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
 
     if not sparse.is_empty():
         results.append(
-            sparse.select([
-                pl.col("instrument_id"),
-                pl.col("min_ts").alias("ts_event"),
-                pl.lit("BARS_SPARSE").alias("flag_code"),
-                pl.lit("soft").alias("flag_severity"),
-                pl.col("bars_per_day").alias("flag_value"),
-                pl.lit(_SPARSE_THRESHOLD).alias("threshold"),
-            ])
+            sparse.select(
+                [
+                    pl.col("instrument_id"),
+                    pl.col("min_ts").alias("ts_event"),
+                    pl.lit("BARS_SPARSE").alias("flag_code"),
+                    pl.lit("soft").alias("flag_severity"),
+                    pl.col("bars_per_day").alias("flag_value"),
+                    pl.lit(_SPARSE_THRESHOLD).alias("threshold"),
+                ]
+            )
         )
 
     # NO_EXPIRY_BARS ----------------------------------------------------------------
     no_expiry = con.execute(
         """
         SELECT
-            CAST(instrument_id AS BIGINT)                                            AS instrument_id,
-            MIN(ts_event)                                                            AS min_ts,
-            DATEDIFF('day', MAX(ts_event::date), expiration)::DOUBLE                AS days_before_expiry
+            CAST(instrument_id AS BIGINT)                            AS instrument_id,
+            MIN(ts_event)                                            AS min_ts,
+            DATEDIFF('day', MAX(ts_event::date), expiration)::DOUBLE AS days_before_expiry
         FROM option_bars
         GROUP BY instrument_id, expiration
         HAVING COUNT(*) FILTER (WHERE ts_event::date = expiration) = 0
@@ -108,14 +112,16 @@ def run(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
 
     if not no_expiry.is_empty():
         results.append(
-            no_expiry.select([
-                pl.col("instrument_id"),
-                pl.col("min_ts").alias("ts_event"),
-                pl.lit("NO_EXPIRY_BARS").alias("flag_code"),
-                pl.lit("soft").alias("flag_severity"),
-                pl.col("days_before_expiry").alias("flag_value"),
-                pl.lit(0.0).alias("threshold"),
-            ])
+            no_expiry.select(
+                [
+                    pl.col("instrument_id"),
+                    pl.col("min_ts").alias("ts_event"),
+                    pl.lit("NO_EXPIRY_BARS").alias("flag_code"),
+                    pl.lit("soft").alias("flag_severity"),
+                    pl.col("days_before_expiry").alias("flag_value"),
+                    pl.lit(0.0).alias("threshold"),
+                ]
+            )
         )
 
     if not results:

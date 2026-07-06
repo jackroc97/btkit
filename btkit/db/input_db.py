@@ -233,11 +233,13 @@ class InputDatabase:
         Returns an empty DataFrame when underlying_ids is empty or no bars exist.
         """
         if not underlying_ids:
-            return pl.DataFrame({
-                "underlying_id": pl.Series([], dtype=pl.Int64),
-                "exp_date": pl.Series([], dtype=pl.Date),
-                "settlement_close": pl.Series([], dtype=pl.Float64),
-            })
+            return pl.DataFrame(
+                {
+                    "underlying_id": pl.Series([], dtype=pl.Int64),
+                    "exp_date": pl.Series([], dtype=pl.Date),
+                    "settlement_close": pl.Series([], dtype=pl.Float64),
+                }
+            )
         close_minutes = close_time.hour * 60 + close_time.minute
         id_list = ", ".join(str(int(x)) for x in underlying_ids)
         bars = self._con.execute(
@@ -250,21 +252,24 @@ class InputDatabase:
             [start, end],
         ).pl()
         if bars.is_empty():
-            return pl.DataFrame({
-                "underlying_id": pl.Series([], dtype=pl.Int64),
-                "exp_date": pl.Series([], dtype=pl.Date),
-                "settlement_close": pl.Series([], dtype=pl.Float64),
-            })
+            return pl.DataFrame(
+                {
+                    "underlying_id": pl.Series([], dtype=pl.Int64),
+                    "exp_date": pl.Series([], dtype=pl.Date),
+                    "settlement_close": pl.Series([], dtype=pl.Float64),
+                }
+            )
         return (
-            bars
-            .with_columns(pl.col("ts_event").dt.convert_time_zone(tz_str).alias("ts_local"))
-            .with_columns([
-                pl.col("ts_local").dt.date().alias("exp_date"),
-                (
-                    pl.col("ts_local").dt.hour().cast(pl.Int32) * 60
-                    + pl.col("ts_local").dt.minute().cast(pl.Int32)
-                ).alias("_minutes"),
-            ])
+            bars.with_columns(pl.col("ts_event").dt.convert_time_zone(tz_str).alias("ts_local"))
+            .with_columns(
+                [
+                    pl.col("ts_local").dt.date().alias("exp_date"),
+                    (
+                        pl.col("ts_local").dt.hour().cast(pl.Int32) * 60
+                        + pl.col("ts_local").dt.minute().cast(pl.Int32)
+                    ).alias("_minutes"),
+                ]
+            )
             .filter(pl.col("_minutes") <= pl.lit(close_minutes))
             .sort(["instrument_id", "ts_event"])
             .group_by(["instrument_id", "exp_date"])
@@ -482,17 +487,13 @@ class InputDatabase:
             d_lo = float(spec["target_delta"]) - float(spec["delta_tolerance"])
             d_hi = float(spec["target_delta"]) + float(spec["delta_tolerance"])
 
-            leg_df = (
-                combined
-                .filter(
-                    (pl.col("right") == spec["right"])
-                    & (pl.col("dte") >= dte_lo_l)
-                    & (pl.col("dte") <= dte_hi_l)
-                    & (pl.col("delta") >= d_lo)
-                    & (pl.col("delta") <= d_hi)
-                )
-                .with_columns(pl.lit(spec["name"]).alias("leg_name"))
-            )
+            leg_df = combined.filter(
+                (pl.col("right") == spec["right"])
+                & (pl.col("dte") >= dte_lo_l)
+                & (pl.col("dte") <= dte_hi_l)
+                & (pl.col("delta") >= d_lo)
+                & (pl.col("delta") <= d_hi)
+            ).with_columns(pl.lit(spec["name"]).alias("leg_name"))
             if not leg_df.is_empty():
                 leg_results.append(leg_df)
 
@@ -501,10 +502,22 @@ class InputDatabase:
 
         return pl.concat(leg_results).select(
             [
-                "leg_name", "ts_event", "instrument_id", "underlying_id",
-                "dte", "iv", "delta", "gamma", "theta", "vega",
-                "strike_price", "expiration", "right", "multiplier",
-                "symbol", "close",
+                "leg_name",
+                "ts_event",
+                "instrument_id",
+                "underlying_id",
+                "dte",
+                "iv",
+                "delta",
+                "gamma",
+                "theta",
+                "vega",
+                "strike_price",
+                "expiration",
+                "right",
+                "multiplier",
+                "symbol",
+                "close",
             ]
         )
 
@@ -578,10 +591,22 @@ class InputDatabase:
 
         return result.select(
             [
-                "leg_name", "ts_event", "instrument_id", "underlying_id",
-                "dte", "iv", "delta", "gamma", "theta", "vega",
-                "strike_price", "expiration", "right", "multiplier",
-                "symbol", "close",
+                "leg_name",
+                "ts_event",
+                "instrument_id",
+                "underlying_id",
+                "dte",
+                "iv",
+                "delta",
+                "gamma",
+                "theta",
+                "vega",
+                "strike_price",
+                "expiration",
+                "right",
+                "multiplier",
+                "symbol",
+                "close",
             ]
         )
 
@@ -684,12 +709,14 @@ class InputDatabase:
                 start_date + timedelta(days=i) for i in range((end_date - start_date).days + 1)
             ]
             n = len(dates)
-            return pl.DataFrame({
-                "date": pl.Series(dates, dtype=pl.Date),
-                "underlying_id": pl.Series([uid] * n, dtype=pl.Int64),
-                "expiry": pl.Series([None] * n, dtype=pl.Date),
-                "next_underlying_id": pl.Series([None] * n, dtype=pl.Int64),
-            })
+            return pl.DataFrame(
+                {
+                    "date": pl.Series(dates, dtype=pl.Date),
+                    "underlying_id": pl.Series([uid] * n, dtype=pl.Int64),
+                    "expiry": pl.Series([None] * n, dtype=pl.Date),
+                    "next_underlying_id": pl.Series([None] * n, dtype=pl.Int64),
+                }
+            )
 
         expirations = list(
             zip(
@@ -708,7 +735,7 @@ class InputDatabase:
             roll_cutoff = d + timedelta(days=roll_days)
             # Front month: earliest expiration that hasn't yet hit its roll date
             front_idx = None
-            for i, (iid, exp) in enumerate(expirations):
+            for i, (_iid, exp) in enumerate(expirations):
                 if exp >= roll_cutoff:
                     front_idx = i
                     break

@@ -1,4 +1,5 @@
 """Home-page API: /api/studies and /api/backtests."""
+
 from __future__ import annotations
 
 import json
@@ -7,7 +8,7 @@ from datetime import date, datetime
 from typing import Any
 
 from fastapi import APIRouter
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import Response
 
 from ..db import cache_get, cache_set, query
 
@@ -219,6 +220,7 @@ ORDER BY bt.backtest_id, t.name
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _clean(v: Any) -> Any:
     """Convert DB values to JSON-serialisable Python types."""
     if v is None:
@@ -231,7 +233,7 @@ def _clean(v: Any) -> Any:
 
 
 def _row_to_dict(cols: list[str], row: tuple) -> dict:
-    return {c: _clean(v) for c, v in zip(cols, row)}
+    return {c: _clean(v) for c, v in zip(cols, row, strict=False)}
 
 
 def _extract_params(params_json: str) -> dict:
@@ -242,16 +244,16 @@ def _extract_params(params_json: str) -> dict:
         for trade in p.get("trades", []):
             legs = trade.get("legs", [])
             short = next(
-                (l for l in legs if "sell" in l.get("action", "")),
+                (leg for leg in legs if "sell" in leg.get("action", "")),
                 legs[0] if legs else {},
             )
             _delta = short.get("delta") or {}
-            result["delta"]           = _delta.get("target") if isinstance(_delta, dict) else _delta
-            result["dte"]             = short.get("dte")
+            result["delta"] = _delta.get("target") if isinstance(_delta, dict) else _delta
+            result["dte"] = short.get("dte")
             ex = trade.get("exit", {})
             result["take_profit_pct"] = ex.get("take_profit_pct")
-            result["stop_loss"]       = ex.get("stop_loss")
-            result["min_credit"]      = trade.get("entry", {}).get("min_credit")
+            result["stop_loss"] = ex.get("stop_loss")
+            result["min_credit"] = trade.get("entry", {}).get("min_credit")
             break
     except Exception:
         return {}
@@ -302,6 +304,7 @@ def _fingerprint() -> str:
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+
 def _load_backtest_tags() -> dict[int, list[dict]]:
     """Return a mapping of backtest_id → list of {id, name, color} tag dicts."""
     try:
@@ -326,9 +329,9 @@ def list_backtests() -> Response:
     result = []
     for row in rows:
         d = _row_to_dict(cols, row)
-        d["params"]         = _extract_params(d.pop("strategy_params"))
+        d["params"] = _extract_params(d.pop("strategy_params"))
         d["strategy_label"] = _strategy_label(d["strategy_name"])
-        d["tags"]           = tags_by_bt.get(d["id"], [])
+        d["tags"] = tags_by_bt.get(d["id"], [])
         result.append(d)
     body = json.dumps(result)
     cache_set("home.backtests", body, fp)
@@ -351,16 +354,19 @@ def list_studies() -> Response:
     # Build per-study metrics
     study_metrics: dict[int, dict] = {}
     for row in bt_rows:
-        d     = _row_to_dict(bt_cols, row)
-        sid   = d["study_id"]
-        sm    = study_metrics.setdefault(sid, {
-            "best_sharpe":     None,
-            "best_return_pct": None,
-            "total_trades":    0,
-            "data_start":      None,
-            "data_end":        None,
-            "strategies":      set(),
-        })
+        d = _row_to_dict(bt_cols, row)
+        sid = d["study_id"]
+        sm = study_metrics.setdefault(
+            sid,
+            {
+                "best_sharpe": None,
+                "best_return_pct": None,
+                "total_trades": 0,
+                "data_start": None,
+                "data_end": None,
+                "strategies": set(),
+            },
+        )
         sm["total_trades"] += d["n_trades"]
         if d["sharpe"] is not None:
             if sm["best_sharpe"] is None or d["sharpe"] > sm["best_sharpe"]:
@@ -399,21 +405,23 @@ def list_studies() -> Response:
     # Compose final response
     result = []
     for sid, s in studies.items():
-        sm    = study_metrics.get(sid, {})
+        sm = study_metrics.get(sid, {})
         strats = sorted(sm.get("strategies") or [])
-        axes   = _detect_sweep_axes(study_params.get(sid, []))
-        result.append({
-            **s,
-            "strategies":      strats,
-            "strategy_labels": [_strategy_label(n) for n in strats],
-            "sweep_axes":      axes,
-            "data_start":      sm.get("data_start"),
-            "data_end":        sm.get("data_end"),
-            "total_trades":    sm.get("total_trades", 0),
-            "best_sharpe":     sm.get("best_sharpe"),
-            "best_return_pct": sm.get("best_return_pct"),
-            "tags":            sorted(study_tag_map.get(sid, {}).values(), key=lambda t: t["name"]),
-        })
+        axes = _detect_sweep_axes(study_params.get(sid, []))
+        result.append(
+            {
+                **s,
+                "strategies": strats,
+                "strategy_labels": [_strategy_label(n) for n in strats],
+                "sweep_axes": axes,
+                "data_start": sm.get("data_start"),
+                "data_end": sm.get("data_end"),
+                "total_trades": sm.get("total_trades", 0),
+                "best_sharpe": sm.get("best_sharpe"),
+                "best_return_pct": sm.get("best_return_pct"),
+                "tags": sorted(study_tag_map.get(sid, {}).values(), key=lambda t: t["name"]),
+            }
+        )
 
     body = json.dumps(result)
     cache_set("home.studies", body, fp)

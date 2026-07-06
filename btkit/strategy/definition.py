@@ -13,7 +13,7 @@ plain scalars — list or SweepRange values are rejected by the engine at run ti
 from __future__ import annotations
 
 from datetime import date, time
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 from pydantic import BaseModel, model_validator
 
@@ -116,8 +116,9 @@ class EntryConfig(BaseModel):
     min_credit: NumericSweep | None = None  # skip entry if open_mark < this
     max_debit: NumericSweep | None = None  # skip entry if open_mark > this
     max_entries_per_day: int | None = None  # cap re-entries per calendar day (None = unlimited)
-    no_reentry_after_loss: bool = False     # block same-day re-entry after a stop-loss exit
-    time_tolerance: int = 0                 # seconds; how far an option greeks timestamp may differ from the candidate bar timestamp (0 = exact match)
+    no_reentry_after_loss: bool = False  # block same-day re-entry after a stop-loss exit
+    # seconds an option greeks timestamp may differ from the candidate bar (0 = exact match)
+    time_tolerance: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -132,21 +133,24 @@ class EntryConfig(BaseModel):
 
 class DeltaStep(BaseModel):
     """One bucket in an IV-stepped delta configuration."""
-    below: float | None = None          # fire when iv_source < below; None = catch-all
-    target: float                        # delta target for this bucket
-    tolerance: float | None = None       # None → inherit SteppedDeltaConfig.tolerance
+
+    below: float | None = None  # fire when iv_source < below; None = catch-all
+    target: float  # delta target for this bucket
+    tolerance: float | None = None  # None → inherit SteppedDeltaConfig.tolerance
 
 
 class SimpleDeltaConfig(BaseModel):
     """Fixed delta target, optionally sweepable."""
-    target: NumericSweep                 # -0.25 scalar or [-0.20, -0.25] sweep list
-    tolerance: float = 0.10             # ±band around target for candidate search
+
+    target: NumericSweep  # -0.25 scalar or [-0.20, -0.25] sweep list
+    tolerance: float = 0.10  # ±band around target for candidate search
 
 
 class SteppedDeltaConfig(BaseModel):
     """IV-conditioned delta: selects target/tolerance based on an indicator column."""
-    step_source: str                     # indicator column name (e.g. "ves1d_close")
-    tolerance: float = 0.10             # fallback tolerance for steps without explicit tolerance
+
+    step_source: str  # indicator column name (e.g. "ves1d_close")
+    tolerance: float = 0.10  # fallback tolerance for steps without explicit tolerance
     steps: list[DeltaStep]
 
     @model_validator(mode="after")
@@ -175,11 +179,12 @@ class SteppedStep(BaseModel):
     back to defaults (delta_tolerance → 0.10; dte_tolerance → the leg's
     dte_tolerance).
     """
-    below: float | None = None          # fire when source < below; None = catch-all
-    dte: int                             # target days-to-expiry for this bucket
-    delta: float                         # target delta for this bucket
+
+    below: float | None = None  # fire when source < below; None = catch-all
+    dte: int  # target days-to-expiry for this bucket
+    delta: float  # target delta for this bucket
     delta_tolerance: float | None = None  # None → 0.10 default
-    dte_tolerance: int | None = None      # None → leg-level dte_tolerance (default 5)
+    dte_tolerance: int | None = None  # None → leg-level dte_tolerance (default 5)
 
 
 class SteppedLegConfig(BaseModel):
@@ -192,7 +197,8 @@ class SteppedLegConfig(BaseModel):
     holds wins.  A single trailing step without `below` is the catch-all.  If no
     step matches and there is no catch-all, the entry is skipped.
     """
-    source: str                          # indicator column name (e.g. "iv_percentile")
+
+    source: str  # indicator column name (e.g. "iv_percentile")
     steps: list[SteppedStep]
 
     @model_validator(mode="after")
@@ -226,13 +232,14 @@ class LegTarget(BaseModel):
     feature — it is parsed and validated now but currently a no-op (a non-1.0
     value emits a warning).
     """
-    priority: int | None = None          # required for non-default; forbidden for default
-    condition: str | None = None         # required for non-default; forbidden for default
-    dte: int                             # target days-to-expiry
-    delta: float                         # target delta
+
+    priority: int | None = None  # required for non-default; forbidden for default
+    condition: str | None = None  # required for non-default; forbidden for default
+    dte: int  # target days-to-expiry
+    delta: float  # target delta
     delta_tolerance: float | None = None  # None → 0.10 default
-    dte_tolerance: int | None = None      # None → leg-level dte_tolerance (default 5)
-    size_multiplier: float = 1.0          # reserved; scales quantity once sizing lands
+    dte_tolerance: int | None = None  # None → leg-level dte_tolerance (default 5)
+    size_multiplier: float = 1.0  # reserved; scales quantity once sizing lands
 
 
 # ---------------------------------------------------------------------------
@@ -332,9 +339,13 @@ class StopLossConfig(BaseModel):
 
 class TakeProfitConfig(BaseModel):
     price: NumericSweep | None = None  # fixed per-point offset from open_mark
-    pct: NumericSweep | None = None  # fraction of open_mark to retain (e.g. 0.70 = exit at 70% profit)
+    pct: NumericSweep | None = (
+        None  # fraction of open_mark to retain (e.g. 0.70 = exit at 70% profit)
+    )
     condition: str | None = None  # AND-gated: TP only fires when this expression is also true
-    confirmation_bars: int = 1  # consecutive 1-min bars at/below TP level required before exit fires
+    confirmation_bars: int = (
+        1  # consecutive 1-min bars at/below TP level required before exit fires
+    )
 
     @model_validator(mode="after")
     def validate_tp_config(self) -> TakeProfitConfig:
@@ -381,10 +392,10 @@ class LiquidityConfig(BaseModel):
                                         cost of crossing the bid-ask spread.
     """
 
-    min_exit_volume: Optional[int] = None
+    min_exit_volume: int | None = None
     lookback_minutes: int = 3
-    pre_expiry_lock_minutes: Optional[int] = None
-    max_leg_stale_minutes: Optional[int] = None
+    pre_expiry_lock_minutes: int | None = None
+    max_leg_stale_minutes: int | None = None
     slippage_model: Literal["flat", "spread"] = "flat"
 
     @property
@@ -413,7 +424,9 @@ class LiquidityConfig(BaseModel):
 class ExitConfig(BaseModel):
     stop_loss: NumericSweep | StopLossConfig | None = None
     take_profit: NumericSweep | TakeProfitConfig | None = None
-    take_profit_pct: NumericSweep | None = None  # legacy top-level form; use take_profit.pct for new configs
+    take_profit_pct: NumericSweep | None = (
+        None  # legacy top-level form; use take_profit.pct for new configs
+    )
     dte_exit: IntSweep | None = None
     vega_exit: NumericSweep | None = None  # exit when spread net vega < this value
     expiry_exit: bool = True
@@ -422,7 +435,9 @@ class ExitConfig(BaseModel):
     leg_out: bool = False  # when True, long leg(s) run to expiry after short leg exits at TP/SL
     allow_after_hours_exits: bool = False  # when True, TP/SL can trigger outside the session window
     on_sl_long_continuation: bool = False  # when True, long leg runs under trailing stop after SL
-    long_trailing_stop_pct: float = 0.50   # trailing stop: exit if price pulls back this fraction from peak
+    long_trailing_stop_pct: float = (
+        0.50  # trailing stop: exit if price pulls back this fraction from peak
+    )
 
     @model_validator(mode="after")
     def validate_take_profit(self) -> ExitConfig:
@@ -475,7 +490,8 @@ class CostsConfig(BaseModel):
         if self.fee_per_contract != 0.0 and self.fees is not None:
             raise ValueError(
                 "fee_per_contract and fees are mutually exclusive; "
-                "use fees.entry_fee_per_contract / exit_fee_per_contract / expiration_fee_per_contract"
+                "use fees.entry_fee_per_contract / exit_fee_per_contract / "
+                "expiration_fee_per_contract"
             )
         return self
 
@@ -528,10 +544,14 @@ class TableCombinations(BaseModel):
 
 
 class RollConfig(BaseModel):
-    window: EntryWindowConfig | None = None  # roll only within this time window; None = use trade entry window
-    dte: IntSweep | None = None              # roll when remaining DTE <= this value
-    vega: NumericSweep | None = None         # roll when spread net vega < this value
-    conditions: list[str] = []              # roll when any condition expression is true (same namespace as exit.conditions)
+    window: EntryWindowConfig | None = (
+        None  # roll only within this time window; None = use trade entry window
+    )
+    dte: IntSweep | None = None  # roll when remaining DTE <= this value
+    vega: NumericSweep | None = None  # roll when spread net vega < this value
+    conditions: list[
+        str
+    ] = []  # roll when any condition expression is true (same namespace as exit.conditions)
 
     @model_validator(mode="after")
     def at_least_one_trigger(self) -> RollConfig:
@@ -655,7 +675,9 @@ class StrategyDefinition(BaseModel):
 
         for trade in self.trades:
             for leg in trade.legs:
-                if (isinstance(leg.delta, SimpleDeltaConfig) and is_sweep(leg.delta.target)) or is_sweep(leg.dte):
+                if (
+                    isinstance(leg.delta, SimpleDeltaConfig) and is_sweep(leg.delta.target)
+                ) or is_sweep(leg.dte):
                     return True
             for fname in ("stop_loss", "take_profit", "take_profit_pct", "dte_exit"):
                 v = getattr(trade.exit, fname)
