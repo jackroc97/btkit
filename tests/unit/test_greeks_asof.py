@@ -81,6 +81,21 @@ class TestAsofUnderlyingJoin:
         GreeksCalculator(con, underlying_max_staleness_minutes=15).run()
         assert _greek_minute_offsets(con) == {0, 2}
 
+    def test_underlying_lag_seconds_recorded(self):
+        """underlying_lag_s stores the option↔F timestamp diff in seconds
+        (0 for an exact same-minute match, 120 for a 2-minute-stale borrow)."""
+        con = _con()
+        _add_underlying(con, [0])
+        _add_option(con, 0)  # exact → lag 0
+        _add_option(con, 2)  # 2 min stale → lag 120 s
+        GreeksCalculator(con, underlying_max_staleness_minutes=15).run()
+        lag_by_offset = {}
+        for ts, lag in con.execute(
+            "SELECT ts_event, underlying_lag_s FROM option_greeks"
+        ).fetchall():
+            lag_by_offset[round((ts.astimezone(UTC) - _T0).total_seconds() / 60)] = lag
+        assert lag_by_offset == {0: 0, 2: 120}
+
     def test_too_stale_gets_no_greeks(self):
         """An option 30 min after the last underlying bar exceeds a 15-min
         tolerance and is left without greeks."""

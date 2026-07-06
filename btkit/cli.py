@@ -210,6 +210,15 @@ def build(
             "Skips OHLCV rows, greeks, and indicator bars that are already present."
         ),
     ),
+    underlying_staleness_minutes: int = typer.Option(
+        15,
+        "--underlying-staleness-minutes",
+        help=(
+            "Max age (minutes) of the nearest-prior underlying bar borrowed as the "
+            "spot price F when computing greeks, for option minutes the future did "
+            "not print. 0 requires an exact same-minute bar (legacy behaviour)."
+        ),
+    ),
 ) -> None:
     """Build the input database from raw Databento files."""
     typer.echo(f"{'Appending to' if append else 'Building'} database: {db_path}")
@@ -218,6 +227,7 @@ def build(
         db_path=db_path,
         indicator_scripts=indicators or None,
         append=append,
+        underlying_staleness_minutes=underlying_staleness_minutes,
     )
     builder.build()
     typer.echo("Build complete.")
@@ -307,6 +317,14 @@ def pipeline(
         default=False,
         help="Force rebuild of the input database even if it already exists.",
     ),
+    underlying_staleness_minutes: int = typer.Option(
+        15,
+        "--underlying-staleness-minutes",
+        help=(
+            "Max age (minutes) of the nearest-prior underlying bar borrowed as the "
+            "spot price F when computing greeks. 0 requires an exact same-minute bar."
+        ),
+    ),
 ) -> None:
     """Full pipeline: build (if needed) → run → analyze."""
     db_file = Path(db_path)
@@ -317,6 +335,7 @@ def pipeline(
             raw_data_path=data_path,
             db_path=db_path,
             indicator_scripts=indicators or None,
+            underlying_staleness_minutes=underlying_staleness_minutes,
         ).build()
     else:
         typer.echo(f"Input database already exists, skipping build: {db_path}")

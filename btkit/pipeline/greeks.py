@@ -247,7 +247,8 @@ class GreeksCalculator:
                 ob.strike_price,
                 ob."right",
                 ob.close        AS option_close,
-                ub.close        AS underlying_close
+                ub.close        AS underlying_close,
+                ub.ts_event     AS underlying_ts_event
             FROM option_bars ob
             ASOF JOIN underlying_bars ub
               ON ob.underlying_id = ub.instrument_id
@@ -345,14 +346,21 @@ class GreeksCalculator:
         """
         Receive a batch DataFrame with columns:
             ts_event, instrument_id, underlying_id, expiration, strike_price,
-            right, option_close, underlying_close
+            right, option_close, underlying_close, underlying_ts_event
 
         Returns a DataFrame matching the option_greeks schema:
             ts_event, instrument_id, underlying_id, dte, T,
-            iv, delta, gamma, theta, vega
+            iv, delta, gamma, theta, vega, underlying_lag_s
         """
         today = df["ts_event"].dt.date()
         dte = (df["expiration"] - today).dt.total_days().cast(pl.Int32)
+
+        # Seconds between the option bar and the underlying bar that supplied F
+        # (0 when the same-minute underlying bar was used). Non-negative because
+        # the ASOF join only borrows prior underlying bars.
+        underlying_lag_s = (
+            (df["ts_event"] - df["underlying_ts_event"]).dt.total_seconds().cast(pl.Int32)
+        )
 
         # Use actual fractional time-to-expiry so 0DTE options get T > 0.
         # Integer-day DTE gives T=0 for same-day expiry, which produces NaN IV/greeks.
@@ -392,5 +400,6 @@ class GreeksCalculator:
                 "gamma": pl.Series(gamma_arr).cast(pl.Float64),
                 "theta": pl.Series(theta_arr).cast(pl.Float64),
                 "vega": pl.Series(vega_arr).cast(pl.Float64),
+                "underlying_lag_s": underlying_lag_s,
             }
         )

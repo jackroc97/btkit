@@ -129,11 +129,15 @@ class DatabaseBuilder:
         db_path: str | Path,
         indicator_scripts: list[str | Path] | None = None,
         append: bool = False,
+        underlying_staleness_minutes: int = 15,
     ) -> None:
         self.raw_data_path = Path(raw_data_path)
         self.db_path = Path(db_path)
         self.indicator_scripts = [Path(p) for p in (indicator_scripts or [])]
         self.append = append
+        # Max age (minutes) of the nearest-prior underlying bar used as the spot
+        # price F when computing greeks. 0 = require an exact same-minute bar.
+        self.underlying_staleness_minutes = int(underlying_staleness_minutes)
         # instrument_id → list of validity segments (sorted by activation). Each
         # segment is one definition of that (possibly recycled) ID for a distinct
         # [activation, expiration] window.
@@ -150,6 +154,11 @@ class DatabaseBuilder:
         self._con.execute("SET temp_directory='/tmp/duckdb_build_tmp'")
         try:
             self._con.execute(INPUT_SCHEMA_SQL)
+            # Self-heal databases built before underlying_lag_s existed so an
+            # --append build against an older DB does not fail on INSERT.
+            self._con.execute(
+                "ALTER TABLE option_greeks ADD COLUMN IF NOT EXISTS underlying_lag_s INTEGER"
+            )
 
             t = time.perf_counter()
             required_ids = self._collect_ohlcv_instrument_ids()
@@ -442,7 +451,9 @@ class DatabaseBuilder:
         Instantiate GreeksCalculator and process all option_bars in batches,
         writing results to option_greeks.
         """
-        calc = GreeksCalculator(self._con)
+        calc = GreeksCalculator(
+            self._con, underlying_max_staleness_minutes=self.underlying_staleness_minutes
+        )
         calc.run(skip_existing=self.append)
 
     # ------------------------------------------------------------------

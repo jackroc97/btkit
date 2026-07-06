@@ -63,7 +63,8 @@ CREATE TABLE IF NOT EXISTS option_greeks (
     delta           DOUBLE,
     gamma           DOUBLE,
     theta           DOUBLE,
-    vega            DOUBLE
+    vega            DOUBLE,
+    underlying_lag_s INTEGER  -- seconds to the underlying bar used for F (0 = same-minute)
 );
 CREATE INDEX IF NOT EXISTS idx_option_greeks_lookup
     ON option_greeks (underlying_id, dte, ts_event);
