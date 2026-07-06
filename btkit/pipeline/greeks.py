@@ -1,8 +1,10 @@
 """
 GreeksCalculator — batch Black-76 IV and Greeks computation using numba JIT.
 
-Reads option_bars (joined with underlying_bars for the underlying close price)
-and writes iv, delta, gamma, theta, vega to option_greeks.
+Reads option_bars and writes iv, delta, gamma, theta, vega to option_greeks. The
+spot price F is taken from the underlying future via a backward ASOF join (nearest
+underlying bar at or before each option bar, within a staleness tolerance), so
+options that traded a minute the future did not print still get greeks.
 
 Takes a writable DuckDB connection so it can both read OHLCV tables and write
 the option_greeks table within the same build transaction.
@@ -183,10 +185,17 @@ class GreeksCalculator:
         con: duckdb.DuckDBPyConnection,
         risk_free_rate: float = 0.01,
         batch_size: int = 50_000,
+        underlying_max_staleness_minutes: int = 15,
     ) -> None:
         self.con = con
         self.risk_free_rate = risk_free_rate
         self.batch_size = batch_size
+        # Max age of the nearest-prior underlying bar used as the spot price F for
+        # an option bar. The underlying future does not print every minute the
+        # option does; an ASOF join within this window supplies F from the last
+        # underlying bar instead of dropping the option. 0 = require an exact
+        # same-minute underlying bar (legacy behaviour).
+        self.underlying_max_staleness_minutes = int(underlying_max_staleness_minutes)
 
     def run(self, skip_existing: bool = False) -> None:
         """
@@ -216,6 +225,16 @@ class GreeksCalculator:
 
         # Step 1: Materialise pending rows once (expensive NOT EXISTS runs here,
         # not once per batch).
+        #
+        # The spot price F comes from the underlying future via a backward ASOF
+        # join: for each option bar, the nearest underlying bar at or before the
+        # option's ts_event. The future does not print every minute the option
+        # does, so an exact-equality join silently drops those options and leaves
+        # them with no greeks. The staleness filter bounds how old the borrowed
+        # underlying bar may be (0 minutes ⇒ exact same-minute match, the legacy
+        # behaviour); a small window keeps the match within the same session
+        # because the only intraday gaps larger than it are hours-long.
+        stale_minutes = self.underlying_max_staleness_minutes
         self.con.execute("DROP TABLE IF EXISTS _greek_pending")
         self.con.execute(
             f"""
@@ -230,10 +249,11 @@ class GreeksCalculator:
                 ob.close        AS option_close,
                 ub.close        AS underlying_close
             FROM option_bars ob
-            JOIN underlying_bars ub
-              ON ub.instrument_id = ob.underlying_id
-             AND ub.ts_event     = ob.ts_event
+            ASOF JOIN underlying_bars ub
+              ON ob.underlying_id = ub.instrument_id
+             AND ob.ts_event >= ub.ts_event
             WHERE ob.close IS NOT NULL
+              AND ob.ts_event - ub.ts_event <= INTERVAL '{stale_minutes} minutes'
             {new_only_filter}
             ORDER BY ob.ts_event, ob.instrument_id
             """
