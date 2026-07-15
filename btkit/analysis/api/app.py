@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .routes import chart, compare, detail, home, indicators, preferences, tags
+from .routes import chart, compare, detail, explore, home, indicators, preferences, tags
 
 STATIC = Path(__file__).parent.parent / "static"
 
@@ -28,6 +28,7 @@ app.include_router(compare.router, prefix="/api")
 app.include_router(tags.router, prefix="/api")
 app.include_router(preferences.router, prefix="/api")
 app.include_router(indicators.router, prefix="/api")
+app.include_router(explore.router, prefix="/api")
 
 # ── Static assets (hashed filenames — long-lived) ────────────────────────────
 if (STATIC / "assets").exists():
