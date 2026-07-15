@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   createChart,
+  createSeriesMarkers,
   CandlestickSeries,
   HistogramSeries,
   LineSeries,
+  BaselineSeries,
   CrosshairMode,
 } from 'lightweight-charts'
 
@@ -39,6 +41,13 @@ interface Bars {
   has_data: boolean
   candles: Candle[]
   volume: { time: number; value: number; color: string }[]
+}
+
+interface BacktestMeta { id: number; strategy_label: string; strategy_name: string }
+interface Overlay {
+  markers: { time: number; position: string; color: string; shape: string; text: string }[]
+  equity: { time: number; value: number }[]
+  n_positions: number
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -98,9 +107,13 @@ export default function Explore() {
   const [active, setActive] = useState<ActiveIndicator[]>([])
   const [loading, setLoading] = useState(false)
   const [noDb, setNoDb] = useState(false)
+  const [backtests, setBacktests] = useState<BacktestMeta[]>([])
+  const [overlayBtId, setOverlayBtId] = useState<number | null>(null)
+  const [overlay, setOverlay] = useState<Overlay | null>(null)
 
   const priceRef = useRef<HTMLDivElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
+  const pnlRef = useRef<HTMLDivElement>(null)
   const legendRef = useRef<HTMLDivElement>(null)
   const colorCursor = useRef(0)
 
@@ -117,6 +130,24 @@ export default function Explore() {
       })
       .catch(() => setNoDb(true))
   }, [])
+
+  // ── Load backtest list once (for the performance overlay selector) ────────
+  useEffect(() => {
+    fetch('/api/backtests')
+      .then(r => r.json())
+      .then((d: BacktestMeta[]) => setBacktests(Array.isArray(d) ? d : []))
+      .catch(() => setBacktests([]))
+  }, [])
+
+  // ── Fetch overlay when backtest / contract / timeframe changes ────────────
+  useEffect(() => {
+    if (overlayBtId == null || !sel) { setOverlay(null); return }
+    fetch(`/api/explore/overlay?backtest_id=${overlayBtId}&${contractParams(sel)}`)
+      .then(r => r.json())
+      .then((d: Overlay) => setOverlay(d))
+      .catch(() => setOverlay(null))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overlayBtId, selIdx])
 
   // ── On contract change: fetch its indicators, reset active ────────────────
   useEffect(() => {
@@ -188,12 +219,14 @@ export default function Explore() {
 
     const overlays = active.filter(i => i.placement === 'overlay')
     const panels = active.filter(i => i.placement === 'panel')
+    const hasPnl = !!(overlay && overlay.equity.length > 0)
+    const pnlEl = pnlRef.current
 
     const price = createChart(priceEl, {
       ...THEME,
       width: priceEl.clientWidth, height: 420,
       localization: { timeFormatter: fmtTime },
-      timeScale: { borderColor: '#2a3245', timeVisible: intraday, secondsVisible: false, visible: panels.length === 0 },
+      timeScale: { borderColor: '#2a3245', timeVisible: intraday, secondsVisible: false, visible: panels.length === 0 && !hasPnl },
     })
 
     const candle = price.addSeries(CandlestickSeries, {
@@ -203,6 +236,12 @@ export default function Explore() {
     })
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     candle.setData(bars.candles.map(c => ({ ...c, time: c.time as any })))
+
+    // Backtest overlay: entry/exit markers on the price chart
+    if (overlay?.markers.length) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      createSeriesMarkers(candle, overlay.markers.map(m => ({ ...m, time: m.time as any })) as any)
+    }
 
     const vol = price.addSeries(HistogramSeries, { priceScaleId: 'vol', priceFormat: { type: 'volume' as const } })
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -220,13 +259,33 @@ export default function Explore() {
       panel = createChart(panelEl, {
         ...THEME, width: panelEl.clientWidth, height: 140,
         localization: { timeFormatter: fmtTime },
-        timeScale: { borderColor: '#2a3245', timeVisible: intraday, secondsVisible: false },
+        // Hide this axis when the P&L pane sits below it (it shows its own)
+        timeScale: { borderColor: '#2a3245', timeVisible: intraday, secondsVisible: false, visible: !hasPnl },
       })
       for (const ind of panels) {
         const s = panel.addSeries(LineSeries, { color: ind.color, lineWidth: 1, priceLineVisible: false, lastValueVisible: true })
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         s.setData(ind.data.map(p => ({ ...p, time: p.time as any })))
       }
+    }
+
+    // Strategy cumulative-P&L pane (baseline: green above 0, red below)
+    let pnl: ReturnType<typeof createChart> | null = null
+    if (hasPnl && pnlEl) {
+      pnl = createChart(pnlEl, {
+        ...THEME, width: pnlEl.clientWidth, height: 150,
+        localization: { timeFormatter: fmtTime },
+        timeScale: { borderColor: '#2a3245', timeVisible: intraday, secondsVisible: false },
+      })
+      const fmtPnl = (v: number) => `${v >= 0 ? '+' : ''}$${Math.abs(v).toFixed(0)}`
+      const s = pnl.addSeries(BaselineSeries, {
+        baseValue: { type: 'price', price: 0 },
+        topLineColor: '#4ade80', topFillColor1: 'rgba(74,222,128,0.12)', topFillColor2: 'rgba(74,222,128,0.02)',
+        bottomLineColor: '#f87171', bottomFillColor1: 'rgba(248,113,113,0.02)', bottomFillColor2: 'rgba(248,113,113,0.12)',
+        lineWidth: 2, priceFormat: { type: 'custom' as const, minMove: 1, formatter: fmtPnl },
+      })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      s.setData(overlay!.equity.map(p => ({ ...p, time: p.time as any })))
     }
 
     // OHLC crosshair legend (defaults to the last bar)
@@ -252,8 +311,8 @@ export default function Explore() {
       setLegend(bar, i > 0 ? bars.candles[i - 1].close : null)
     })
 
-    // Sync time scales across price + panel
-    const charts = [price, ...(panel ? [panel] : [])]
+    // Sync time scales across price + indicator panel + P&L pane
+    const charts = [price, ...(panel ? [panel] : []), ...(pnl ? [pnl] : [])]
     let syncing = false
     for (const src of charts) {
       src.timeScale().subscribeVisibleLogicalRangeChange(r => {
@@ -265,15 +324,17 @@ export default function Explore() {
     }
     price.timeScale().fitContent()
     panel?.timeScale().fitContent()
+    pnl?.timeScale().fitContent()
 
     const ro = new ResizeObserver(() => {
       price.applyOptions({ width: priceEl.clientWidth })
       if (panel && panelEl) panel.applyOptions({ width: panelEl.clientWidth })
+      if (pnl && pnlEl) pnl.applyOptions({ width: pnlEl.clientWidth })
     })
     ro.observe(priceEl)
 
-    return () => { ro.disconnect(); price.remove(); panel?.remove() }
-  }, [bars, active, timeframe])
+    return () => { ro.disconnect(); price.remove(); panel?.remove(); pnl?.remove() }
+  }, [bars, active, timeframe, overlay])
 
   const overlays = active.filter(i => i.placement === 'overlay')
   const panels = active.filter(i => i.placement === 'panel')
@@ -375,6 +436,29 @@ export default function Explore() {
                   ))}
                 </>
               )}
+
+              {/* Backtest performance overlay */}
+              {backtests.length > 0 && (
+                <>
+                  <div style={{ width: 1, height: 24, background: '#2a3245' }} />
+                  <select
+                    aria-label="Overlay backtest"
+                    value={overlayBtId ?? ''}
+                    onChange={e => setOverlayBtId(e.target.value ? parseInt(e.target.value) : null)}
+                    style={{ background: '#1e2535', border: '1px solid #2a3245', borderRadius: 6, color: overlayBtId == null ? '#64748b' : '#93c5fd', fontSize: '0.75rem', height: 30, padding: '0 8px', cursor: 'pointer', maxWidth: 240 }}
+                  >
+                    <option value="">Overlay backtest…</option>
+                    {backtests.map(b => (
+                      <option key={b.id} value={b.id}>#{b.id} · {b.strategy_label || b.strategy_name}</option>
+                    ))}
+                  </select>
+                  {overlayBtId != null && overlay && (
+                    <span style={{ fontSize: '0.72rem', color: '#64748b', fontFamily: 'ui-monospace, monospace' }}>
+                      {overlay.n_positions} trade{overlay.n_positions === 1 ? '' : 's'} on {sel?.symbol}
+                    </span>
+                  )}
+                </>
+              )}
             </div>
 
             {/* Chart card */}
@@ -408,6 +492,12 @@ export default function Explore() {
                       {panels.map(i => <span key={i.name} style={{ color: i.color }}>— {i.name}</span>)}
                     </div>
                     <div ref={panelRef} />
+                  </div>
+                  <div style={{ display: overlay && overlay.equity.length > 0 ? 'block' : 'none', borderTop: '1px solid #2a3245' }}>
+                    <div className="px-3 pt-2 pb-1" style={{ fontSize: '0.68rem', fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#64748b', fontFamily: 'ui-monospace, monospace' }}>
+                      Cumulative P&amp;L
+                    </div>
+                    <div ref={pnlRef} />
                   </div>
                 </>
               )}
