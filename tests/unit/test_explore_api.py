@@ -178,3 +178,34 @@ class TestAgainstFixture:
             )
         )
         assert len(s["data"]) > 0
+
+
+@pytest.mark.skipif(
+    not (_FIXTURE.exists() and (_FIXTURE.parent / "iron_condor.db").exists()),
+    reason="fixtures not built",
+)
+class TestOverlay:
+    @pytest.fixture(autouse=True)
+    def _env(self, monkeypatch):
+        monkeypatch.setenv("BTKIT_INPUT_DB", str(_FIXTURE))
+        monkeypatch.setenv("BTKIT_DB", str(_FIXTURE.parent / "iron_condor.db"))
+
+    def test_overlay_markers_and_equity(self):
+        o = _body(
+            E.get_overlay(backtest_id=1, root="ES", instrument_id=None, start=None, end=None)
+        )
+        assert o["n_positions"] > 0
+        # one entry + one exit marker per position
+        assert len(o["markers"]) == 2 * o["n_positions"]
+        assert len(o["equity"]) == o["n_positions"]
+        # markers sorted by time; equity is a running sum (monotonic time)
+        times = [m["time"] for m in o["markers"]]
+        assert times == sorted(times)
+        assert all(m["shape"] in ("arrowUp", "arrowDown") for m in o["markers"])
+
+    def test_overlay_empty_for_unrelated_contract(self):
+        # ESZ6 (instrument 10252) has no positions in the iron_condor backtest
+        o = _body(
+            E.get_overlay(backtest_id=1, instrument_id=10252, root=None, start=None, end=None)
+        )
+        assert o["n_positions"] == 0 and o["markers"] == []

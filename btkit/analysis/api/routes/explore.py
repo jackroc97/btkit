@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse
 
 from btkit.db.input_db import InputDatabase
 
+from ..db import query as out_query
 from ..db_input import connect as input_connect
 
 router = APIRouter()
@@ -407,5 +408,110 @@ def get_indicator(
         )
         data = _bucket_last(stitched, timeframe)
         return JSONResponse({"placement": _placement(name), "data": data})
+    finally:
+        con.close()
+
+
+# Marker / equity overlay colors (match the dashboard theme).
+_MK_UP = "#4ade80"
+_MK_DOWN = "#f87171"
+
+
+@router.get("/explore/overlay")
+def get_overlay(
+    backtest_id: int = Query(...),
+    instrument_id: int | None = Query(None),
+    root: str | None = Query(None),
+    start: str | None = Query(None),
+    end: str | None = Query(None),
+) -> JSONResponse:
+    """
+    Backtest overlay for the currently-viewed contract: entry/exit markers placed
+    at the underlying price, plus a cumulative realized-P&L series for a sub-panel.
+
+    Only positions whose underlying matches the viewed contract (exact
+    instrument_id, or symbol-prefix for a continuous root) and whose life overlaps
+    the [start, end] window are included. Requires BTKIT_INPUT_DB; the position/leg
+    rows come from the output DB.
+    """
+    con = input_connect()
+    if con is None:
+        return JSONResponse({"markers": [], "equity": [], "n_positions": 0})
+    try:
+        cols, rows = out_query(
+            "SELECT p.id, p.open_time, p.exit_time, p.exit_reason, p.net_pnl, "
+            "       MIN(pl.instrument_id) AS leg_iid "
+            "FROM position p JOIN position_leg pl ON pl.position_id = p.id "
+            "WHERE p.backtest_id = ? "
+            "GROUP BY p.id, p.open_time, p.exit_time, p.exit_reason, p.net_pnl "
+            "ORDER BY p.open_time",
+            [backtest_id],
+        )
+        positions = [dict(zip(cols, r, strict=False)) for r in rows]
+        if not positions:
+            return JSONResponse({"markers": [], "equity": [], "n_positions": 0})
+
+        # Resolve each position's option leg → underlying_id, and underlying → symbol.
+        leg_ids = sorted({int(p["leg_iid"]) for p in positions if p["leg_iid"] is not None})
+        opt_to_und: dict[int, int] = {}
+        if leg_ids:
+            id_list = ",".join(str(i) for i in leg_ids)
+            opt_to_und = {
+                int(iid): int(uid)
+                for iid, uid in con.execute(
+                    f"SELECT DISTINCT instrument_id, underlying_id FROM option_bars "
+                    f"WHERE instrument_id IN ({id_list})"
+                ).fetchall()
+            }
+        _sym_rows = con.execute(
+            "SELECT DISTINCT instrument_id, symbol FROM underlying_bars"
+        ).fetchall()
+        und_syms = {int(i): s for i, s in _sym_rows}
+
+        def _matches(p: dict) -> bool:
+            iid = p["leg_iid"]
+            uid = opt_to_und.get(int(iid)) if iid is not None else None
+            if uid is None:
+                return False
+            if instrument_id is not None:
+                return uid == instrument_id
+            if root:
+                return (und_syms.get(uid) or "").startswith(root)
+            return True
+
+        s_dt, e_dt = _range_dt(_parse_date(start), _parse_date(end))
+
+        def _in_range(p: dict) -> bool:
+            ot, xt = p["open_time"], p["exit_time"]
+            if s_dt is not None and xt is not None and xt < s_dt:
+                return False
+            if e_dt is not None and ot is not None and ot > e_dt:
+                return False
+            return True
+
+        kept = [p for p in positions if _matches(p) and _in_range(p)]
+
+        markers: list[dict] = []
+        equity: list[dict] = []
+        cum = 0.0
+        for p in sorted(kept, key=lambda x: (x["exit_time"] or x["open_time"])):
+            ot, xt = p["open_time"], p["exit_time"]
+            pnl = float(p["net_pnl"] or 0.0)
+            if ot is not None:
+                markers.append(
+                    {"time": int(ot.timestamp()), "position": "belowBar",
+                     "color": _MK_UP, "shape": "arrowUp", "text": ""}
+                )
+            if xt is not None:
+                markers.append(
+                    {"time": int(xt.timestamp()), "position": "aboveBar",
+                     "color": _MK_UP if pnl >= 0 else _MK_DOWN, "shape": "arrowDown",
+                     "text": f"{'+' if pnl >= 0 else ''}{pnl:.0f}"}
+                )
+                cum += pnl
+                equity.append({"time": int(xt.timestamp()), "value": round(cum, 2)})
+
+        markers.sort(key=lambda m: m["time"])
+        return JSONResponse({"markers": markers, "equity": equity, "n_positions": len(kept)})
     finally:
         con.close()
