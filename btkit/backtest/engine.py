@@ -186,7 +186,7 @@ class BacktestEngine:
         ).astimezone(UTC)
 
         _dtes = [
-            int(leg.dte)
+            int(leg.dte.target)
             for trade in self.strategy.trades
             for leg in trade.legs
             if leg.dte is not None

@@ -22,6 +22,7 @@ from btkit.strategy.definition import (
     InstrumentConfig,
     LegConfig,
     LiquidityConfig,
+    SimpleDeltaConfig,
     StopLossConfig,
     StrategyDefinition,
     SweepRange,
@@ -278,7 +279,7 @@ class TestLegConfig:
             strike_offset=-25.0,
             reference_leg="short_put",
         )
-        assert leg.dte == 45
+        assert leg.dte.target == 45
 
     def test_delta_leg_without_dte_rejected(self):
         with pytest.raises(ValidationError, match="dte is required for delta-targeted legs"):
@@ -685,3 +686,48 @@ class TestCostsConfigFees:
         fees = costs.effective_fees
         assert fees.entry_fee_per_contract == 0.0
         assert fees.exit_fee_per_contract == 0.0
+
+
+class TestDteDeltaForms:
+    """dte and delta accept both an object {target, tolerance} and a bare shorthand."""
+
+    def _leg(self, **kw):
+        base = dict(name="sp", right="put", action="sell_to_open")
+        base.update(kw)
+        return LegConfig(**base)
+
+    def test_dte_object_form(self):
+        leg = self._leg(dte={"target": 21, "tolerance": 3}, delta={"target": -0.2})
+        assert leg.dte.target == 21 and leg.dte.tolerance == 3
+
+    def test_bare_dte_default_tolerance(self):
+        leg = self._leg(dte=21, delta={"target": -0.2})
+        assert leg.dte.target == 21 and leg.dte.tolerance == 5
+
+    def test_bare_dte_folds_sibling_dte_tolerance(self):
+        # legacy `dte: 21 / dte_tolerance: 4` still works and lands on dte.tolerance
+        leg = self._leg(dte=21, dte_tolerance=4, delta={"target": -0.2})
+        assert leg.dte.target == 21 and leg.dte.tolerance == 4
+
+    def test_dte_object_tolerance_wins_over_field(self):
+        leg = self._leg(dte={"target": 21, "tolerance": 2}, dte_tolerance=9, delta={"target": -0.2})
+        assert leg.dte.tolerance == 2
+
+    def test_bare_delta_reenabled(self):
+        leg = self._leg(dte=21, delta=-0.25)
+        assert isinstance(leg.delta, SimpleDeltaConfig)
+        assert leg.delta.target == -0.25 and leg.delta.tolerance == 0.10
+
+    def test_object_delta_still_works(self):
+        leg = self._leg(dte=21, delta={"target": -0.25, "tolerance": 0.05})
+        assert leg.delta.target == -0.25 and leg.delta.tolerance == 0.05
+
+    def test_dte_object_sweep_is_parameterized(self):
+        leg = self._leg(dte={"target": [14, 21, 28]}, delta={"target": -0.2})
+        trade = _make_trade(legs=[leg])
+        assert _make_strategy(trades=[trade]).is_parameterized()
+
+    def test_dte_scalar_not_parameterized(self):
+        leg = self._leg(dte=21, delta={"target": -0.2})
+        trade = _make_trade(legs=[leg])
+        assert not _make_strategy(trades=[trade]).is_parameterized()
