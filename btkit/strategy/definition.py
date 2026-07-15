@@ -146,6 +146,19 @@ class SimpleDeltaConfig(BaseModel):
     tolerance: float = 0.10  # ±band around target for candidate search
 
 
+class SimpleDteConfig(BaseModel):
+    """
+    Days-to-expiry target with tolerance — the DTE analogue of SimpleDeltaConfig.
+
+    Written as ``dte: {target: 21, tolerance: 3}``.  A bare ``dte: 21`` (or a
+    sweep list / range) is also accepted and coerced to this form by LegConfig;
+    a sibling ``dte_tolerance`` on the leg folds into ``tolerance``.
+    """
+
+    target: IntSweep  # 21 scalar or [14, 21, 28] sweep list
+    tolerance: int = 5  # ±band around target for candidate search
+
+
 class SteppedDeltaConfig(BaseModel):
     """IV-conditioned delta: selects target/tolerance based on an indicator column."""
 
@@ -251,23 +264,61 @@ class LegConfig(BaseModel):
     name: str
     right: Literal["call", "put"]
     action: Literal["buy_to_open", "sell_to_open"]
-    # dte is required for delta-targeted legs.
-    # For offset legs it may be omitted (None) to inherit the reference leg's
-    # expiration — the standard case for vertical spreads.  Specifying a value
-    # reserves the leg for a future calendar-spread mode (not yet executed by
-    # the engine, which currently always inherits the reference expiration).
-    dte: IntSweep | None = None
-    quantity: int = 1
-    # Selection mode A: delta-targeted (standard or IV-stepped)
+    # dte selects the target days-to-expiry for delta-targeted legs, mirroring
+    # delta: written as `dte: {target: 21, tolerance: 3}` or the bare shorthand
+    # `dte: 21` (coerced below). For offset legs it may be omitted (None) to
+    # inherit the reference leg's expiration — the standard vertical-spread case.
+    dte: SimpleDteConfig | None = None
+    quantity: IntSweep = 1  # sweepable
+    # Selection mode A: delta-targeted (standard or IV-stepped). Accepts the object
+    # form `delta: {target: -0.25, tolerance: 0.10}` or the bare `delta: -0.25`.
     delta: SimpleDeltaConfig | SteppedDeltaConfig | None = None
-    dte_tolerance: int = 5  # ±band around target_dte for candidate search
+    # Fallback DTE tolerance for stepped:/targets: legs whose steps omit it; for a
+    # delta-targeted leg it is folded into dte.tolerance (legacy `dte_tolerance:` form).
+    dte_tolerance: int = 5
     # Selection mode B: fixed strike offset from a reference leg
-    strike_offset: float | None = None  # positive = above ref strike, negative = below
+    # positive = above ref strike, negative = below; sweepable
+    strike_offset: NumericSweep | None = None
     reference_leg: str | None = None  # name of the leg whose strike is the origin
     # Selection mode C: unified indicator-conditioned (dte, delta) stepping
     stepped: SteppedLegConfig | None = None
     # Selection mode D: named, priority-resolved conditional targets
     targets: dict[str, LegTarget] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_dte_delta(cls, data: Any) -> Any:
+        """
+        Accept both the object form and a bare shorthand for `dte` and `delta`:
+          dte:   21  |  [14, 21]  |  {start, stop, step}   →  {target: <v>}
+          delta: -0.25 | [-0.2, -0.25] | {start, stop, step} → {target: <v>}
+        (object forms `{target, ...}` and `delta: {step_source, ...}` pass through).
+        A sibling `dte_tolerance` folds into `dte.tolerance` when the object form
+        doesn't already set it — preserving the legacy `dte: 21 / dte_tolerance: 3`.
+        """
+        if not isinstance(data, dict):
+            return data
+
+        dte = data.get("dte")
+        if dte is not None and not isinstance(dte, SimpleDteConfig):
+            if isinstance(dte, dict) and "target" in dte:
+                if "tolerance" not in dte and data.get("dte_tolerance") is not None:
+                    dte["tolerance"] = data["dte_tolerance"]
+            else:
+                obj: dict[str, Any] = {"target": dte}
+                if data.get("dte_tolerance") is not None:
+                    obj["tolerance"] = data["dte_tolerance"]
+                data["dte"] = obj
+
+        delta = data.get("delta")
+        if (
+            delta is not None
+            and not isinstance(delta, (SimpleDeltaConfig, SteppedDeltaConfig))
+            and not (isinstance(delta, dict) and ("target" in delta or "step_source" in delta))
+        ):
+            data["delta"] = {"target": delta}
+
+        return data
 
     @model_validator(mode="after")
     def validate_selection_mode(self) -> LegConfig:
@@ -647,8 +698,12 @@ class StrategyDefinition(BaseModel):
             for leg in trade.legs:
                 if isinstance(leg.delta, SimpleDeltaConfig) and is_sweep(leg.delta.target):
                     sweep_fields.append(f"trades[{trade.name}].legs[{leg.name}].delta.target")
-                if is_sweep(leg.dte):
-                    sweep_fields.append(f"trades[{trade.name}].legs[{leg.name}].dte")
+                if leg.dte is not None and is_sweep(leg.dte.target):
+                    sweep_fields.append(f"trades[{trade.name}].legs[{leg.name}].dte.target")
+                if is_sweep(leg.quantity):
+                    sweep_fields.append(f"trades[{trade.name}].legs[{leg.name}].quantity")
+                if is_sweep(leg.strike_offset):
+                    sweep_fields.append(f"trades[{trade.name}].legs[{leg.name}].strike_offset")
             for fname in ("stop_loss", "take_profit", "take_profit_pct", "dte_exit"):
                 v = getattr(trade.exit, fname)
                 if isinstance(v, StopLossConfig):
@@ -676,8 +731,11 @@ class StrategyDefinition(BaseModel):
         for trade in self.trades:
             for leg in trade.legs:
                 if (
-                    isinstance(leg.delta, SimpleDeltaConfig) and is_sweep(leg.delta.target)
-                ) or is_sweep(leg.dte):
+                    (isinstance(leg.delta, SimpleDeltaConfig) and is_sweep(leg.delta.target))
+                    or (leg.dte is not None and is_sweep(leg.dte.target))
+                    or is_sweep(leg.quantity)
+                    or is_sweep(leg.strike_offset)
+                ):
                     return True
             for fname in ("stop_loss", "take_profit", "take_profit_pct", "dte_exit"):
                 v = getattr(trade.exit, fname)

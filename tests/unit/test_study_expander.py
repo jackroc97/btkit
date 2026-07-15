@@ -74,6 +74,46 @@ strategy:
         # 3 deltas × 2 stop_losses = 6 combinations
         assert len(combos) == 6
 
+    def test_quantity_and_strike_offset_sweeps(self, tmp_path):
+        yaml = """
+strategy:
+  name: qos
+  universe:
+    start_date: "2026-01-01"
+    end_date: "2026-03-31"
+  trades:
+    - name: t1
+      instrument: {root_symbol: ES, asset_class: future}
+      entry:
+        window: {start: "10:00", end: "12:00"}
+      legs:
+        - name: sp
+          right: put
+          action: sell_to_open
+          dte: 21
+          delta: {target: -0.20}
+          quantity: [1, 2]
+        - name: lp
+          right: put
+          action: buy_to_open
+          reference_leg: sp
+          strike_offset: [-50.0, -25.0]
+      exit:
+        stop_loss: 2.0
+        take_profit: 1.0
+"""
+        f = tmp_path / "qos.yaml"
+        f.write_text(yaml)
+        study = StudyDefinition(name="s", strategies=[StrategyRef(path="qos.yaml")])
+        combos = StudyExpander(study, tmp_path).combinations
+        assert len(combos) == 4  # 2 quantities × 2 offsets
+        pairs = set()
+        for _, defn in combos:
+            sp = next(leg for leg in defn.trades[0].legs if leg.name == "sp")
+            lp = next(leg for leg in defn.trades[0].legs if leg.name == "lp")
+            pairs.add((sp.quantity, lp.strike_offset))
+        assert pairs == {(1, -50.0), (1, -25.0), (2, -50.0), (2, -25.0)}
+
     def test_combination_ids_sequential_from_one(self, tmp_path):
         yaml = """
 strategy:
@@ -141,7 +181,7 @@ strategy:
         combos = expander.combinations
         # dte: 14, 21, 28 → 3 combinations
         assert len(combos) == 3
-        dte_values = [defn.trades[0].legs[0].dte for _, defn in combos]
+        dte_values = [defn.trades[0].legs[0].dte.target for _, defn in combos]
         assert dte_values == [14, 21, 28]
 
     def test_override_applied_correctly(self, tmp_path):

@@ -142,9 +142,16 @@ class StudyExpander:
                     vals = _as_values(leg.delta.target)
                     if vals is not None:
                         sweep_axes[f"{trade.name}.{leg.name}.delta.target"] = vals
-                vals = _as_values(leg.dte)
+                if leg.dte is not None:
+                    vals = _as_values(leg.dte.target)
+                    if vals is not None:
+                        sweep_axes[f"{trade.name}.{leg.name}.dte.target"] = vals
+                vals = _as_values(leg.quantity)
                 if vals is not None:
-                    sweep_axes[f"{trade.name}.{leg.name}.dte"] = vals
+                    sweep_axes[f"{trade.name}.{leg.name}.quantity"] = vals
+                vals = _as_values(leg.strike_offset)
+                if vals is not None:
+                    sweep_axes[f"{trade.name}.{leg.name}.strike_offset"] = vals
 
             for fname in ("stop_loss", "take_profit", "take_profit_pct", "dte_exit"):
                 v = getattr(trade.exit, fname)

@@ -194,7 +194,9 @@ take_profit_pct: [null, 0.70]       # 2 combos: no TP, 70% of open mark
 | Parameter | Location |
 |---|---|
 | `delta.target` | `legs[n]` |
-| `dte` | `legs[n]` |
+| `dte.target` | `legs[n]` |
+| `quantity` | `legs[n]` |
+| `strike_offset` | `legs[n]` |
 | `take_profit` | `exit` |
 | `stop_loss` | `exit` |
 | `dte_exit` | `exit` |
@@ -203,7 +205,20 @@ take_profit_pct: [null, 0.70]       # 2 combos: no TP, 70% of open mark
 | `roll.vega` | `roll` |
 | `roll.conditions` | `roll` (each element is a string, not swept) |
 
-A strategy with `delta.target: [0.20, 0.25, 0.30]` and `dte: [30, 45]` expands to
+`dte` and `delta` are defined **symmetrically** — each is a `{target, tolerance}` block
+whose `target` is the swept axis, and each also accepts a bare shorthand:
+
+```yaml
+# object form (canonical)          # bare shorthand (equivalent)
+dte:   {target: 21, tolerance: 3}  dte: 21          # + optional dte_tolerance: 3
+delta: {target: -0.25}             delta: -0.25
+dte:   {target: [14, 21, 28]}      dte: [14, 21, 28]
+```
+
+The legacy `dte: 21` / `dte_tolerance: 3` pair still works — `dte_tolerance` folds into
+`dte.tolerance`. Only `dte.target` (not `dte.tolerance`) is a sweep axis, mirroring delta.
+
+A strategy with `delta.target: [0.20, 0.25, 0.30]` and `dte.target: [30, 45]` expands to
 3 × 2 = 6 combinations. The `matrix.max_combinations` guard raises an error before
 any backtest runs if the expansion exceeds the configured limit, forcing the user to
 either reduce the parameter space or explicitly raise the cap.
@@ -371,6 +386,10 @@ class SimpleDeltaConfig(BaseModel):
     target:    NumericSweep   # e.g. -0.25 or [-0.20, -0.25] for sweep
     tolerance: float = 0.10  # ±band around target for candidate search
 
+class SimpleDteConfig(BaseModel):    # the DTE analogue of SimpleDeltaConfig
+    target:    IntSweep       # e.g. 21 or [14, 21, 28] for sweep
+    tolerance: int = 5        # ±band around target for candidate search
+
 class DeltaStep(BaseModel):
     below:     float | None   # fire when source < below; None = catch-all (must be last)
     target:    float
@@ -405,13 +424,13 @@ class LegConfig(BaseModel):
     name:            str
     right:           Literal["call", "put"]
     action:          Literal["buy_to_open", "sell_to_open"]
-    dte:             IntSweep | None = None   # required for delta legs; None = inherit parent expiry for offset legs
-    quantity:        int = 1
+    dte:             SimpleDteConfig | None = None   # required for delta legs; None = inherit parent expiry for offset legs
+    quantity:        IntSweep = 1                     # sweepable
     # Selection mode A: delta-targeted (fixed or IV-stepped)
     delta:           SimpleDeltaConfig | SteppedDeltaConfig | None = None
-    dte_tolerance:   int = 5
+    dte_tolerance:   int = 5   # fallback for stepped:/targets: legs; folded into dte.tolerance for delta legs
     # Selection mode B: fixed offset from a reference leg
-    strike_offset:   float | None = None   # positive = above ref strike, negative = below
+    strike_offset:   NumericSweep | None = None   # positive = above ref strike, negative = below; sweepable
     reference_leg:   str | None = None     # name of the delta-targeted leg to offset from
     # Selection mode C: unified indicator-conditioned (dte, delta) stepping
     stepped:         SteppedLegConfig | None = None

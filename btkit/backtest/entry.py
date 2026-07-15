@@ -284,7 +284,7 @@ class EntryScanner:
                         for t in leg.targets.values()
                     )
                 elif leg.dte is not None:
-                    _dte_reach.append(int(leg.dte) + leg.dte_tolerance)
+                    _dte_reach.append(int(leg.dte.target) + leg.dte.tolerance)
             _max_dte_needed = max(_dte_reach) if _dte_reach else None
 
         if _max_dte_needed is not None:
@@ -339,14 +339,14 @@ class EntryScanner:
                         d_expr, t_expr, dte_expr, dtetol_expr = self._build_stepped_leg_exprs(leg)
                     elif isinstance(leg.delta, SteppedDeltaConfig):
                         d_expr, t_expr = self._build_step_exprs(leg.delta)
-                        dte_expr = pl.lit(int(leg.dte))
-                        dtetol_expr = pl.lit(int(leg.dte_tolerance))
+                        dte_expr = pl.lit(int(leg.dte.target))
+                        dtetol_expr = pl.lit(int(leg.dte.tolerance))
                     else:
                         assert isinstance(leg.delta, SimpleDeltaConfig)
                         d_expr = pl.lit(float(leg.delta.target))
                         t_expr = pl.lit(float(leg.delta.tolerance))
-                        dte_expr = pl.lit(int(leg.dte))
-                        dtetol_expr = pl.lit(int(leg.dte_tolerance))
+                        dte_expr = pl.lit(int(leg.dte.target))
+                        dtetol_expr = pl.lit(int(leg.dte.tolerance))
                     eff_exprs.append(d_expr.alias(f"_eff_delta_{leg.name}"))
                     eff_exprs.append(t_expr.alias(f"_eff_tol_{leg.name}"))
                     eff_exprs.append(dte_expr.alias(f"_eff_dte_{leg.name}"))
@@ -474,9 +474,9 @@ class EntryScanner:
                         "name": leg.name,
                         "right": "C" if leg.right == "call" else "P",
                         "target_delta": float(leg.delta.target),
-                        "target_dte": int(leg.dte),
+                        "target_dte": int(leg.dte.target),
                         "delta_tolerance": float(leg.delta.tolerance),
-                        "dte_tolerance": int(leg.dte_tolerance),
+                        "dte_tolerance": int(leg.dte.tolerance),
                     }
                     for leg in delta_legs
                 ]
