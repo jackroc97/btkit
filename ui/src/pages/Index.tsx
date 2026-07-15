@@ -542,7 +542,14 @@ export default function Index() {
           bt<span className="btk-brand-dot">.</span>kit
         </a>
         <span className="btk-version">v2.0.0</span>
-        <div className="ms-auto d-flex align-items-center gap-2">
+        <div className="ms-auto d-flex align-items-center gap-3">
+          <Link
+            to="/explore"
+            style={{ fontSize: '0.8rem', color: '#93c5fd', textDecoration: 'none', fontWeight: 500 }}
+          >
+            <i className="bi bi-graph-up me-1" />
+            Chart Explorer
+          </Link>
           <span style={{ fontSize: '0.75rem', color: 'var(--btk-muted-dk)' }}>
             <i className="bi bi-hdd me-1" />
             es_options_backtests.db
