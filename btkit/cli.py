@@ -453,7 +453,7 @@ def dashboard(
     try:
         import uvicorn
     except ImportError as exc:
-        typer.echo("uvicorn is not installed. Run: pip install btkit[api]", err=True)
+        typer.echo("uvicorn is not installed. Run: pip install btkit[web]", err=True)
         raise typer.Exit(code=1) from exc
 
     # Set database paths before uvicorn imports the application module.

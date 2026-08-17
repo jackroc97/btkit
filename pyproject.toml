@@ -16,6 +16,7 @@ dependencies = [
     "numba>=0.59",
     "numpy>=1.26",
     "tqdm>=4.66",
+    "databento>=0.83",
 ]
 
 [project.optional-dependencies]

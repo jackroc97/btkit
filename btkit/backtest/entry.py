@@ -39,6 +39,7 @@ import polars as pl
 
 from btkit.audit.schema import resolve_audit_filter
 from btkit.backtest._util import tick_round_expr
+from btkit.db._dte_calendar import worst_case_slack
 from btkit.db.input_db import InputDatabase
 from btkit.strategy.definition import (
     LegConfig,
@@ -210,7 +211,8 @@ class EntryScanner:
         bars = bars.with_columns(pl.col("ts_event").dt.convert_time_zone(tz_str).alias("_ts_local"))
 
         if session.weekdays_only:
-            bars = bars.filter(pl.col("_ts_local").dt.weekday() < 5)
+            # Polars .dt.weekday() is ISO: Mon=1..Sun=7, so Fri=5 must stay in <= 5.
+            bars = bars.filter(pl.col("_ts_local").dt.weekday() <= 5)
 
         if session.skip_dates:
             bars = bars.filter(
@@ -271,20 +273,25 @@ class EntryScanner:
         ):
             _dte_reach: list[int] = []
             for leg in delta_legs:
+                _slack = worst_case_slack if leg.dte_skip_weekends else lambda t: 0
                 if leg.stepped is not None:
                     _dte_reach.extend(
                         int(s.dte)
                         + (s.dte_tolerance if s.dte_tolerance is not None else leg.dte_tolerance)
+                        + _slack(int(s.dte))
                         for s in leg.stepped.steps
                     )
                 elif leg.targets is not None:
                     _dte_reach.extend(
                         int(t.dte)
                         + (t.dte_tolerance if t.dte_tolerance is not None else leg.dte_tolerance)
+                        + _slack(int(t.dte))
                         for t in leg.targets.values()
                     )
                 elif leg.dte is not None:
-                    _dte_reach.append(int(leg.dte.target) + leg.dte.tolerance)
+                    _dte_reach.append(
+                        int(leg.dte.target) + leg.dte.tolerance + _slack(int(leg.dte.target))
+                    )
             _max_dte_needed = max(_dte_reach) if _dte_reach else None
 
         if _max_dte_needed is not None:
@@ -402,7 +409,13 @@ class EntryScanner:
                     grp = work.filter(mask)
 
                     grp_max_dte = max(
-                        int(row[f"_eff_dte_{leg.name}"]) + int(row[f"_eff_dtetol_{leg.name}"])
+                        int(row[f"_eff_dte_{leg.name}"])
+                        + int(row[f"_eff_dtetol_{leg.name}"])
+                        + (
+                            worst_case_slack(int(row[f"_eff_dte_{leg.name}"]))
+                            if leg.dte_skip_weekends
+                            else 0
+                        )
                         for leg in delta_legs
                     )
                     if "expiry" in grp.columns and "next_underlying_id" in grp.columns:
@@ -437,6 +450,7 @@ class EntryScanner:
                             "target_dte": int(row[f"_eff_dte_{leg.name}"]),
                             "delta_tolerance": float(row[f"_eff_tol_{leg.name}"]),
                             "dte_tolerance": int(row[f"_eff_dtetol_{leg.name}"]),
+                            "dte_skip_weekends": bool(leg.dte_skip_weekends),
                         }
                         for leg in delta_legs
                     ]
@@ -477,6 +491,7 @@ class EntryScanner:
                         "target_dte": int(leg.dte.target),
                         "delta_tolerance": float(leg.delta.tolerance),
                         "dte_tolerance": int(leg.dte.tolerance),
+                        "dte_skip_weekends": bool(leg.dte_skip_weekends),
                     }
                     for leg in delta_legs
                 ]

@@ -429,6 +429,7 @@ class LegConfig(BaseModel):
     # Selection mode A: delta-targeted (fixed or IV-stepped)
     delta:           SimpleDeltaConfig | SteppedDeltaConfig | None = None
     dte_tolerance:   int = 5   # fallback for stepped:/targets: legs; folded into dte.tolerance for delta legs
+    dte_skip_weekends: bool = False  # interpret dte target as a business-day count; no-op for strike_offset legs
     # Selection mode B: fixed offset from a reference leg
     strike_offset:   NumericSweep | None = None   # positive = above ref strike, negative = below; sweepable
     reference_leg:   str | None = None     # name of the delta-targeted leg to offset from
@@ -1640,6 +1641,22 @@ Default tolerances (configurable per leg):
 
 If no option is found within tolerance at a given entry timestamp, that entry is
 skipped entirely — all legs must be fillable for an entry to be recorded.
+
+### Weekend-aware DTE (`dte_skip_weekends`)
+
+`target_dte` is normally a calendar-day count, and options only expire on trading
+days. With a tight or zero `dte_tolerance`, a target that lands on a weekend (e.g.
+`dte: {target: 2, tolerance: 0}` from a Thursday or Friday entry, which falls on a
+Saturday/Sunday) matches zero real contracts — entries are silently skipped on those
+weekdays.
+
+Setting `dte_skip_weekends: true` on a leg reinterprets `target` as a **business-day**
+count instead: the effective calendar DTE searched for is the target's Nth trading
+day out from the entry date, shifting forward past any weekend it would otherwise
+land on. Weekdays that don't cross a weekend for the given target are unaffected
+(e.g. Monday + 2 stays at calendar dte 2). Default is `false` — existing strategies
+are unaffected. Has no effect on `strike_offset` legs, which inherit their reference
+leg's exact expiration and never search a DTE window.
 
 ### IV-Stepped Delta
 

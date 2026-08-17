@@ -148,7 +148,7 @@ class AuditRunner:
                     SELECT
                         CAST(g.instrument_id AS BIGINT) AS instrument_id,
                         FIRST(g.delta    ORDER BY g.ts_event) AS first_delta,
-                        FIRST(ob."right" ORDER BY g.ts_event) AS right
+                        FIRST(ob."right" ORDER BY g.ts_event) AS "right"
                     FROM option_greeks g
                     JOIN option_bars ob
                       ON ob.instrument_id = g.instrument_id
@@ -160,9 +160,9 @@ class AuditRunner:
                     SELECT
                         instrument_id,
                         first_delta,
-                        right,
+                        "right",
                         NTILE(5) OVER (
-                            PARTITION BY right ORDER BY first_delta
+                            PARTITION BY "right" ORDER BY first_delta
                         ) AS quintile
                     FROM first_delta
                 ),
@@ -171,7 +171,7 @@ class AuditRunner:
                 ),
                 summary AS (
                     SELECT
-                        q.right,
+                        q."right",
                         q.quintile,
                         MIN(q.first_delta)   AS delta_min,
                         MAX(q.first_delta)   AS delta_max,
@@ -182,11 +182,11 @@ class AuditRunner:
                         COUNT(f.instrument_id) AS flagged_instruments
                     FROM quintile_assignment q
                     LEFT JOIN flagged_set f USING (instrument_id)
-                    GROUP BY q.right, q.quintile
-                    ORDER BY q.right DESC, q.quintile
+                    GROUP BY q."right", q.quintile
+                    ORDER BY q."right" DESC, q.quintile
                 )
                 SELECT
-                    right,
+                    "right",
                     quintile,
                     delta_min,
                     delta_max,

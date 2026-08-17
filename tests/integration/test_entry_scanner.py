@@ -50,6 +50,7 @@ def _make_strategy(
     conditions: list[str] | None = None,
     min_credit: float | None = None,
     max_debit: float | None = None,
+    dte_skip_weekends: bool = False,
 ) -> StrategyDefinition:
     return StrategyDefinition(
         name="entry_test",
@@ -76,6 +77,7 @@ def _make_strategy(
                         dte=dte,
                         delta={"target": delta, "tolerance": delta_tolerance},
                         dte_tolerance=dte_tolerance,
+                        dte_skip_weekends=dte_skip_weekends,
                     )
                 ],
                 exit=ExitConfig(stop_loss=2.0, take_profit=1.0),
@@ -203,6 +205,67 @@ class TestLegSelection:
         n_tight = len(EntryScanner(input_db, strat_tight, strat_tight.trades[0]).scan())
         n_wide = len(EntryScanner(input_db, strat_wide, strat_wide.trades[0]).scan())
         assert n_wide >= n_tight
+
+
+# ---------------------------------------------------------------------------
+# dte_skip_weekends — business-day DTE matching
+# ---------------------------------------------------------------------------
+
+
+class TestDteSkipWeekends:
+    """
+    Reproduces the reported bug: dte=2, tolerance=0 never enters on Thu/Fri
+    because entry_date + 2 calendar days lands on a weekend, where no
+    contract expires. dte_skip_weekends=True reinterprets target as a
+    business-day count, so it lands on the 2nd trading day out instead.
+    """
+
+    def test_default_false_has_no_thu_fri_entries(self, input_db):
+        strat = _make_strategy(dte=2, dte_tolerance=0, dte_skip_weekends=False)
+        scanner = EntryScanner(input_db, strat, strat.trades[0])
+        df = scanner.scan()
+        if df.is_empty():
+            pytest.skip("No entries in fixture data")
+        weekdays = {t.weekday() for t in df["entry_time"].to_list()}
+        assert not weekdays & {3, 4}, (
+            "Expected zero Thu/Fri entries with the unfixed calendar-day default "
+            "(target dte=2 from Thu/Fri lands on a weekend)"
+        )
+
+    def test_skip_weekends_true_recovers_thu_fri_entries(self, input_db):
+        strat = _make_strategy(dte=2, dte_tolerance=0, dte_skip_weekends=True)
+        scanner = EntryScanner(input_db, strat, strat.trades[0])
+        df = scanner.scan()
+        if df.is_empty():
+            pytest.skip("No entries in fixture data")
+        by_weekday: dict[int, list[int]] = {}
+        for t, dte in zip(
+            df["entry_time"].to_list(), df["leg_short_put_dte"].to_list(), strict=True
+        ):
+            by_weekday.setdefault(t.weekday(), []).append(dte)
+        for wd in (3, 4):  # Thu, Fri
+            if wd not in by_weekday:
+                continue
+            assert all(d == 4 for d in by_weekday[wd]), (
+                f"Weekday {wd} entries should resolve to calendar dte=4 "
+                f"(2nd trading day out), got {by_weekday[wd]}"
+            )
+        for wd in (0, 1, 2):  # Mon, Tue, Wed — no weekend crossed, unaffected
+            if wd not in by_weekday:
+                continue
+            assert all(d == 2 for d in by_weekday[wd]), (
+                f"Weekday {wd} entries should be unaffected (calendar dte=2), "
+                f"got {by_weekday[wd]}"
+            )
+
+    def test_default_unset_matches_explicit_false(self, input_db):
+        strat_default = _make_strategy(dte=5, dte_tolerance=2)
+        strat_explicit = _make_strategy(dte=5, dte_tolerance=2, dte_skip_weekends=False)
+        df_default = EntryScanner(input_db, strat_default, strat_default.trades[0]).scan()
+        df_explicit = EntryScanner(
+            input_db, strat_explicit, strat_explicit.trades[0]
+        ).scan()
+        assert df_default.equals(df_explicit)
 
 
 # ---------------------------------------------------------------------------

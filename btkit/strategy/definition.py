@@ -276,6 +276,14 @@ class LegConfig(BaseModel):
     # Fallback DTE tolerance for stepped:/targets: legs whose steps omit it; for a
     # delta-targeted leg it is folded into dte.tolerance (legacy `dte_tolerance:` form).
     dte_tolerance: int = 5
+    # When True, target dte (leg dte / stepped.dte / targets[*].dte) is interpreted
+    # as a business-day (trading-day) count from the entry date rather than a raw
+    # calendar-day count, so e.g. dte: {target: 2, tolerance: 0} lands on the 2nd
+    # trading day out regardless of whether entry falls on Thu/Fri (which a pure
+    # calendar-day target would push into a weekend, where no contract expires).
+    # No effect on strike_offset legs (they inherit the reference leg's exact
+    # expiration and never search a dte window).
+    dte_skip_weekends: bool = False
     # Selection mode B: fixed strike offset from a reference leg
     # positive = above ref strike, negative = below; sweepable
     strike_offset: NumericSweep | None = None
@@ -348,6 +356,16 @@ class LegConfig(BaseModel):
             raise ValueError("dte is required for delta-targeted legs")
         if has_delta and isinstance(self.delta, SteppedDeltaConfig) and has_offset:
             raise ValueError("iv_delta_steps cannot be used with strike_offset legs")
+        return self
+
+    @model_validator(mode="after")
+    def validate_dte_skip_weekends(self) -> LegConfig:
+        if self.dte_skip_weekends and self.strike_offset is not None:
+            raise ValueError(
+                "dte_skip_weekends has no effect on strike_offset legs — they "
+                "inherit the reference leg's exact expiration and never search "
+                "a dte window"
+            )
         return self
 
     @model_validator(mode="after")

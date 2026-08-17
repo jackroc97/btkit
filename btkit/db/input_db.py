@@ -15,6 +15,8 @@ from datetime import date, datetime, timedelta
 import duckdb
 import polars as pl
 
+from btkit.db._dte_calendar import business_dte, worst_case_slack
+
 # SQL that creates the input database schema. Called by DatabaseBuilder, not here.
 INPUT_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS underlying_bars (
@@ -399,9 +401,17 @@ class InputDatabase:
         ts_min = min(ts_events)
         ts_max = max(ts_events)
 
-        # Global dte/delta bounds across all legs.
+        # Global dte/delta bounds across all legs. dte_lo is never widened for
+        # dte_skip_weekends: business_dte(target, w) >= target for every weekday, so
+        # skipping weekends only ever pushes the window's upper edge out, never the
+        # lower edge in — the un-widened lo bound remains valid (if slightly loose).
         dte_lo = min(int(s["target_dte"]) - int(s["dte_tolerance"]) for s in leg_specs)
-        dte_hi = max(int(s["target_dte"]) + int(s["dte_tolerance"]) for s in leg_specs)
+        dte_hi = max(
+            int(s["target_dte"])
+            + int(s["dte_tolerance"])
+            + (worst_case_slack(int(s["target_dte"])) if s.get("dte_skip_weekends") else 0)
+            for s in leg_specs
+        )
         delta_lo = min(float(s["target_delta"]) - float(s["delta_tolerance"]) for s in leg_specs)
         delta_hi = max(float(s["target_delta"]) + float(s["delta_tolerance"]) for s in leg_specs)
 
@@ -483,15 +493,28 @@ class InputDatabase:
         # --- Phase 3: per-leg delta / right filter, tag with leg_name ---
         leg_results: list[pl.DataFrame] = []
         for spec in leg_specs:
-            dte_lo_l = int(spec["target_dte"]) - int(spec["dte_tolerance"])
-            dte_hi_l = int(spec["target_dte"]) + int(spec["dte_tolerance"])
+            tol = int(spec["dte_tolerance"])
             d_lo = float(spec["target_delta"]) - float(spec["delta_tolerance"])
             d_hi = float(spec["target_delta"]) + float(spec["delta_tolerance"])
 
+            if spec.get("dte_skip_weekends"):
+                # weekday is read from each row's own ts_event (UTC-raw, same basis
+                # option_greeks.dte was itself derived from in greeks.py — safe as
+                # long as instruments trade during hours that don't cross UTC
+                # midnight, true for all currently supported US day-session data).
+                weekday = pl.col("ts_event").dt.weekday()
+                eff_target = business_dte(int(spec["target_dte"]), weekday)
+                dte_filter = (pl.col("dte") >= eff_target - tol) & (
+                    pl.col("dte") <= eff_target + tol
+                )
+            else:
+                dte_lo_l = int(spec["target_dte"]) - tol
+                dte_hi_l = int(spec["target_dte"]) + tol
+                dte_filter = (pl.col("dte") >= dte_lo_l) & (pl.col("dte") <= dte_hi_l)
+
             leg_df = combined.filter(
                 (pl.col("right") == spec["right"])
-                & (pl.col("dte") >= dte_lo_l)
-                & (pl.col("dte") <= dte_hi_l)
+                & dte_filter
                 & (pl.col("delta") >= d_lo)
                 & (pl.col("delta") <= d_hi)
             ).with_columns(pl.lit(spec["name"]).alias("leg_name"))

@@ -632,11 +632,12 @@ class ExitScanner:
                 pl.col("_local_sec") <= pl.lit(sess_end_sec)
             )
             if session.weekdays_only:
+                # Polars .dt.weekday() is ISO: Mon=1..Sun=7, so Fri=5 must stay in <= 5.
                 _in_session = _in_session & (
-                    pl.col("ts_event").dt.convert_time_zone(tz_str).dt.weekday() < 5
+                    pl.col("ts_event").dt.convert_time_zone(tz_str).dt.weekday() <= 5
                 )
         elif session.weekdays_only:
-            _in_session = pl.col("ts_event").dt.convert_time_zone(tz_str).dt.weekday() < 5
+            _in_session = pl.col("ts_event").dt.convert_time_zone(tz_str).dt.weekday() <= 5
         else:
             _in_session = pl.lit(True)
 

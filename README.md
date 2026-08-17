@@ -48,9 +48,9 @@ btkit run \
 ```bash
 btkit analyze --output-db results.db   # print metrics to terminal
 
-btkit serve \
+btkit dashboard \
   --output-db results.db \
-  --input-db  input.db    # launch interactive dashboard at http://localhost:8765
+  --input-db  input.db    # launch interactive dashboard at http://localhost:8050
 ```
 
 **Or run the full pipeline in one command:**
@@ -225,7 +225,7 @@ Indicator column names become available in entry and exit `conditions` expressio
 | `btkit run` | Run a single backtest from a strategy YAML |
 | `btkit analyze` | Print metrics for a completed backtest |
 | `btkit pipeline` | build → run → analyze in sequence |
-| `btkit serve` | Launch the Dash dashboard |
+| `btkit dashboard` | Launch the React dashboard |
 
 ```
 btkit build   --data-path DIR --db-path FILE [--indicators FILE ...]
@@ -233,7 +233,7 @@ btkit run     --db-path FILE --output-db FILE --strategy FILE
 btkit analyze --output-db FILE [--backtest-id INT]
 btkit pipeline --data-path DIR --db-path FILE --output-db FILE --strategy FILE \
                [--indicators FILE ...] [--initial-equity FLOAT] [--rebuild]
-btkit serve   --output-db FILE --input-db FILE [--port INT] [--debug]
+btkit dashboard --output-db FILE --input-db FILE [--port INT] [--debug]
 ```
 
 ---
