@@ -117,8 +117,23 @@ class EntryConfig(BaseModel):
     max_debit: NumericSweep | None = None  # skip entry if open_mark > this
     max_entries_per_day: int | None = None  # cap re-entries per calendar day (None = unlimited)
     no_reentry_after_loss: bool = False  # block same-day re-entry after a stop-loss exit
-    # seconds an option greeks timestamp may differ from the candidate bar (0 = exact match)
-    time_tolerance: int = 0
+    # seconds an option greeks timestamp may differ from the candidate bar, for any leg
+    # whose reference_leg.entry_time_tolerance is unset (0 = exact match). Was named
+    # time_tolerance; see _coerce_legacy_time_tolerance for the back-compat alias.
+    bar_time_tolerance: int = 0
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_time_tolerance(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        if "time_tolerance" in data:
+            if "bar_time_tolerance" in data:
+                raise ValueError(
+                    "specify either time_tolerance (legacy) or bar_time_tolerance, not both"
+                )
+            data["bar_time_tolerance"] = data.pop("time_tolerance")
+        return data
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +275,28 @@ class LegTarget(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class ReferenceLegConfig(BaseModel):
+    """
+    Object form of `reference_leg`, naming another leg this leg derives from
+    and/or times its entry against.
+
+    strike_offset: fixed offset from the named leg's selected strike
+    (positive = above, negative = below); sweepable. Requires reference_leg
+    to be set (structural — it lives inside this object).
+
+    entry_time_tolerance: seconds this leg's own resolved match timestamp may
+    differ from the named leg's own resolved match timestamp. None (default)
+    means this leg still matches the underlying bar via
+    entry.bar_time_tolerance, unaffected by this reference — only an explicit
+    value (including 0) anchors this leg's timing to the named leg instead of
+    the bar. See docs/strategy.md for why this distinction matters.
+    """
+
+    name: str
+    strike_offset: NumericSweep | None = None
+    entry_time_tolerance: int | None = None
+
+
 class LegConfig(BaseModel):
     name: str
     right: Literal["call", "put"]
@@ -284,10 +321,11 @@ class LegConfig(BaseModel):
     # No effect on strike_offset legs (they inherit the reference leg's exact
     # expiration and never search a dte window).
     dte_skip_weekends: bool = False
-    # Selection mode B: fixed strike offset from a reference leg
-    # positive = above ref strike, negative = below; sweepable
-    strike_offset: NumericSweep | None = None
-    reference_leg: str | None = None  # name of the leg whose strike is the origin
+    # Selection mode B: fixed strike offset from a reference leg (strike_offset
+    # lives on the object form of reference_leg — see ReferenceLegConfig). Also
+    # usable, with no strike_offset, purely to anchor timing (entry_time_tolerance)
+    # for a delta/stepped/targets leg without deriving its strike from anything.
+    reference_leg: str | ReferenceLegConfig | None = None
     # Selection mode C: unified indicator-conditioned (dte, delta) stepping
     stepped: SteppedLegConfig | None = None
     # Selection mode D: named, priority-resolved conditional targets
@@ -328,9 +366,41 @@ class LegConfig(BaseModel):
 
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_reference_leg_offset(cls, data: Any) -> Any:
+        """
+        Accept the legacy sibling-field form for strike_offset:
+          reference_leg: short_put
+          strike_offset: -50.0
+        and fold it into the object form of reference_leg:
+          reference_leg: {name: short_put, strike_offset: -50.0}
+        `strike_offset` no longer exists as a top-level LegConfig field — it
+        only ever makes sense alongside reference_leg, so it now lives inside
+        ReferenceLegConfig, which makes that requirement structural.
+        """
+        if not isinstance(data, dict):
+            return data
+        offset = data.pop("strike_offset", None)
+        if offset is None:
+            return data
+        ref = data.get("reference_leg")
+        if ref is None:
+            raise ValueError("strike_offset requires reference_leg to be set")
+        if isinstance(ref, str):
+            data["reference_leg"] = {"name": ref, "strike_offset": offset}
+        elif isinstance(ref, dict):
+            merged = dict(ref)
+            merged.setdefault("strike_offset", offset)
+            data["reference_leg"] = merged
+        return data
+
     @model_validator(mode="after")
     def validate_selection_mode(self) -> LegConfig:
-        has_offset = self.strike_offset is not None
+        has_offset = (
+            isinstance(self.reference_leg, ReferenceLegConfig)
+            and self.reference_leg.strike_offset is not None
+        )
         has_delta = self.delta is not None
         has_stepped = self.stepped is not None
         has_targets = self.targets is not None
@@ -350,8 +420,6 @@ class LegConfig(BaseModel):
             )
         if has_offset and has_delta:
             raise ValueError("delta and strike_offset are mutually exclusive")
-        if has_offset and self.reference_leg is None:
-            raise ValueError("reference_leg is required when strike_offset is set")
         if not has_offset and not has_stepped and not has_targets and self.dte is None:
             raise ValueError("dte is required for delta-targeted legs")
         if has_delta and isinstance(self.delta, SteppedDeltaConfig) and has_offset:
@@ -360,7 +428,11 @@ class LegConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_dte_skip_weekends(self) -> LegConfig:
-        if self.dte_skip_weekends and self.strike_offset is not None:
+        has_offset = (
+            isinstance(self.reference_leg, ReferenceLegConfig)
+            and self.reference_leg.strike_offset is not None
+        )
+        if self.dte_skip_weekends and has_offset:
             raise ValueError(
                 "dte_skip_weekends has no effect on strike_offset legs — they "
                 "inherit the reference leg's exact expiration and never search "
@@ -634,6 +706,22 @@ class RollConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def leg_strike_offset(leg: LegConfig) -> NumericSweep | None:
+    """The leg's strike_offset, wherever it lives (nested under reference_leg)."""
+    ref = leg.reference_leg
+    return ref.strike_offset if isinstance(ref, ReferenceLegConfig) else None
+
+
+def leg_is_offset(leg: LegConfig) -> bool:
+    return leg_strike_offset(leg) is not None
+
+
+def leg_entry_time_tolerance(leg: LegConfig) -> int | None:
+    """The leg's entry_time_tolerance, if it uses the object form of reference_leg."""
+    ref = leg.reference_leg
+    return ref.entry_time_tolerance if isinstance(ref, ReferenceLegConfig) else None
+
+
 class TradeDefinition(BaseModel):
     name: str
     instrument: InstrumentConfig
@@ -660,14 +748,31 @@ class TradeDefinition(BaseModel):
 
     @model_validator(mode="after")
     def reference_legs_valid(self) -> TradeDefinition:
-        delta_leg_names = {leg.name for leg in self.legs if leg.strike_offset is None}
+        root_names = {leg.name for leg in self.legs if not leg_is_offset(leg)}
+        by_name = {leg.name: leg for leg in self.legs}
         for leg in self.legs:
             if leg.reference_leg is None:
                 continue
-            if leg.reference_leg not in delta_leg_names:
+            ref_name = (
+                leg.reference_leg
+                if isinstance(leg.reference_leg, str)
+                else leg.reference_leg.name
+            )
+            if ref_name not in root_names:
                 raise ValueError(
-                    f"leg '{leg.name}' references '{leg.reference_leg}' which must be "
-                    "a delta-selected leg defined earlier in the legs list"
+                    f"leg '{leg.name}' references '{ref_name}' which must be a "
+                    "delta-selected leg (strike_offset legs cannot be referenced)"
+                )
+            if ref_name not in by_name:
+                raise ValueError(f"leg '{leg.name}' references unknown leg '{ref_name}'")
+            if (
+                leg_entry_time_tolerance(leg) is not None
+                and leg_entry_time_tolerance(by_name[ref_name]) is not None
+            ):
+                raise ValueError(
+                    f"leg '{leg.name}' anchors to '{ref_name}' via entry_time_tolerance, "
+                    f"but '{ref_name}' itself anchors elsewhere via entry_time_tolerance — "
+                    "anchor chains are not supported; the referenced leg must be bar-anchored"
                 )
         return self
 
@@ -720,8 +825,10 @@ class StrategyDefinition(BaseModel):
                     sweep_fields.append(f"trades[{trade.name}].legs[{leg.name}].dte.target")
                 if is_sweep(leg.quantity):
                     sweep_fields.append(f"trades[{trade.name}].legs[{leg.name}].quantity")
-                if is_sweep(leg.strike_offset):
-                    sweep_fields.append(f"trades[{trade.name}].legs[{leg.name}].strike_offset")
+                if is_sweep(leg_strike_offset(leg)):
+                    sweep_fields.append(
+                        f"trades[{trade.name}].legs[{leg.name}].reference_leg.strike_offset"
+                    )
             for fname in ("stop_loss", "take_profit", "take_profit_pct", "dte_exit"):
                 v = getattr(trade.exit, fname)
                 if isinstance(v, StopLossConfig):
@@ -752,7 +859,7 @@ class StrategyDefinition(BaseModel):
                     (isinstance(leg.delta, SimpleDeltaConfig) and is_sweep(leg.delta.target))
                     or (leg.dte is not None and is_sweep(leg.dte.target))
                     or is_sweep(leg.quantity)
-                    or is_sweep(leg.strike_offset)
+                    or is_sweep(leg_strike_offset(leg))
                 ):
                     return True
             for fname in ("stop_loss", "take_profit", "take_profit_pct", "dte_exit"):

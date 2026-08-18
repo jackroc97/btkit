@@ -30,6 +30,7 @@ from btkit.strategy.definition import (
     SweepRange,
     TableCombinations,
     TakeProfitConfig,
+    leg_strike_offset,
 )
 from btkit.strategy.loader import load_strategy
 from btkit.study.definition import StudyDefinition
@@ -149,9 +150,9 @@ class StudyExpander:
                 vals = _as_values(leg.quantity)
                 if vals is not None:
                     sweep_axes[f"{trade.name}.{leg.name}.quantity"] = vals
-                vals = _as_values(leg.strike_offset)
+                vals = _as_values(leg_strike_offset(leg))
                 if vals is not None:
-                    sweep_axes[f"{trade.name}.{leg.name}.strike_offset"] = vals
+                    sweep_axes[f"{trade.name}.{leg.name}.reference_leg.strike_offset"] = vals
 
             for fname in ("stop_loss", "take_profit", "take_profit_pct", "dte_exit"):
                 v = getattr(trade.exit, fname)

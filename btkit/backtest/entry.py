@@ -43,12 +43,15 @@ from btkit.db._dte_calendar import worst_case_slack
 from btkit.db.input_db import InputDatabase
 from btkit.strategy.definition import (
     LegConfig,
+    ReferenceLegConfig,
     SimpleDeltaConfig,
     SteppedDeltaConfig,
     StopLossConfig,
     StrategyDefinition,
     TakeProfitConfig,
     TradeDefinition,
+    leg_entry_time_tolerance,
+    leg_is_offset,
 )
 from btkit.strategy.loader import parse_condition
 
@@ -258,8 +261,8 @@ class EntryScanner:
         ts_events = candidates["ts_event"].to_list()
         underlying_ids = candidates["underlying_id"].to_list()
 
-        delta_legs = [leg for leg in self.trade.legs if leg.strike_offset is None]
-        offset_legs = [leg for leg in self.trade.legs if leg.strike_offset is not None]
+        delta_legs = [leg for leg in self.trade.legs if not leg_is_offset(leg)]
+        offset_legs = [leg for leg in self.trade.legs if leg_is_offset(leg)]
 
         # Build ts_event_underlying, extending with the next quarterly contract for
         # any bar where the front-month expiry is within the target DTE window.
@@ -313,6 +316,23 @@ class EntryScanner:
 
         result = candidates.select(["ts_event", "underlying_id"])
         target_lookup: pl.DataFrame | None = None
+
+        # Legs anchored to another leg's own resolved timestamp (rather than the
+        # underlying bar) via an explicit reference_leg.entry_time_tolerance must be
+        # attached after the leg they reference, so that leg's resolved timestamp
+        # (captured into _anchor_{name}_ts_event) is available to join against.
+        def _anchor_ref(leg: LegConfig) -> tuple[str, int] | None:
+            tol = leg_entry_time_tolerance(leg)
+            if tol is None:
+                return None
+            ref = leg.reference_leg
+            assert isinstance(ref, ReferenceLegConfig)
+            return (ref.name, tol)
+
+        referenced_names = {r[0] for leg in self.trade.legs if (r := _anchor_ref(leg))}
+        attach_order = [leg for leg in delta_legs if _anchor_ref(leg) is None] + [
+            leg for leg in delta_legs if _anchor_ref(leg) is not None
+        ]
 
         # ------------------------------------------------------------------
         # Pass 1: delta-selected legs (single batched DB query, or grouped
@@ -464,13 +484,24 @@ class EntryScanner:
 
                     grp_res = grp.select(["ts_event", "underlying_id"])
                     ok = True
-                    for leg in delta_legs:
+                    for leg in attach_order:
                         leg_df = grp_opts.filter(pl.col("leg_name") == leg.name)
                         if leg_df.is_empty():
                             ok = False
                             break
+                        ref = _anchor_ref(leg)
                         grp_res = self._attach_delta_leg(
-                            grp_res, leg_df, leg, float(row[f"_eff_delta_{leg.name}"])
+                            grp_res,
+                            leg_df,
+                            leg,
+                            float(row[f"_eff_delta_{leg.name}"]),
+                            anchor_col="ts_event" if ref is None else f"_anchor_{ref[0]}_ts_event",
+                            tolerance_seconds=None if ref is None else ref[1],
+                            capture_anchor_as=(
+                                f"_anchor_{leg.name}_ts_event"
+                                if leg.name in referenced_names
+                                else None
+                            ),
                         )
                         if grp_res.is_empty():
                             ok = False
@@ -508,34 +539,57 @@ class EntryScanner:
                     leg_name = key[0] if isinstance(key, (list, tuple)) else key
                     partitions[leg_name] = group_df
 
-                for leg in delta_legs:
+                for leg in attach_order:
                     leg_df = partitions.get(leg.name)
                     if leg_df is None or leg_df.is_empty():
                         return pl.DataFrame()
-                    result = self._attach_delta_leg(result, leg_df, leg, float(leg.delta.target))
+                    ref = _anchor_ref(leg)
+                    result = self._attach_delta_leg(
+                        result,
+                        leg_df,
+                        leg,
+                        float(leg.delta.target),
+                        anchor_col="ts_event" if ref is None else f"_anchor_{ref[0]}_ts_event",
+                        tolerance_seconds=None if ref is None else ref[1],
+                        capture_anchor_as=(
+                            f"_anchor_{leg.name}_ts_event" if leg.name in referenced_names else None
+                        ),
+                    )
 
         # ------------------------------------------------------------------
         # Pass 2: strike-offset legs (one DB query per leg)
         # ------------------------------------------------------------------
         for leg in offset_legs:
-            ref_strike_col = f"leg_{leg.reference_leg}_strike_price"
+            ref = leg.reference_leg
+            assert isinstance(ref, ReferenceLegConfig)  # guaranteed by leg_is_offset()
+            ref_strike_col = f"leg_{ref.name}_strike_price"
             if ref_strike_col not in result.columns:
                 return pl.DataFrame()
 
             right_char = "C" if leg.right == "call" else "P"
-            ref_expiry_col = f"leg_{leg.reference_leg}_expiration"
+            ref_expiry_col = f"leg_{ref.name}_expiration"
 
             # Use the actual contract where the reference leg's option was found,
             # not the stale front-month id, so greeks_for_strike_legs queries
             # the right underlying when the option is on the next quarterly contract.
-            ref_underlying_col = f"leg_{leg.reference_leg}_underlying_id"
+            ref_underlying_col = f"leg_{ref.name}_underlying_id"
+
+            if ref.entry_time_tolerance is None:
+                # Still bar-anchored — reference_leg is a pure strike source here.
+                anchor_expr = pl.col("ts_event")
+                ref_time_tol = self.trade.entry.bar_time_tolerance
+            else:
+                anchor_expr = pl.col(f"_anchor_{ref.name}_ts_event")
+                ref_time_tol = ref.entry_time_tolerance
+
             strike_targets = result.select(
                 [
                     "ts_event",
+                    anchor_expr.alias("anchor_ts_event"),
                     pl.col(ref_underlying_col).alias("underlying_id"),
                     pl.lit(leg.name).alias("leg_name"),
                     pl.lit(right_char).alias("right"),
-                    (pl.col(ref_strike_col) + pl.lit(float(leg.strike_offset))).alias(
+                    (pl.col(ref_strike_col) + pl.lit(float(ref.strike_offset))).alias(
                         "target_strike"
                     ),
                     pl.col(ref_expiry_col).alias("reference_expiration"),
@@ -544,21 +598,39 @@ class EntryScanner:
 
             offset_candidates = self.db.greeks_for_strike_legs(
                 strike_targets=strike_targets,
+                time_tolerance=ref_time_tol,
                 audit_filter_codes=self._audit_filter_codes or None,
             )
 
             if offset_candidates.is_empty():
                 return pl.DataFrame()
 
-            target_strikes = strike_targets.select(["ts_event", "target_strike"])
+            target_strikes = strike_targets.select(["ts_event", "anchor_ts_event", "target_strike"])
             best = (
                 offset_candidates.join(target_strikes, on="ts_event", how="left")
                 .with_columns(
-                    (pl.col("strike_price") - pl.col("target_strike")).abs().alias("_strike_diff")
+                    [
+                        (pl.col("strike_price") - pl.col("target_strike"))
+                        .abs()
+                        .alias("_strike_diff"),
+                        (pl.col("_match_ts_event") - pl.col("anchor_ts_event"))
+                        .abs()
+                        .alias("_time_diff"),
+                    ]
                 )
-                .sort(["ts_event", "_strike_diff"])
+                .sort(["ts_event", "_time_diff", "_strike_diff"])
                 .unique(subset=["ts_event"], keep="first")
-                .drop(["_strike_diff", "leg_name", "underlying_id", "target_strike"])
+                .drop(
+                    [
+                        "_strike_diff",
+                        "_time_diff",
+                        "_match_ts_event",
+                        "anchor_ts_event",
+                        "leg_name",
+                        "underlying_id",
+                        "target_strike",
+                    ]
+                )
             )
 
             rename_map = {col: f"leg_{leg.name}_{col}" for col in best.columns if col != "ts_event"}
@@ -570,6 +642,11 @@ class EntryScanner:
             )
 
             result = result.join(best, on="ts_event", how="inner")
+
+        if any(c.startswith("_anchor_") and c.endswith("_ts_event") for c in result.columns):
+            result = result.drop(
+                [c for c in result.columns if c.startswith("_anchor_") and c.endswith("_ts_event")]
+            )
 
         bar_cols = candidates.select(["ts_event", "open", "high", "low", "close", "volume"])
         result = result.drop("underlying_id").join(bar_cols, on="ts_event", how="left")
@@ -586,34 +663,60 @@ class EntryScanner:
         leg_df: pl.DataFrame,
         leg: LegConfig,
         target_delta: float,
+        *,
+        anchor_col: str = "ts_event",
+        tolerance_seconds: int | None = None,
+        capture_anchor_as: str | None = None,
     ) -> pl.DataFrame:
         """
-        Best-match one delta-selected leg to `target_delta` per ts_event, prefix
-        its columns, and ASOF-join it onto `base` (a candidate frame with a
-        ts_event column).
+        Best-match one delta-selected leg to `target_delta` per `anchor_col`,
+        prefix its columns, and ASOF-join it onto `base` (a candidate frame
+        containing an `anchor_col` column).
 
-        The nearest-time match is capped by entry.time_tolerance seconds:
-        time_tolerance=0 (default) requires an exact timestamp match; positive
-        values absorb ingest-pipeline offsets without risking far-in-time price
-        staleness.  Candidates with no match are dropped.
+        anchor_col: the column on `base` to match against — the underlying
+        bar's own ts_event (default), or another leg's captured resolved
+        timestamp (_anchor_{name}_ts_event) when this leg is anchored to that
+        leg via reference_leg.entry_time_tolerance.
+
+        tolerance_seconds: None (default) falls back to entry.bar_time_tolerance.
+        0 requires an exact timestamp match; positive values absorb ingest
+        offsets (bar anchor) or fill-timing slack (leg anchor) without risking
+        far-in-time price staleness. Candidates with no match are dropped.
+
+        capture_anchor_as: when given, this leg's own resolved timestamp
+        (otherwise discarded by the ASOF join, which only keeps `base`'s
+        anchor_col values) is preserved under this new column name on the
+        result, so a later leg can anchor to it.
         """
+        if tolerance_seconds is None:
+            tolerance_seconds = self.trade.entry.bar_time_tolerance
+
         best_per_ts = (
             leg_df.with_columns((pl.col("delta") - pl.lit(target_delta)).abs().alias("_delta_diff"))
             .sort(["ts_event", "_delta_diff"])
             .unique(subset=["ts_event"], keep="first")
             .drop(["_delta_diff", "leg_name"])
         )
-        best_per_ts = best_per_ts.rename(
-            {c: f"leg_{leg.name}_{c}" for c in best_per_ts.columns if c != "ts_event"}
-        ).with_columns(pl.col("ts_event").dt.date().alias("_asof_date"))
+        if capture_anchor_as is not None:
+            # join_asof always drops the right frame's "on" column values, keeping
+            # only base's — duplicate this leg's own ts_event under a name that
+            # survives the leg-name-prefix rename below, so it can be promoted to
+            # a real anchor column afterward.
+            best_per_ts = best_per_ts.with_columns(pl.col("ts_event").alias("_own_ts_event"))
+        if anchor_col != "ts_event":
+            best_per_ts = best_per_ts.rename({"ts_event": anchor_col})
 
-        _tol = timedelta(seconds=self.trade.entry.time_tolerance)
-        return (
-            base.with_columns(pl.col("ts_event").dt.date().alias("_asof_date"))
-            .sort("ts_event")
+        best_per_ts = best_per_ts.rename(
+            {c: f"leg_{leg.name}_{c}" for c in best_per_ts.columns if c != anchor_col}
+        ).with_columns(pl.col(anchor_col).dt.date().alias("_asof_date"))
+
+        _tol = timedelta(seconds=tolerance_seconds)
+        out = (
+            base.with_columns(pl.col(anchor_col).dt.date().alias("_asof_date"))
+            .sort(anchor_col)
             .join_asof(
-                best_per_ts.sort("ts_event"),
-                on="ts_event",
+                best_per_ts.sort(anchor_col),
+                on=anchor_col,
                 by="_asof_date",
                 strategy="nearest",
                 tolerance=_tol,
@@ -628,6 +731,11 @@ class EntryScanner:
                 ]
             )
         )
+        if capture_anchor_as is not None:
+            out = out.with_columns(
+                pl.col(f"leg_{leg.name}__own_ts_event").alias(capture_anchor_as)
+            ).drop(f"leg_{leg.name}__own_ts_event")
+        return out
 
     # ------------------------------------------------------------------
     # Step 3: Open mark + TP/SL prices

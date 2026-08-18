@@ -95,6 +95,12 @@ CREATE INDEX IF NOT EXISTS idx_indicator_bars
 class InputDatabase:
     def __init__(self, db_path: str) -> None:
         self._con = duckdb.connect(db_path, read_only=True)
+        # Every timestamp in this codebase (Polars Datetime("us","UTC") columns,
+        # option_greeks.dte's own derivation, etc.) is computed on a UTC basis.
+        # DuckDB's CAST(TIMESTAMPTZ AS DATE) otherwise uses the connection's
+        # session TimeZone, which defaults to the host's local zone — pin it to
+        # UTC so any date-bucketing done in SQL agrees with Python-side bucketing.
+        self._con.execute("SET TimeZone='UTC'")
 
     # ------------------------------------------------------------------
     # Underlying bars
@@ -550,26 +556,63 @@ class InputDatabase:
         strike_targets: pl.DataFrame,
         *,
         strike_tolerance: float = 1.0,
+        time_tolerance: int = 0,
         audit_filter_codes: frozenset[str] | None = None,
     ) -> pl.DataFrame:
         """
         For each (ts_event, leg_name) in strike_targets, find the option whose
-        strike_price is within strike_tolerance of target_strike and whose
-        expiration matches the reference leg's exact expiration date.
+        strike_price is within strike_tolerance of target_strike, whose
+        expiration matches the reference leg's exact expiration date, and whose
+        own timestamp is within time_tolerance seconds of anchor_ts_event.
 
-        strike_targets columns: ts_event, underlying_id, leg_name, right (C/P),
-        target_strike, reference_expiration (DATE).  The underlying_id column
-        scopes the search to the correct front-month futures contract at each bar.
+        strike_targets columns: ts_event, anchor_ts_event, underlying_id,
+        leg_name, right (C/P), target_strike, reference_expiration (DATE).
+        ts_event is this candidate row's identity (the underlying bar's own
+        timestamp) and is returned unchanged for joining the result back;
+        anchor_ts_event is the timestamp actually matched against (equal to
+        ts_event when the leg is bar-anchored, or another leg's own resolved
+        timestamp when anchored via reference_leg.entry_time_tolerance) — they
+        may differ, which is why both are threaded through separately.
+        time_tolerance=0 (default) matches anchor_ts_event exactly via the
+        original single-query exact-equality join (unchanged, still fast — a
+        real hash join with strike_targets as the build side).
 
-        Returns the same column set as greeks_for_all_legs().
+        time_tolerance>0 cannot use that plan: DuckDB has no efficient hash-join
+        strategy for a BETWEEN predicate, and a range join against the full
+        strike_targets frame scales far worse than linearly with the backtest's
+        time span (confirmed: >48x slower going from a 9-month to a 21-month
+        window on real data, eventually exhausting memory on a multi-year
+        universe). Instead: partition strike_targets by (underlying_id, calendar
+        date of anchor_ts_event) and let DuckDB pick the best match per anchor
+        row itself via QUALIFY, so only one row per anchor ever leaves the
+        database. underlying_id alone (one quarterly futures contract's
+        lifetime — the granularity greeks_for_all_legs() already uses) still
+        leaves a range join scoped to months of data for a densely-entering
+        strategy (e.g. 0DTE re-entering many times a day can have tens of
+        thousands of anchors within one contract's life); the join's cost
+        scales with anchor density within a partition, not just its calendar
+        span, so day-level sub-partitioning bounds each query to at most one
+        trading day's anchors regardless of entry frequency.
 
-        Uses the same two-phase per-underlying approach as greeks_for_all_legs()
-        to avoid Arrow-scan hash-join overhead. DTE bounds are derived from the
-        (ts_event, reference_expiration) pairs in strike_targets so the greeks
-        scan is as tight as greeks_for_all_legs().
+        Returns the same column set as greeks_for_all_legs(), plus
+        _match_ts_event (the option's own real bar timestamp).
         """
-        ts_min = strike_targets["ts_event"].min()
-        ts_max = strike_targets["ts_event"].max()
+        if time_tolerance == 0:
+            return self._greeks_for_strike_legs_exact(
+                strike_targets, strike_tolerance, audit_filter_codes
+            )
+        return self._greeks_for_strike_legs_tolerant(
+            strike_targets, strike_tolerance, time_tolerance, audit_filter_codes
+        )
+
+    def _greeks_for_strike_legs_exact(
+        self,
+        strike_targets: pl.DataFrame,
+        strike_tolerance: float,
+        audit_filter_codes: frozenset[str] | None,
+    ) -> pl.DataFrame:
+        ts_min = strike_targets["anchor_ts_event"].min()
+        ts_max = strike_targets["anchor_ts_event"].max()
 
         # Single query: the strike_targets Arrow scan (~150K rows) acts as the
         # build side; its hash fits comfortably in L3 cache. DuckDB probes
@@ -579,7 +622,8 @@ class InputDatabase:
             result = self._con.execute(
                 """
                 SELECT st.leg_name,
-                       og.ts_event,
+                       st.ts_event,
+                       og.ts_event AS _match_ts_event,
                        og.instrument_id,
                        CAST(og.underlying_id AS BIGINT) AS underlying_id,
                        og.dte, og.iv, og.delta, og.gamma, og.theta, og.vega,
@@ -590,7 +634,7 @@ class InputDatabase:
                   ON og.instrument_id = ob.instrument_id
                  AND og.ts_event      = ob.ts_event
                 JOIN _strike_targets st
-                  ON og.ts_event               = st.ts_event
+                  ON og.ts_event                = st.anchor_ts_event
                  AND og.underlying_id           = st.underlying_id
                  AND ob."right"                = st.right
                  AND ob.expiration             = st.reference_expiration
@@ -603,6 +647,117 @@ class InputDatabase:
         finally:
             self._con.unregister("_strike_targets")
 
+        return self._finish_strike_legs(result, audit_filter_codes)
+
+    def _greeks_for_strike_legs_tolerant(
+        self,
+        strike_targets: pl.DataFrame,
+        strike_tolerance: float,
+        time_tolerance: int,
+        audit_filter_codes: frozenset[str] | None,
+    ) -> pl.DataFrame:
+        # REVERTED (see git history) from a single-query design that expressed
+        # (underlying_id, calendar date) partitioning as join equality keys,
+        # trusting DuckDB to hash-join and internally bound memory the way this
+        # Python loop bounds it explicitly. That was faster in synthetic
+        # benchmarking (~5x at 250 synthetic partitions) but caused a faster and
+        # more severe real-scale memory blowup than the version it replaced —
+        # confirmed live (free+inactive memory to 1.1GB, swap to 7.8GB, within
+        # ~9s of starting a real multi-year study run) — while THIS loop version
+        # ran stably to 108/162 real combinations before being killed for an
+        # unrelated reason. The working hypothesis is that folding everything
+        # into one query lets DuckDB plan/build one large join structure sized
+        # to the whole multi-year strike_targets frame, rather than many small,
+        # sequentially-released ones — but this has not been confirmed via
+        # EXPLAIN ANALYZE. Do not re-attempt the single-query collapse without
+        # verifying the query plan and testing against real multi-year,
+        # multi-combination scale first — the previous synthetic verification
+        # (250 partitions, one query) did not surface this regression at all.
+        #
+        # Partition by (underlying_id, calendar date of anchor_ts_event).
+        # Partitioning by underlying_id alone (one quarterly futures contract's
+        # lifetime) still leaves a range join scoped to months of data — fine
+        # for a sparsely-entering strategy, but a densely-entering one (e.g. a
+        # 0DTE strategy re-entering many times a day) can have tens of
+        # thousands of anchors within a single contract's life, and the join's
+        # cost scales with anchor density within a partition, not just the
+        # partition's calendar span. Sub-partitioning by day bounds each query
+        # to at most a single trading day's anchors/candidates regardless of
+        # density. Date is computed in Python (UTC-basis, matching
+        # option_greeks.dte's own basis and _attach_delta_leg's Polars
+        # .dt.date() grouping); __init__ also pins this connection's session
+        # TimeZone to UTC so any incidental SQL-side date handling agrees.
+        _pad = timedelta(seconds=time_tolerance)
+        frames: list[pl.DataFrame] = []
+
+        grouped = strike_targets.with_columns(
+            pl.col("anchor_ts_event").dt.date().alias("_anchor_date")
+        )
+        for (uid, _anchor_date), group in grouped.group_by(["underlying_id", "_anchor_date"]):
+            anchor_min = group["anchor_ts_event"].min() - _pad
+            anchor_max = group["anchor_ts_event"].max() + _pad
+            strike_min = float(group["target_strike"].min()) - strike_tolerance
+            strike_max = float(group["target_strike"].max()) + strike_tolerance
+            right = group["right"][0]
+
+            self._con.register("_group_targets", group)
+            try:
+                df = self._con.execute(
+                    """
+                    SELECT st.leg_name,
+                           st.ts_event,
+                           og.ts_event AS _match_ts_event,
+                           og.instrument_id,
+                           CAST(og.underlying_id AS BIGINT) AS underlying_id,
+                           og.dte, og.iv, og.delta, og.gamma, og.theta, og.vega,
+                           ob.strike_price, ob.expiration, ob."right", ob.multiplier,
+                           ob.symbol, ob.close
+                    FROM option_greeks og
+                    JOIN option_bars ob
+                      ON og.instrument_id = ob.instrument_id
+                     AND og.ts_event      = ob.ts_event
+                     AND ob."right"       = ?
+                     AND ob.strike_price BETWEEN ? AND ?
+                     AND ob.close IS NOT NULL
+                    JOIN _group_targets st
+                      ON og.ts_event BETWEEN st.anchor_ts_event - INTERVAL (?) SECOND
+                                          AND st.anchor_ts_event + INTERVAL (?) SECOND
+                     AND ob.expiration = st.reference_expiration
+                     AND abs(ob.strike_price - st.target_strike) <= ?
+                    WHERE og.underlying_id = ?
+                      AND og.ts_event BETWEEN ? AND ?
+                    QUALIFY ROW_NUMBER() OVER (
+                        PARTITION BY st.ts_event
+                        ORDER BY abs(epoch(og.ts_event) - epoch(st.anchor_ts_event)),
+                                 abs(ob.strike_price - st.target_strike)
+                    ) = 1
+                    """,
+                    [
+                        right,
+                        strike_min,
+                        strike_max,
+                        time_tolerance,
+                        time_tolerance,
+                        strike_tolerance,
+                        uid,
+                        anchor_min,
+                        anchor_max,
+                    ],
+                ).pl()
+            finally:
+                self._con.unregister("_group_targets")
+            if not df.is_empty():
+                frames.append(df)
+
+        return self._finish_strike_legs(
+            pl.concat(frames) if frames else pl.DataFrame(), audit_filter_codes
+        )
+
+    def _finish_strike_legs(
+        self,
+        result: pl.DataFrame,
+        audit_filter_codes: frozenset[str] | None,
+    ) -> pl.DataFrame:
         if result.is_empty():
             return pl.DataFrame()
 
@@ -617,6 +772,7 @@ class InputDatabase:
             [
                 "leg_name",
                 "ts_event",
+                "_match_ts_event",
                 "instrument_id",
                 "underlying_id",
                 "dte",

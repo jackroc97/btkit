@@ -13,7 +13,7 @@ option data at a controlled timestamp offset from the candidate bars.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 
 import polars as pl
 
@@ -236,3 +236,126 @@ class TestPositiveTolerance:
         result = EntryScanner(db, strat, trade)._select_legs(candidates)
         assert len(result) == 2
         assert set(result["ts_event"].to_list()) == {bar_ts_1, bar_ts_2}
+
+
+# ---------------------------------------------------------------------------
+# reference_leg.entry_time_tolerance — anchor to another leg's resolved ts,
+# not the underlying bar
+# ---------------------------------------------------------------------------
+
+
+def _make_two_leg_trade(
+    *,
+    root_bar_time_tolerance: int = 0,
+    dependent_entry_time_tolerance: int | None,
+) -> tuple[StrategyDefinition, TradeDefinition]:
+    strat = StrategyDefinition(
+        name="anchor_test",
+        universe=UniverseConfig(start_date=date(2022, 12, 14), end_date=date(2022, 12, 14)),
+        trades=[
+            TradeDefinition(
+                name="spread",
+                instrument=InstrumentConfig(root_symbol="ES", asset_class="future"),
+                entry=EntryConfig(
+                    window=EntryWindowConfig(start=time(9, 30), end=time(11, 0)),
+                    bar_time_tolerance=root_bar_time_tolerance,
+                ),
+                legs=[
+                    LegConfig(
+                        name="short_put",
+                        right="put",
+                        action="sell_to_open",
+                        dte=45,
+                        delta={"target": -0.10, "tolerance": 0.05},
+                    ),
+                    LegConfig(
+                        name="long_put",
+                        right="put",
+                        action="buy_to_open",
+                        dte=45,
+                        delta={"target": -0.05, "tolerance": 0.05},
+                        reference_leg={
+                            "name": "short_put",
+                            "entry_time_tolerance": dependent_entry_time_tolerance,
+                        },
+                    ),
+                ],
+                exit=ExitConfig(take_profit=1.0),
+            )
+        ],
+    )
+    return strat, strat.trades[0]
+
+
+def _two_leg_greeks_df(
+    short_put_ts: datetime, long_put_ts: datetime, underlying_id: int
+) -> pl.DataFrame:
+    sp = _greeks_df(ts_event=short_put_ts, underlying_id=underlying_id, delta=-0.10)
+    sp = sp.with_columns(pl.lit("short_put").alias("leg_name"))
+    lp = _greeks_df(ts_event=long_put_ts, underlying_id=underlying_id, delta=-0.05)
+    lp = lp.with_columns(pl.lit("long_put").alias("leg_name"))
+    return pl.concat([sp, lp])
+
+
+class TestReferenceLegAnchor:
+    def test_dependent_matches_root_resolved_ts_not_bar(self):
+        """
+        root's own greeks are 8s off the bar (root resolves at bar+8s). The
+        dependent leg's greeks are at bar+15s: 7s from root's resolved ts (in
+        tolerance) but 15s from the bar (would fail a bar-anchored tolerance
+        of 10s). Entry must be found — proving the dependent anchors to the
+        root's resolved timestamp, not the bar.
+        """
+        bar_ts = datetime(2022, 12, 14, 14, 30, tzinfo=UTC)
+        root_ts = bar_ts + timedelta(seconds=8)
+        dep_ts = bar_ts + timedelta(seconds=15)
+        strat, trade = _make_two_leg_trade(
+            root_bar_time_tolerance=10, dependent_entry_time_tolerance=10
+        )
+        db = _MockDB(greeks=_two_leg_greeks_df(root_ts, dep_ts, 999))
+        result = EntryScanner(db, strat, trade)._select_legs(_candidates_df(bar_ts, 999))
+        assert not result.is_empty(), (
+            "dependent leg (7s from root's resolved ts) should match even though "
+            "it's 15s from the bar, which would fail if anchored to the bar"
+        )
+        assert result["ts_event"][0] == bar_ts
+
+    def test_dependent_dropped_when_beyond_root_tolerance(self):
+        """Same setup, but dependent_entry_time_tolerance too small for the 7s gap."""
+        bar_ts = datetime(2022, 12, 14, 14, 30, tzinfo=UTC)
+        root_ts = bar_ts + timedelta(seconds=8)
+        dep_ts = bar_ts + timedelta(seconds=15)
+        strat, trade = _make_two_leg_trade(
+            root_bar_time_tolerance=10, dependent_entry_time_tolerance=5
+        )
+        db = _MockDB(greeks=_two_leg_greeks_df(root_ts, dep_ts, 999))
+        result = EntryScanner(db, strat, trade)._select_legs(_candidates_df(bar_ts, 999))
+        assert result.is_empty(), "7s gap exceeds a 5s entry_time_tolerance"
+
+    def test_anchor_column_not_leaked_into_output(self):
+        bar_ts = datetime(2022, 12, 14, 14, 30, tzinfo=UTC)
+        strat, trade = _make_two_leg_trade(
+            root_bar_time_tolerance=0, dependent_entry_time_tolerance=0
+        )
+        db = _MockDB(greeks=_two_leg_greeks_df(bar_ts, bar_ts, 999))
+        result = EntryScanner(db, strat, trade)._select_legs(_candidates_df(bar_ts, 999))
+        assert not result.is_empty()
+        assert not any(c.startswith("_anchor_") for c in result.columns)
+
+    def test_entry_time_tolerance_none_anchors_to_bar_like_baseline(self):
+        """entry_time_tolerance omitted (None) reproduces bar-anchored behavior:
+        a dependent leg 15s from the bar is dropped even though it's only 7s
+        from the root's resolved ts, because with entry_time_tolerance unset
+        this leg matches the bar via bar_time_tolerance instead."""
+        bar_ts = datetime(2022, 12, 14, 14, 30, tzinfo=UTC)
+        root_ts = bar_ts + timedelta(seconds=8)
+        dep_ts = bar_ts + timedelta(seconds=15)
+        strat, trade = _make_two_leg_trade(
+            root_bar_time_tolerance=10, dependent_entry_time_tolerance=None
+        )
+        db = _MockDB(greeks=_two_leg_greeks_df(root_ts, dep_ts, 999))
+        result = EntryScanner(db, strat, trade)._select_legs(_candidates_df(bar_ts, 999))
+        assert result.is_empty(), (
+            "entry_time_tolerance unset must anchor long_put to the bar "
+            "(15s > 10s bar_time_tolerance), not to short_put's resolved ts"
+        )

@@ -111,7 +111,7 @@ strategy:
         for _, defn in combos:
             sp = next(leg for leg in defn.trades[0].legs if leg.name == "sp")
             lp = next(leg for leg in defn.trades[0].legs if leg.name == "lp")
-            pairs.add((sp.quantity, lp.strike_offset))
+            pairs.add((sp.quantity, lp.reference_leg.strike_offset))
         assert pairs == {(1, -50.0), (1, -25.0), (2, -50.0), (2, -25.0)}
 
     def test_combination_ids_sequential_from_one(self, tmp_path):

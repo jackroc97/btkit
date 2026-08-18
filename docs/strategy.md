@@ -65,7 +65,7 @@ strategy:
         max_debit:   2.00           # skip entry if open_mark > this (optional)
         max_entries_per_day: 1      # cap total positions opened per calendar day (optional)
         no_reentry_after_loss: true # block same-day re-entry after a stop-loss exit (optional)
-        time_tolerance: 300         # seconds; allow greeks timestamps to differ from bar by up to this (optional, default 0)
+        bar_time_tolerance: 300     # seconds; allow greeks timestamps to differ from bar by up to this (optional, default 0). Was named time_tolerance — still accepted.
 
       # Leg definitions — numeric fields accept scalar, list, or range (see Sweep Parameters)
       legs:
@@ -196,7 +196,7 @@ take_profit_pct: [null, 0.70]       # 2 combos: no TP, 70% of open mark
 | `delta.target` | `legs[n]` |
 | `dte.target` | `legs[n]` |
 | `quantity` | `legs[n]` |
-| `strike_offset` | `legs[n]` |
+| `reference_leg.strike_offset` | `legs[n]` |
 | `take_profit` | `exit` |
 | `stop_loss` | `exit` |
 | `dte_exit` | `exit` |
@@ -379,7 +379,7 @@ class EntryConfig(BaseModel):
     max_debit:           NumericSweep | None = None  # enter only if open_mark <= this value
     max_entries_per_day: int | None = None           # None = unlimited re-entries per day
     no_reentry_after_loss: bool = False              # block same-day re-entry after a stop-loss exit
-    time_tolerance: int = 0                          # seconds; 0 = exact timestamp match (legacy); see Greeks Timestamp Tolerance
+    bar_time_tolerance: int = 0                      # seconds; 0 = exact timestamp match; see Greeks Timestamp Tolerance (time_tolerance still accepted as an alias)
 
 
 class SimpleDeltaConfig(BaseModel):
@@ -430,9 +430,16 @@ class LegConfig(BaseModel):
     delta:           SimpleDeltaConfig | SteppedDeltaConfig | None = None
     dte_tolerance:   int = 5   # fallback for stepped:/targets: legs; folded into dte.tolerance for delta legs
     dte_skip_weekends: bool = False  # interpret dte target as a business-day count; no-op for strike_offset legs
-    # Selection mode B: fixed offset from a reference leg
-    strike_offset:   NumericSweep | None = None   # positive = above ref strike, negative = below; sweepable
-    reference_leg:   str | None = None     # name of the delta-targeted leg to offset from
+    # Selection mode B: fixed offset from a reference leg. strike_offset lives on
+    # the object form of reference_leg (see ReferenceLegConfig below) — bare
+    # `reference_leg: name` + a sibling `strike_offset:` field is still accepted
+    # and folds into the object form automatically.
+    reference_leg:   str | ReferenceLegConfig | None = None
+
+class ReferenceLegConfig(BaseModel):
+    name:                  str
+    strike_offset:         NumericSweep | None = None  # positive = above ref strike, negative = below; sweepable
+    entry_time_tolerance:  int | None = None  # seconds vs. name's own resolved ts; None = this leg stays bar-anchored
     # Selection mode C: unified indicator-conditioned (dte, delta) stepping
     stepped:         SteppedLegConfig | None = None
     # Selection mode D: named, priority-resolved conditional targets
@@ -687,18 +694,21 @@ open after the stop.
 
 ---
 
-### Greeks Timestamp Tolerance (`time_tolerance`)
+### Greeks Timestamp Tolerance (`bar_time_tolerance`)
 
-`entry.time_tolerance` controls how closely an `option_greeks` snapshot timestamp must
-align with the candidate bar timestamp for an entry to fire. It is expressed in
-**seconds** and defaults to `0` (exact match required).
+`entry.bar_time_tolerance` controls how closely an `option_greeks` snapshot timestamp
+must align with the candidate bar timestamp for an entry to fire, for any leg that
+isn't anchored to another leg via `reference_leg.entry_time_tolerance` (see below). It
+is expressed in **seconds** and defaults to `0` (exact match required). This field was
+named `time_tolerance`; that name is still accepted as an alias (specify one or the
+other, not both).
 
 ```yaml
 entry:
   window:
     start: "10:00"
     end:   "10:30"
-  time_tolerance: 300   # accept greeks snapshots within ±5 minutes of the bar timestamp
+  bar_time_tolerance: 300   # accept greeks snapshots within ±5 minutes of the bar timestamp
 ```
 
 **Default: `0` — exact match.**  
@@ -711,10 +721,10 @@ underlying bars at identical timestamps.
 
 Some production databases are assembled from multiple data sources that publish greeks
 and underlying-bar data at slightly different minute marks — for example, greeks arriving
-at `:05` past each minute while underlying bars are at `:00`. With `time_tolerance: 0`,
-these databases produce no entries on the affected dates even though valid options exist.
-Setting `time_tolerance` to cover the ingest offset (typically 60–300 seconds) restores
-correct behaviour.
+at `:05` past each minute while underlying bars are at `:00`. With `bar_time_tolerance:
+0`, these databases produce no entries on the affected dates even though valid options
+exist. Setting `bar_time_tolerance` to cover the ingest offset (typically 60–300 seconds)
+restores correct behaviour.
 
 #### How it works
 
@@ -725,21 +735,21 @@ calendar date:
    `|actual_delta − target_delta|` within DTE tolerance).
 2. For each candidate bar at time T, the join finds the greeks snapshot at time T′ on
    the **same calendar date** where `|T′ − T|` is smallest.
-3. A match is accepted only if `|T′ − T| ≤ time_tolerance`. When `time_tolerance: 0`
-   this requires T′ = T exactly.
+3. A match is accepted only if `|T′ − T| ≤ bar_time_tolerance`. When
+   `bar_time_tolerance: 0` this requires T′ = T exactly.
 4. The entry is recorded at the bar's timestamp T; the option price and greeks come
    from the T′ snapshot.
 
 **Priority: timestamp first.** When multiple greeks snapshots fall within the tolerance
 window, the nearest in time is selected — not the one with the best delta. For example,
-with `time_tolerance: 600` and a -0.10 ± 0.03 target, a -0.075 snapshot at T+1min wins
-over a -0.11 snapshot at T+6min even though the latter is a closer delta match. If you
-need delta-optimal selection across a wide time window, narrow the entry window or
+with `bar_time_tolerance: 600` and a -0.10 ± 0.03 target, a -0.075 snapshot at T+1min
+wins over a -0.11 snapshot at T+6min even though the latter is a closer delta match. If
+you need delta-optimal selection across a wide time window, narrow the entry window or
 pre-aggregate your greeks data to a consistent timestamp before ingesting.
 
 **Calendar date boundary is always respected.** The `by`-date grouping in the ASOF join
 ensures that no greeks snapshot from a different calendar day is matched, regardless of
-how large `time_tolerance` is set.
+how large `bar_time_tolerance` is set.
 
 #### Choosing a value
 
@@ -750,11 +760,94 @@ how large `time_tolerance` is set.
 | Known `:05`-past-minute greeks vs `:00` bars | `300` |
 | Heterogeneous database, worst-case offset unknown | Start with `300`, verify no same-day cross-session contamination |
 
-Setting `time_tolerance` too large relative to the entry window is harmless — the
+Setting `bar_time_tolerance` too large relative to the entry window is harmless — the
 greeks query's `ts_event BETWEEN ts_min AND ts_max` range filter (built from candidate
 bar timestamps) already prevents snapshots from outside the entry window from being
 considered. The worst-case price staleness is bounded by the entry window width, not by
-`time_tolerance`.
+`bar_time_tolerance`.
+
+---
+
+### Leg-to-leg Timestamp Anchoring (`reference_leg.entry_time_tolerance`)
+
+`bar_time_tolerance` (above) always matches a leg against the *underlying bar's*
+timestamp. It doesn't help when the issue is one leg's own option chain trading
+sparsely relative to another leg's — the classic case being a credit spread's
+protective long leg, often deep OTM and thin, failing to have a bar at the same moment
+the short leg does. `strike_offset` legs are also *always* exact-match against the bar
+by default — `bar_time_tolerance` doesn't apply to them at all unless you opt in (see
+below).
+
+Giving `reference_leg` its object form adds a second tolerance tier, anchored to the
+*referenced leg's own resolved timestamp* instead of the bar:
+
+```yaml
+legs:
+  - name: short_put
+    right: put
+    action: sell_to_open
+    delta: {target: -0.075, tolerance: 0.02}
+    dte: {target: 4, tolerance: 0}
+    quantity: 1
+
+  - name: long_put
+    right: put
+    action: buy_to_open
+    reference_leg:
+      name: short_put
+      strike_offset: -100.0
+      entry_time_tolerance: 120   # seconds vs. short_put's own resolved timestamp
+    quantity: 1
+```
+
+**`entry_time_tolerance` omitted (the default) vs. given explicitly — this distinction
+matters:**
+
+- **Omitted** (`None`): `long_put` stays anchored to the bar via `bar_time_tolerance`,
+  exactly like a leg with no `reference_leg` at all. `reference_leg` here serves purely
+  as the strike source. This is what a bare `reference_leg: short_put` (or the legacy
+  sibling-field form, `reference_leg: short_put` + `strike_offset: -100.0`) always
+  means — both are equivalent to the object form with `entry_time_tolerance` left
+  unset.
+- **Given explicitly** (including `0`): `long_put`'s own resolved timestamp is instead
+  matched against `short_put`'s own resolved timestamp, within that many seconds —
+  independent of, and possibly quite different from, the bar's timestamp if
+  `bar_time_tolerance` on `short_put` is itself nonzero.
+
+This distinction exists because a leg's resolved timestamp only equals the bar's
+timestamp when *that leg's own* tolerance is `0`. Reinterpreting every `reference_leg`
+as "anchor to the referenced leg's resolved timestamp" would silently change behavior
+for any strategy already combining `strike_offset` with a nonzero `bar_time_tolerance`
+— hence the explicit opt-in.
+
+**Multiple independent anchors per trade.** A trade can have more than one root
+(bar-anchored) leg, each with its own dependent leg(s) — e.g. a single-trade iron
+condor where `long_call` anchors to `short_call` and `long_put` anchors to `short_put`
+independently:
+
+```yaml
+legs:
+  - {name: short_put,  right: put,  action: sell_to_open, delta: {target: -0.10}, dte: {target: 21, tolerance: 0}}
+  - {name: long_put,   right: put,  action: buy_to_open,  reference_leg: {name: short_put,  strike_offset: -50.0, entry_time_tolerance: 120}}
+  - {name: short_call, right: call, action: sell_to_open, delta: {target: 0.10},  dte: {target: 21, tolerance: 0}}
+  - {name: long_call,  right: call, action: buy_to_open,  reference_leg: {name: short_call, strike_offset: 50.0,  entry_time_tolerance: 120}}
+```
+
+**Anchor chains are not supported.** A leg referenced via `entry_time_tolerance` must
+itself be bar-anchored (no `entry_time_tolerance` of its own) — you can't chain a third
+leg's anchor through a second leg's anchor. A leg with a *bare* reference (no
+`entry_time_tolerance`) can still be validly referenced by another leg's
+`entry_time_tolerance`, since it remains bar-anchored.
+
+**Not fully guarded:** the same-calendar-day guard that protects `bar_time_tolerance`
+(above) from crossing midnight has no exact equivalent for `entry_time_tolerance` on
+`strike_offset` legs. Matching is now scoped to at most one calendar day's anchors per
+query (narrowing exposure considerably), but an anchor very close to a day boundary can
+still — within the tolerance padding only — match a candidate on the adjacent calendar
+day, since DuckDB's session-timezone-dependent `CAST(... AS DATE)` isn't reliably
+consistent with the UTC-basis date grouping used elsewhere and wasn't used as an exact
+guard. Given expected `entry_time_tolerance` values are seconds-to-low-minutes this is a
+low-risk residual gap, but avoid setting it to anything close to a full trading day.
 
 ---
 

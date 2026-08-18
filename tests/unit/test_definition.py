@@ -253,7 +253,6 @@ class TestLegConfig:
         leg = _make_leg()
         assert isinstance(leg.delta, SimpleDeltaConfig)
         assert leg.delta.target == -0.25
-        assert leg.strike_offset is None
         assert leg.reference_leg is None
 
     def test_strike_offset_mode_no_dte(self):
@@ -265,8 +264,8 @@ class TestLegConfig:
             strike_offset=-25.0,
             reference_leg="short_put",
         )
-        assert leg.strike_offset == -25.0
-        assert leg.reference_leg == "short_put"
+        assert leg.reference_leg.strike_offset == -25.0
+        assert leg.reference_leg.name == "short_put"
         assert leg.dte is None
 
     def test_strike_offset_mode_with_dte(self):
@@ -304,7 +303,7 @@ class TestLegConfig:
             LegConfig(name="leg", right="put", action="sell_to_open", dte=21)
 
     def test_offset_without_reference_rejected(self):
-        with pytest.raises(ValidationError, match="reference_leg is required"):
+        with pytest.raises(ValidationError, match="strike_offset requires reference_leg"):
             LegConfig(
                 name="leg",
                 right="put",

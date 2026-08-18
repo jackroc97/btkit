@@ -322,3 +322,60 @@ class TestEmptyUniverse:
         df = scanner.scan()
         assert "entry_id" in df.columns
         assert "entry_time" in df.columns
+
+
+# ---------------------------------------------------------------------------
+# reference_leg.entry_time_tolerance — smoke test against real fixture data
+# ---------------------------------------------------------------------------
+
+
+def _make_offset_strategy(
+    entry_time_tolerance: int | None,
+    strike_offset: float = -50.0,
+) -> StrategyDefinition:
+    return StrategyDefinition(
+        name="offset_anchor_test",
+        universe=UniverseConfig(start_date=date(2026, 4, 22), end_date=date(2026, 5, 21)),
+        costs=CostsConfig(),
+        trades=[
+            TradeDefinition(
+                name="trade1",
+                instrument=InstrumentConfig(root_symbol="ES", asset_class="future"),
+                entry=EntryConfig(window=EntryWindowConfig(start=time(10, 0), end=time(12, 0))),
+                legs=[
+                    LegConfig(
+                        name="short_put",
+                        right="put",
+                        action="sell_to_open",
+                        dte=21,
+                        delta={"target": -0.25, "tolerance": 0.10},
+                    ),
+                    LegConfig(
+                        name="long_put",
+                        right="put",
+                        action="buy_to_open",
+                        reference_leg={
+                            "name": "short_put",
+                            "strike_offset": strike_offset,
+                            "entry_time_tolerance": entry_time_tolerance,
+                        },
+                    ),
+                ],
+                exit=ExitConfig(stop_loss=2.0, take_profit=1.0),
+            )
+        ],
+    )
+
+
+class TestReferenceLegAnchorSmoke:
+    def test_no_crash_and_superset_of_baseline(self, input_db):
+        """Real market data timestamp gaps aren't controllable from a test, so this
+        only smoke-tests that widening entry_time_tolerance doesn't error and
+        never returns fewer entries than the unset baseline — the precise
+        before/after row-count assertions live in the mock-DB unit tests
+        (test_offset_leg_tolerance.py, test_entry_ts_alignment.py)."""
+        strat_baseline = _make_offset_strategy(entry_time_tolerance=None)
+        strat_tolerant = _make_offset_strategy(entry_time_tolerance=120)
+        n_baseline = len(EntryScanner(input_db, strat_baseline, strat_baseline.trades[0]).scan())
+        n_tolerant = len(EntryScanner(input_db, strat_tolerant, strat_tolerant.trades[0]).scan())
+        assert n_tolerant >= n_baseline

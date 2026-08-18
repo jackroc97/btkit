@@ -18,6 +18,7 @@ so it is picklable by ProcessPoolExecutor.
 from __future__ import annotations
 
 import os
+import signal
 import tempfile
 import traceback as _tb
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -29,6 +30,36 @@ from btkit.db.output_db import OutputDatabase
 from btkit.study.definition import StudyDefinition
 from btkit.study.expander import StudyExpander
 from btkit.study.merger import OutputMerger
+
+
+class _StudyTerminatedError(RuntimeError):
+    """Raised from a SIGTERM handler so `kill <pid>` unwinds through the same
+    worker-cleanup path as Ctrl-C (KeyboardInterrupt) instead of the default
+    "die immediately, leave child processes orphaned" behavior."""
+
+
+def _terminate_pool_workers(pool: ProcessPoolExecutor) -> None:
+    """
+    Best-effort hard-kill of any still-running worker subprocesses.
+
+    pool.shutdown(cancel_futures=True) only cancels futures that haven't
+    started yet — it does not stop workers already executing a combination,
+    which is exactly the case that matters if a worker is hung (or merely
+    slow) when the run is interrupted. concurrent.futures has no public API
+    for this, so this reaches into the (long-stable, widely relied upon)
+    private _processes mapping; if that ever changes shape, we degrade to a
+    no-op rather than raise, since this only runs during shutdown.
+    """
+    processes = getattr(pool, "_processes", None)
+    if not processes:
+        return
+    for proc in list(processes.values()):
+        try:
+            if proc.is_alive():
+                proc.kill()
+        except Exception:
+            pass
+
 
 # ---------------------------------------------------------------------------
 # Worker function (module-level for picklability)
@@ -122,9 +153,19 @@ class StudyRunner:
         worker_db_paths: list[str] = []
         failed: list[dict] = []
 
+        def _on_sigterm(signum: int, frame: object) -> None:
+            raise _StudyTerminatedError(f"received signal {signum}")
+
+        # SIGTERM (a plain `kill <pid>`) doesn't raise anything catchable by
+        # default — it terminates the process immediately, leaving any
+        # already-running ProcessPoolExecutor workers as orphans since Python
+        # never unwinds far enough to shut the pool down. Route it through the
+        # same interrupt-handling path as Ctrl-C (SIGINT / KeyboardInterrupt).
+        previous_sigterm = signal.signal(signal.SIGTERM, _on_sigterm)
         try:
+            pool = ProcessPoolExecutor(max_workers=self._max_workers)
             futures_map = {}
-            with ProcessPoolExecutor(max_workers=self._max_workers) as pool:
+            try:
                 for combination_id, defn in combinations:
                     worker_db = str(Path(tmp_dir) / f"worker_{combination_id}.db")
                     worker_db_paths.append(worker_db)
@@ -156,25 +197,37 @@ class StudyRunner:
                             )
                         pbar.update(1)
 
-            OutputMerger().merge(
-                source_db_paths=worker_db_paths,
-                target_db_path=self._output_db_path,
-                cleanup=True,
-                tmp_dir=tmp_dir,
-            )
+                pool.shutdown(wait=True)
+                OutputMerger().merge(
+                    source_db_paths=worker_db_paths,
+                    target_db_path=self._output_db_path,
+                    cleanup=True,
+                    tmp_dir=tmp_dir,
+                )
 
-        except Exception:
-            # Attempt best-effort merge of whatever completed before the error.
-            completed_paths = [p for p in worker_db_paths if Path(p).exists()]
-            if completed_paths:
-                try:
-                    OutputMerger().merge(
-                        source_db_paths=completed_paths,
-                        target_db_path=self._output_db_path,
-                    )
-                except Exception:
-                    pass
-            failed.append({"combination_id": -1, "error": _tb.format_exc()})
+            except (KeyboardInterrupt, Exception):
+                # Interrupted (Ctrl-C / SIGTERM) or some other failure (e.g. the
+                # merge itself). Don't wait on cancel_futures=True alone — it only
+                # cancels futures that haven't started, not ones already running
+                # (possibly hung) in a worker — hard-kill any live worker process
+                # directly. Order matters here: shutdown() clears pool._processes
+                # (sets it to None) as part of tearing the executor down, so the
+                # hard-kill must happen BEFORE shutdown(), not after — doing it
+                # after is a silent no-op with nothing left to terminate.
+                _terminate_pool_workers(pool)
+                pool.shutdown(wait=False, cancel_futures=True)
+                completed_paths = [p for p in worker_db_paths if Path(p).exists()]
+                if completed_paths:
+                    try:
+                        OutputMerger().merge(
+                            source_db_paths=completed_paths,
+                            target_db_path=self._output_db_path,
+                        )
+                    except Exception:
+                        pass
+                failed.append({"combination_id": -1, "error": _tb.format_exc()})
+        finally:
+            signal.signal(signal.SIGTERM, previous_sigterm)
 
         with OutputDatabase(self._output_db_path) as odb:
             odb.finalize_study(study_id)
