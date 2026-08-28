@@ -118,6 +118,7 @@ class TestNoInputDb:
             is False
         )
         assert _body(E.list_explore_indicators(instrument_id=1, root=None)) == {"indicators": []}
+        assert _body(E.get_backtest_underlying(backtest_id=1)) == {"root": None}
 
 
 # ---------------------------------------------------------------------------
@@ -209,3 +210,9 @@ class TestOverlay:
             E.get_overlay(backtest_id=1, instrument_id=10252, root=None, start=None, end=None)
         )
         assert o["n_positions"] == 0 and o["markers"] == []
+
+    def test_backtest_underlying_resolves_root(self):
+        assert _body(E.get_backtest_underlying(backtest_id=1)) == {"root": "ES"}
+
+    def test_backtest_underlying_none_for_unknown_backtest(self):
+        assert _body(E.get_backtest_underlying(backtest_id=999999)) == {"root": None}

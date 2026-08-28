@@ -711,6 +711,19 @@ export default function Backtest() {
                   <div className="d-flex align-items-center justify-content-between px-3 pt-3 pb-1" style={{ flexWrap: 'wrap', gap: 8 }}>
                     <span className="btk-chart-title">Equity Curve</span>
                     <div className="d-flex align-items-center gap-2">
+                      {/* Fullscreen */}
+                      <Link
+                        to={`/backtest/${id}/equity`}
+                        title="Open fullscreen"
+                        style={{
+                          background: 'transparent', border: '1px solid #2a3245', borderRadius: 5,
+                          color: '#64748b', cursor: 'pointer', fontSize: '0.72rem',
+                          padding: '2px 8px', transition: 'all 0.15s', textDecoration: 'none',
+                          display: 'inline-flex', alignItems: 'center',
+                        }}
+                      >
+                        <i className="bi bi-arrows-fullscreen" />
+                      </Link>
                       {/* Compare toggle */}
                       <button
                         onClick={() => setShowCompare(v => !v)}

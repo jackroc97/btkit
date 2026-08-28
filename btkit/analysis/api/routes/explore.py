@@ -50,6 +50,7 @@ _ROOT_RE = re.compile(r"^([A-Z]+?)[FGHJKMNQUVXZ]\d{1,2}$")
 _PANEL_KEYWORDS = (
     "rsi", "atr", "adx", "stoch", "macd", "mom", "roc", "cci", "willr",
     "obv", "volatility", "zscore", "z_score", "ves", "percentile", "rank",
+    "slope", "pvwap",
 )
 
 _UP = "rgba(74,222,128,0.35)"
@@ -415,6 +416,52 @@ def get_indicator(
 # Marker / equity overlay colors (match the dashboard theme).
 _MK_UP = "#4ade80"
 _MK_DOWN = "#f87171"
+
+
+@router.get("/backtests/{backtest_id}/underlying")
+def get_backtest_underlying(backtest_id: int) -> JSONResponse:
+    """
+    Resolve the underlying root traded by a backtest, e.g. 'ES'.
+
+    Used by the fullscreen equity chart to auto-select a contract for the
+    price/indicator panes without asking the user to pick one. Requires
+    BTKIT_INPUT_DB; degrades to {"root": null} otherwise (same convention
+    as the rest of this file).
+    """
+    con = input_connect()
+    if con is None:
+        return JSONResponse({"root": None})
+    try:
+        _cols, rows = out_query(
+            "SELECT MIN(pl.instrument_id) AS leg_iid "
+            "FROM position p JOIN position_leg pl ON pl.position_id = p.id "
+            "WHERE p.backtest_id = ? GROUP BY p.id",
+            [backtest_id],
+        )
+        leg_ids = sorted({int(r[0]) for r in rows if r[0] is not None})
+        if not leg_ids:
+            return JSONResponse({"root": None})
+
+        id_list = ",".join(str(i) for i in leg_ids)
+        und_ids = {
+            int(uid)
+            for (uid,) in con.execute(
+                f"SELECT DISTINCT underlying_id FROM option_bars WHERE instrument_id IN ({id_list})"
+            ).fetchall()
+        }
+        if not und_ids:
+            return JSONResponse({"root": None})
+
+        uid_list = ",".join(str(u) for u in und_ids)
+        sym_row = con.execute(
+            f"SELECT symbol FROM underlying_bars WHERE instrument_id IN ({uid_list}) LIMIT 1"
+        ).fetchone()
+        if not sym_row:
+            return JSONResponse({"root": None})
+
+        return JSONResponse({"root": _root_of(sym_row[0])})
+    finally:
+        con.close()
 
 
 @router.get("/explore/overlay")

@@ -308,7 +308,6 @@ export default function Trade() {
         hour12:   false,
       })
 
-    const hasOverlays = activeIndicators.some(i => i.placement === 'overlay')
     const panelInds   = activeIndicators.filter(i => i.placement === 'panel')
 
     const priceChart = createChart(priceEl, {
@@ -316,8 +315,6 @@ export default function Trade() {
       width:  priceEl.offsetWidth,
       height: 320,
       localization: { timeFormatter: estFormatter },
-      // Show left scale only when there are overlay indicators on it
-      leftPriceScale: { visible: hasOverlays, borderColor: '#2a3245' },
       timeScale: {
         borderColor:    '#2a3245',
         visible:        false,
@@ -379,12 +376,17 @@ export default function Trade() {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     createSeriesMarkers(candleSeries, chartData.markers.map(m => ({ ...m, time: m.time as any })) as any)
 
-    // ── Overlay indicators on the price chart (left scale) ───────────────
+    // "Overlay" indicators are in the same units as the underlying price (e.g.
+    // a moving average), so they share the candlesticks' own price scale
+    // rather than a second, independently auto-scaled one — matching the
+    // backend's placement heuristic, whose own doc comment says overlay
+    // indicators "overlay on the price scale" (i.e. the same one, not a new
+    // one). A separate scale wouldn't actually track price visually and adds
+    // an axis for no reason.
     for (const ind of activeIndicators.filter(i => i.placement === 'overlay')) {
       const s = priceChart.addSeries(LineSeries, {
         color:            ind.color,
         lineWidth:        1,
-        priceScaleId:     'left',
         lastValueVisible: true,
         priceLineVisible: false,
       })

@@ -4,6 +4,7 @@ import Backtest from './pages/Backtest'
 import Study from './pages/Study'
 import Trade from './pages/Trade'
 import Explore from './pages/Explore'
+import Equity from './pages/Equity'
 import { TagsProvider } from './tags/TagsContext'
 
 export default function App() {
@@ -15,6 +16,7 @@ export default function App() {
           <Route path="/explore" element={<Explore />} />
           <Route path="/backtest/:id" element={<Backtest />} />
           <Route path="/backtest/:id/trade/:tradeId" element={<Trade />} />
+          <Route path="/backtest/:id/equity" element={<Equity />} />
           <Route path="/study/:id" element={<Study />} />
         </Routes>
       </BrowserRouter>
