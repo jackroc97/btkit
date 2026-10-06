@@ -80,6 +80,14 @@ _INGEST_WORKERS = min(os.cpu_count() or 4, 8)
 # Reduce to _INGEST_WORKERS * 2 if memory is tight.
 _OHLCV_BATCH_SIZE: int = _INGEST_WORKERS * 4
 
+# Where DuckDB spills intermediates that exceed memory_limit.
+_BUILD_TEMP_DIR = "/tmp/duckdb_build_tmp"
+
+# Conservative defaults for a build box: see DatabaseBuilder.build() for why the
+# limit must sit well under physical RAM rather than at DuckDB's default.
+_DEFAULT_MEMORY_LIMIT = "6GB"
+_DEFAULT_MAX_TEMP_SIZE = "150GB"
+
 
 # ---------------------------------------------------------------------------
 # Internal instrument map record
@@ -135,6 +143,8 @@ class DatabaseBuilder:
         indicator_scripts: list[str | Path] | None = None,
         append: bool = False,
         underlying_staleness_minutes: int = 15,
+        memory_limit: str = _DEFAULT_MEMORY_LIMIT,
+        max_temp_size: str = _DEFAULT_MAX_TEMP_SIZE,
         fill_range: tuple[datetime, datetime] | None = None,
         instruments: list[int] | None = None,
         recompute_tail_days: int = 60,
@@ -155,7 +165,28 @@ class DatabaseBuilder:
         # instrument_id → list of validity segments (sorted by activation). Each
         # segment is one definition of that (possibly recycled) ID for a distinct
         # [activation, expiration] window.
+        self.memory_limit = memory_limit
+        self.max_temp_size = max_temp_size
         self._instrument_map: dict[int, list[_InstrumentInfo]] = {}
+
+    def _apply_session_limits(self, con: duckdb.DuckDBPyConnection) -> None:
+        """Apply the build's memory and spill settings to one connection.
+
+        Cap DuckDB well below physical RAM so it spills to temp_directory instead of
+        competing with the OS page cache. Left at the default (~80% of RAM) on a
+        17 GB machine, the full ES build never spilled at all — temp_directory
+        stayed at 0 bytes with 181 GiB free — and instead failed three different
+        ways while the OS swapped: OutOfMemory, "failed to commit: failed to pin",
+        and an IO error reading a short file during the greeks ASOF join. A
+        full-history build needs a larger working set than this machine has, so
+        spilling is the only way it completes; the limit trades speed for finishing.
+
+        Settings are per-connection, so every connection the build opens needs this.
+        """
+        con.execute("SET preserve_insertion_order=false")
+        con.execute(f"SET temp_directory='{_BUILD_TEMP_DIR}'")
+        con.execute(f"SET memory_limit='{self.memory_limit}'")
+        con.execute(f"SET max_temp_directory_size='{self.max_temp_size}'")
 
     def build(self) -> None:
         """
@@ -164,8 +195,7 @@ class DatabaseBuilder:
         """
         t_total = time.perf_counter()
         self._con = duckdb.connect(str(self.db_path))
-        self._con.execute("SET preserve_insertion_order=false")
-        self._con.execute("SET temp_directory='/tmp/duckdb_build_tmp'")
+        self._apply_session_limits(self._con)
         try:
             self._con.execute(INPUT_SCHEMA_SQL)
             # Self-heal databases built before underlying_lag_s existed so an
@@ -529,6 +559,11 @@ class DatabaseBuilder:
             return
 
         con = duckdb.connect(str(self.db_path))
+        # Session settings are per-connection, and the indicator phase runs on its
+        # own connection after build() closed the ingest one — so the spill
+        # configuration has to be applied again here or indicators run with
+        # DuckDB's default limit and can exhaust memory the same way.
+        self._apply_session_limits(con)
         try:
             if self.fill_range is not None:
                 self._run_indicators_scoped(con)
