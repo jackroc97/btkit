@@ -255,13 +255,23 @@ class GreeksCalculator:
         # behaviour); a small window keeps the match within the same session
         # because the only intraday gaps larger than it are hours-long.
         #
-        # The QUALIFY keeps one pending row per (instrument_id, ts_event). Greeks are
-        # per-bar, so a duplicated option bar would otherwise compute and insert the
-        # same greeks twice: NOT EXISTS only excludes rows already in option_greeks,
-        # and neither copy is there yet. Defence in depth — ingest no longer admits
-        # duplicate bars (docs/data_duplication_fix.md §2) — but it also keeps
-        # option_greeks clean when run against a database that already has them.
+        # Duplicate option bars would compute and insert the same greeks twice:
+        # NOT EXISTS only excludes rows already in option_greeks, and neither copy is
+        # there yet. Ingest no longer admits duplicates, so the usual case needs no
+        # dedup — and paying for one anyway is not an option at this scale. A
+        # QUALIFY ROW_NUMBER() over the pending set is a window function over ~70M
+        # rows, which cannot stream and exhausted a 12.7 GiB memory limit on the full
+        # ES rebuild. So probe for duplicates first (an indexed early-out that stops
+        # at the first one) and only then pay for the deduplicating plan.
         stale_minutes = self.underlying_max_staleness_minutes
+        dedup_clause = ""
+        if self._has_duplicate_bars():
+            print("[greeks] duplicate option bars present — deduplicating pending rows")
+            dedup_clause = """
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY ob.instrument_id, ob.ts_event ORDER BY ub.ts_event DESC
+            ) = 1"""
+
         self.con.execute("DROP TABLE IF EXISTS _greek_pending")
         self.con.execute(
             f"""
@@ -283,10 +293,7 @@ class GreeksCalculator:
              AND ob.ts_event >= ub.ts_event
             WHERE ob.close IS NOT NULL
               AND ob.ts_event - ub.ts_event <= INTERVAL '{stale_minutes} minutes'{scope_filter}
-            {new_only_filter}
-            QUALIFY ROW_NUMBER() OVER (
-                PARTITION BY ob.instrument_id, ob.ts_event ORDER BY ub.ts_event DESC
-            ) = 1
+            {new_only_filter}{dedup_clause}
             ORDER BY ob.ts_event, ob.instrument_id
             """,
             scope_params,
@@ -373,6 +380,23 @@ class GreeksCalculator:
         _flush()  # write any days that didn't fill a complete batch
         self.con.execute("DROP TABLE IF EXISTS _greek_pending")
         print(f"\n[greeks] Wrote {written:,} option_greeks rows")
+
+    def _has_duplicate_bars(self) -> bool:
+        """True if any (instrument_id, ts_event) appears more than once in option_bars.
+
+        Deliberately an early-out rather than a count: LIMIT 1 lets DuckDB stop at the
+        first duplicate group, so a clean database pays only for a scan that finds
+        nothing and a dirty one answers almost immediately.
+        """
+        row = self.con.execute(
+            """
+            SELECT 1 FROM option_bars
+            GROUP BY instrument_id, ts_event
+            HAVING count(*) > 1
+            LIMIT 1
+            """
+        ).fetchone()
+        return row is not None
 
     def _compute_batch(self, df: pl.DataFrame) -> pl.DataFrame:
         """

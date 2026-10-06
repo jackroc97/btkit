@@ -25,7 +25,7 @@ underlying bars into the ES input database (docs/data_duplication_fix.md §2):
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import duckdb
@@ -33,6 +33,7 @@ import polars as pl
 
 from btkit.db.input_db import INPUT_SCHEMA_SQL
 from btkit.pipeline.builder import _advance_cutoff, _work_unit_sort_key, _write_df
+from btkit.pipeline.greeks import GreeksCalculator
 
 
 def _con() -> duckdb.DuckDBPyConnection:
@@ -257,3 +258,112 @@ class TestWorkUnitSortKey:
         )
         ordered = sorted([late_data_early_zip, early_data_late_zip], key=_work_unit_sort_key)
         assert ordered == [early_data_late_zip, late_data_early_zip]
+
+
+# ---------------------------------------------------------------------------
+# Greeks: dedup only when the database actually has duplicate bars
+# ---------------------------------------------------------------------------
+
+
+class TestGreeksConditionalDedup:
+    """Duplicate option bars would yield duplicate greeks, because the NOT EXISTS
+    filter only excludes rows already in option_greeks and neither copy is there
+    yet. But deduplicating unconditionally is not affordable: a
+    QUALIFY ROW_NUMBER() over the pending set is a window function over ~70M rows,
+    which cannot stream and exhausted a 12.7 GiB limit on the full ES rebuild. So
+    the dedup is applied only when a probe finds duplicates.
+    """
+
+    @staticmethod
+    def _seed(con, *, copies: int) -> None:
+        ts = _ts(5)
+        con.execute(
+            "INSERT INTO underlying_bars VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [ts, 100, "ESH6", None, 5000.0, 5000.0, 5000.0, 5000.0, 10],
+        )
+        for _ in range(copies):
+            con.execute(
+                "INSERT INTO option_bars "
+                "(ts_event, instrument_id, underlying_id, symbol, expiration, "
+                'strike_price, "right", multiplier, open, high, low, close, volume) '
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    ts,
+                    1,
+                    100,
+                    "EW1F6 P4900",
+                    date(2026, 1, 30),
+                    4900.0,
+                    "P",
+                    50,
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0,
+                    5,
+                ],
+            )
+
+    def test_probe_false_on_clean_database(self):
+        con = _con()
+        self._seed(con, copies=1)
+        assert GreeksCalculator(con)._has_duplicate_bars() is False
+
+    def test_probe_true_on_duplicated_database(self):
+        con = _con()
+        self._seed(con, copies=2)
+        assert GreeksCalculator(con)._has_duplicate_bars() is True
+
+    def test_probe_false_on_empty_database(self):
+        assert GreeksCalculator(_con())._has_duplicate_bars() is False
+
+    def test_clean_database_yields_one_greeks_row_per_bar(self):
+        con = _con()
+        self._seed(con, copies=1)
+        GreeksCalculator(con).run(skip_existing=True)
+        assert con.execute("SELECT count(*) FROM option_greeks").fetchone()[0] == 1
+
+    def test_duplicated_bars_still_yield_one_greeks_row(self):
+        con = _con()
+        self._seed(con, copies=2)
+        GreeksCalculator(con).run(skip_existing=True)
+        assert con.execute("SELECT count(*) FROM option_greeks").fetchone()[0] == 1
+
+    def test_three_copies_still_yield_one_greeks_row(self):
+        con = _con()
+        self._seed(con, copies=3)
+        GreeksCalculator(con).run(skip_existing=True)
+        assert con.execute("SELECT count(*) FROM option_greeks").fetchone()[0] == 1
+
+    def test_distinct_bars_are_not_collapsed(self):
+        """The dedup keys on (instrument_id, ts_event); two genuinely different
+        bars must both get greeks."""
+        con = _con()
+        self._seed(con, copies=2)  # duplicates, so the dedup plan is active
+        con.execute(
+            "INSERT INTO underlying_bars VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [_ts(6), 100, "ESH6", None, 5000.0, 5000.0, 5000.0, 5000.0, 10],
+        )
+        con.execute(
+            "INSERT INTO option_bars "
+            "(ts_event, instrument_id, underlying_id, symbol, expiration, "
+            'strike_price, "right", multiplier, open, high, low, close, volume) '
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                _ts(6),
+                1,
+                100,
+                "EW1F6 P4900",
+                date(2026, 1, 30),
+                4900.0,
+                "P",
+                50,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                5,
+            ],
+        )
+        GreeksCalculator(con).run(skip_existing=True)
+        assert con.execute("SELECT count(*) FROM option_greeks").fetchone()[0] == 2
