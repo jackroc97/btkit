@@ -370,18 +370,27 @@ class GreeksCalculator:
             if len(accumulated) >= _BATCH_DAYS:
                 _flush()
 
-        # to_arrow_reader streams the result; memory stays bounded by the chunk size
-        # times the number of chunks in flight, not by the table size.
-        reader = self.con.execute("SELECT * FROM _greek_pending").to_arrow_reader(
-            _GREEKS_CHUNK_ROWS
-        )
+        # Chunks are addressed by rowid range. A streaming reader
+        # (to_arrow_reader) would be the obvious way to make one pass, but DuckDB
+        # permits a single active result per connection: the first bulk INSERT in
+        # _flush() invalidates an open reader and iteration then stops *silently*.
+        # That truncated a full rebuild to 8,750,000 of 68,936,444 rows — 20
+        # buffered chunks plus 15 in flight — with no error raised. rowid ranges are
+        # immune because each chunk is its own completed query, and a CTAS temp
+        # table numbers rows contiguously from min(rowid).
+        min_rowid, max_rowid = self.con.execute(
+            "SELECT min(rowid), max(rowid) FROM _greek_pending"
+        ).fetchone()
 
         with ThreadPoolExecutor(max_workers=_GREEKS_WORKERS) as pool:
-            for idx, arrow_batch in enumerate(reader):
-                batch_df = pl.from_arrow(arrow_batch)
+            for lo in range(min_rowid, max_rowid + 1, _GREEKS_CHUNK_ROWS):
+                batch_df = self.con.execute(
+                    "SELECT * FROM _greek_pending WHERE rowid >= ? AND rowid < ?",
+                    [lo, lo + _GREEKS_CHUNK_ROWS],
+                ).pl()
                 if batch_df.is_empty():
                     continue
-                pending.append((idx, pool.submit(self._compute_batch, batch_df)))
+                pending.append((lo, pool.submit(self._compute_batch, batch_df)))
 
                 # Drain oldest result once the pipeline is full.
                 if len(pending) >= _GREEKS_WORKERS * 2:
@@ -393,6 +402,17 @@ class GreeksCalculator:
 
         _flush()  # write any chunks that didn't fill a complete batch
         self.con.execute("DROP TABLE IF EXISTS _greek_pending")
+
+        # Every pending row yields exactly one greeks row (_compute_batch is
+        # row-wise), so a shortfall means rows were dropped rather than computed.
+        # Fail loudly: the reader-invalidation bug above lost 87% of the greeks
+        # silently, and a partial option_greeks table is worse than no rebuild —
+        # entries would be scanned against missing deltas.
+        if written != total:
+            raise RuntimeError(
+                f"greeks incomplete: wrote {written:,} rows for {total:,} pending "
+                f"option bars ({total - written:,} missing)"
+            )
         print(f"\n[greeks] Wrote {written:,} option_greeks rows")
 
     def _has_duplicate_bars(self) -> bool:

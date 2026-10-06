@@ -25,13 +25,15 @@ underlying bars into the ES input database (docs/data_duplication_fix.md §2):
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import duckdb
 import polars as pl
+import pytest
 
 from btkit.db.input_db import INPUT_SCHEMA_SQL
+from btkit.pipeline import greeks as greeks_mod
 from btkit.pipeline.builder import _advance_cutoff, _work_unit_sort_key, _write_df
 from btkit.pipeline.greeks import GreeksCalculator
 
@@ -367,3 +369,101 @@ class TestGreeksConditionalDedup:
         )
         GreeksCalculator(con).run(skip_existing=True)
         assert con.execute("SELECT count(*) FROM option_greeks").fetchone()[0] == 2
+
+
+# ---------------------------------------------------------------------------
+# Greeks: every pending bar must produce a greeks row
+# ---------------------------------------------------------------------------
+
+
+class TestGreeksCompleteness:
+    """Regression cover for a silent-truncation bug.
+
+    Greeks are computed in chunks pulled from a temp table while bulk INSERTs run
+    on the same connection. An earlier version streamed those chunks with
+    to_arrow_reader(); DuckDB allows one active result per connection, so the first
+    INSERT invalidated the reader and iteration stopped with no error, writing
+    8,750,000 of 68,936,444 rows on a full rebuild. Chunks are now addressed by
+    rowid range, and run() asserts the output row count matches the input.
+    """
+
+    @staticmethod
+    def _seed(con, n_bars: int) -> None:
+        """n_bars distinct option bars, each with a same-minute underlying bar."""
+        base = datetime(2026, 1, 5, 0, 0, tzinfo=UTC)
+        und = [
+            (base + timedelta(minutes=i), 100, "ESH6", None, 5000.0, 5000.0, 5000.0, 5000.0, 10)
+            for i in range(n_bars)
+        ]
+        opt = [
+            (
+                base + timedelta(minutes=i),
+                1,
+                100,
+                "EW1F6 P4900",
+                date(2026, 1, 30),
+                4900.0,
+                "P",
+                50,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                5,
+            )
+            for i in range(n_bars)
+        ]
+        con.executemany("INSERT INTO underlying_bars VALUES (?,?,?,?,?,?,?,?,?)", und)
+        con.executemany(
+            "INSERT INTO option_bars "
+            "(ts_event, instrument_id, underlying_id, symbol, expiration, strike_price, "
+            '"right", multiplier, open, high, low, close, volume) '
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            opt,
+        )
+
+    def test_all_bars_get_greeks_across_many_chunks(self, monkeypatch):
+        """Forces multiple chunks and multiple flushes, the configuration that
+        triggered the truncation."""
+        monkeypatch.setattr(greeks_mod, "_GREEKS_CHUNK_ROWS", 10)
+        monkeypatch.setattr(greeks_mod, "_BATCH_DAYS", 2)
+        con = _con()
+        self._seed(con, 250)
+        GreeksCalculator(con).run(skip_existing=True)
+        assert con.execute("SELECT count(*) FROM option_greeks").fetchone()[0] == 250
+
+    def test_chunk_size_does_not_change_the_result(self, monkeypatch):
+        counts = []
+        for chunk in (3, 10, 1000):
+            monkeypatch.setattr(greeks_mod, "_GREEKS_CHUNK_ROWS", chunk)
+            con = _con()
+            self._seed(con, 120)
+            GreeksCalculator(con).run(skip_existing=True)
+            counts.append(con.execute("SELECT count(*) FROM option_greeks").fetchone()[0])
+        assert counts == [120, 120, 120]
+
+    def test_single_bar_still_works(self, monkeypatch):
+        monkeypatch.setattr(greeks_mod, "_GREEKS_CHUNK_ROWS", 10)
+        con = _con()
+        self._seed(con, 1)
+        GreeksCalculator(con).run(skip_existing=True)
+        assert con.execute("SELECT count(*) FROM option_greeks").fetchone()[0] == 1
+
+    def test_incomplete_write_raises(self, monkeypatch):
+        """The completeness guard must fail loudly, not return quietly."""
+        monkeypatch.setattr(greeks_mod, "_GREEKS_CHUNK_ROWS", 10)
+        con = _con()
+        self._seed(con, 50)
+
+        calc = GreeksCalculator(con)
+        real = calc._compute_batch
+        state = {"n": 0}
+
+        def _drop_after_two(df):
+            state["n"] += 1
+            # Simulate rows vanishing mid-run, as the invalidated reader did.
+            return real(df).head(0) if state["n"] > 2 else real(df)
+
+        monkeypatch.setattr(calc, "_compute_batch", _drop_after_two)
+        with pytest.raises(RuntimeError, match="greeks incomplete"):
+            calc.run(skip_existing=True)
