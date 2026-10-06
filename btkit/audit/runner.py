@@ -20,6 +20,8 @@ Progress output (verbose=True):
     Phase 3  Bar coverage: 84,526 rows  (2.1s)
     Phase 4  Integrity  ...
     Phase 4  Integrity: 337 rows  (0.6s)
+    Phase 5  Duplication  ...
+    Phase 5  Duplication: 0 rows  (3.4s)
 """
 
 from __future__ import annotations
@@ -32,7 +34,13 @@ from pathlib import Path
 import duckdb
 import polars as pl
 
-from btkit.audit.rules import phase1_iv, phase2_delta, phase3_coverage, phase4_integrity
+from btkit.audit.rules import (
+    phase1_iv,
+    phase2_delta,
+    phase3_coverage,
+    phase4_integrity,
+    phase5_duplication,
+)
 from btkit.audit.schema import OPTION_AUDIT_DDL, empty_audit_df
 
 # ---------------------------------------------------------------------------
@@ -261,6 +269,15 @@ class AuditRunner:
         _print(f"\r  Phase 4  Integrity: {len(df4):>10,} rows  ({elapsed:.1f}s)")
         if not df4.is_empty():
             frames.append(df4)
+
+        # ---- Phase 5: duplication / instrument identity ----------------------
+        _print("  Phase 5  Duplication  ...", end="")
+        t = time.perf_counter()
+        df5 = phase5_duplication.run(con)
+        elapsed = time.perf_counter() - t
+        _print(f"\r  Phase 5  Duplication: {len(df5):>10,} rows  ({elapsed:.1f}s)")
+        if not df5.is_empty():
+            frames.append(df5)
 
         if not frames:
             return empty_audit_df()

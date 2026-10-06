@@ -26,6 +26,10 @@ class FlagCode(StrEnum):
     ZOMBIE_BAR = "ZOMBIE_BAR"
     DELTA_SIGN_ERROR = "DELTA_SIGN_ERROR"
     DELTA_MAGNITUDE_ERROR = "DELTA_MAGNITUDE_ERROR"
+    # Phase 5 — row multiplicity and instrument identity
+    DUPLICATE_BAR = "DUPLICATE_BAR"
+    DUPLICATE_GREEKS = "DUPLICATE_GREEKS"
+    ID_DAY_COLLISION = "ID_DAY_COLLISION"
 
 
 class FlagSeverity(StrEnum):
@@ -41,6 +45,9 @@ HARD_FLAGS: frozenset[FlagCode] = frozenset(
         FlagCode.ZOMBIE_BAR,
         FlagCode.DELTA_SIGN_ERROR,
         FlagCode.DELTA_MAGNITUDE_ERROR,
+        FlagCode.DUPLICATE_BAR,
+        FlagCode.DUPLICATE_GREEKS,
+        FlagCode.ID_DAY_COLLISION,
     }
 )
 

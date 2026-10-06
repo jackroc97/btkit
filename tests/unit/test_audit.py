@@ -14,7 +14,13 @@ import numpy as np
 import polars as pl
 import pytest
 
-from btkit.audit.rules import phase1_iv, phase2_delta, phase3_coverage, phase4_integrity
+from btkit.audit.rules import (
+    phase1_iv,
+    phase2_delta,
+    phase3_coverage,
+    phase4_integrity,
+    phase5_duplication,
+)
 from btkit.audit.runner import AuditRunner
 from btkit.audit.schema import (
     FLAG_SEVERITY,
@@ -613,3 +619,155 @@ class TestAuditRunner:
         r2 = runner.run(verbose=False)
         assert r1.total_flagged_instruments == r2.total_flagged_instruments
         assert len(r1.flag_counts) == len(r2.flag_counts)
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — duplication / instrument identity
+# ---------------------------------------------------------------------------
+
+
+class TestPhase5Duplication:
+    """DUPLICATE_BAR, DUPLICATE_GREEKS and ID_DAY_COLLISION."""
+
+    @staticmethod
+    def _codes(df: pl.DataFrame) -> set[str]:
+        return set(df["flag_code"].to_list()) if not df.is_empty() else set()
+
+    # -- DUPLICATE_BAR ---------------------------------------------------------
+
+    def test_clean_bars_produce_no_flags(self):
+        con = _make_con()
+        _insert_option_bars(con, [_base_bar(ts=TS, iid=1), _base_bar(ts=TS2, iid=1)])
+        out = phase5_duplication.run(con)
+        assert out.is_empty()
+
+    def test_duplicate_bar_flagged(self):
+        con = _make_con()
+        # Same (instrument_id, ts_event) twice — the exact-copy defect.
+        _insert_option_bars(con, [_base_bar(ts=TS, iid=1), _base_bar(ts=TS, iid=1)])
+        out = phase5_duplication.run(con)
+        dup = out.filter(pl.col("flag_code") == "DUPLICATE_BAR")
+        assert len(dup) == 1
+        assert dup["flag_value"][0] == 2.0
+        assert dup["flag_severity"][0] == "hard"
+
+    def test_duplicate_bar_counts_copies(self):
+        con = _make_con()
+        _insert_option_bars(con, [_base_bar(ts=TS, iid=1)] * 3)
+        out = phase5_duplication.run(con)
+        dup = out.filter(pl.col("flag_code") == "DUPLICATE_BAR")
+        assert dup["flag_value"][0] == 3.0
+
+    def test_same_ts_different_instruments_not_flagged(self):
+        con = _make_con()
+        _insert_option_bars(con, [_base_bar(ts=TS, iid=1), _base_bar(ts=TS, iid=2)])
+        out = phase5_duplication.run(con)
+        assert "DUPLICATE_BAR" not in self._codes(out)
+
+    # -- DUPLICATE_GREEKS ------------------------------------------------------
+
+    def test_duplicate_greeks_flagged(self):
+        con = _make_con()
+        _insert_option_greeks(con, [_base_greek(ts=TS, iid=1), _base_greek(ts=TS, iid=1)])
+        out = phase5_duplication.run(con)
+        assert "DUPLICATE_GREEKS" in self._codes(out)
+
+    # -- ID_DAY_COLLISION ------------------------------------------------------
+
+    def test_id_day_collision_flagged(self):
+        con = _make_con()
+        # One instrument_id, one UTC day, two different contracts.
+        _insert_option_bars(
+            con,
+            [
+                _base_bar(ts=TS, iid=1, symbol="EW1Q4 P5000", expiration=EXP_NEAR, strike=5000.0),
+                _base_bar(
+                    ts=TS.replace(hour=18),
+                    iid=1,
+                    symbol="EW3Q4 C6000",
+                    expiration=EXP_FAR,
+                    strike=6000.0,
+                    right="C",
+                ),
+            ],
+        )
+        out = phase5_duplication.run(con)
+        coll = out.filter(pl.col("flag_code") == "ID_DAY_COLLISION")
+        assert len(coll) == 1
+        assert coll["flag_value"][0] == 2.0
+
+    def test_recycling_across_days_is_not_flagged(self):
+        """Databento only guarantees instrument_id uniqueness per day, so an id
+        serving different contracts on different days is legitimate."""
+        con = _make_con()
+        _insert_option_bars(
+            con,
+            [
+                _base_bar(ts=TS, iid=1, symbol="EW1Q4 P5000", expiration=EXP_NEAR, strike=5000.0),
+                _base_bar(
+                    ts=TS2,
+                    iid=1,
+                    symbol="EW3Q4 C6000",
+                    expiration=EXP_FAR,
+                    strike=6000.0,
+                    right="C",
+                ),
+            ],
+        )
+        out = phase5_duplication.run(con)
+        assert "ID_DAY_COLLISION" not in self._codes(out)
+
+    def test_collision_anchored_at_first_bar_of_the_day(self):
+        con = _make_con()
+        early, late = TS.replace(hour=10), TS.replace(hour=20)
+        _insert_option_bars(
+            con,
+            [
+                _base_bar(ts=late, iid=1, expiration=EXP_FAR, strike=6000.0, right="C"),
+                _base_bar(ts=early, iid=1, expiration=EXP_NEAR, strike=5000.0),
+            ],
+        )
+        out = phase5_duplication.run(con)
+        coll = out.filter(pl.col("flag_code") == "ID_DAY_COLLISION")
+        assert coll["ts_event"][0] == early
+
+    def test_two_colliding_days_produce_two_rows(self):
+        con = _make_con()
+        rows = []
+        for day_ts in (TS, TS2):
+            rows += [
+                _base_bar(ts=day_ts, iid=1, expiration=EXP_NEAR, strike=5000.0),
+                _base_bar(
+                    ts=day_ts.replace(hour=18),
+                    iid=1,
+                    expiration=EXP_FAR,
+                    strike=6000.0,
+                    right="C",
+                ),
+            ]
+        _insert_option_bars(con, rows)
+        out = phase5_duplication.run(con)
+        coll = out.filter(pl.col("flag_code") == "ID_DAY_COLLISION")
+        assert len(coll) == 2
+
+    # -- schema / registration -------------------------------------------------
+
+    def test_timestamps_are_utc_instants_not_relabelled(self):
+        """DuckDB returns TIMESTAMPTZ in the session timezone; the instant must be
+        preserved, so a bar at 14:00 UTC must not come back as 14:00 local."""
+        con = _make_con()
+        con.execute("SET TimeZone='America/New_York'")
+        _insert_option_bars(con, [_base_bar(ts=TS, iid=1), _base_bar(ts=TS, iid=1)])
+        out = phase5_duplication.run(con)
+        assert out["ts_event"][0] == TS
+
+    def test_new_flags_are_hard(self):
+        for code in (FlagCode.DUPLICATE_BAR, FlagCode.DUPLICATE_GREEKS, FlagCode.ID_DAY_COLLISION):
+            assert code in HARD_FLAGS
+            assert FLAG_SEVERITY[code] is FlagSeverity.HARD
+
+    def test_new_flags_included_in_strict_and_hard_presets(self):
+        for preset in ("hard_errors_only", "strict"):
+            codes = resolve_audit_filter(preset)
+            assert "DUPLICATE_BAR" in codes
+            assert "ID_DAY_COLLISION" in codes

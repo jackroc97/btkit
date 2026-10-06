@@ -128,4 +128,4 @@ def run(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
         return empty_audit_df()
 
     combined = pl.concat(results)
-    return combined.with_columns(pl.col("ts_event").dt.replace_time_zone("UTC"))
+    return combined.with_columns(pl.col("ts_event").dt.convert_time_zone("UTC"))

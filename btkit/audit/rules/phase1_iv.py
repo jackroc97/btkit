@@ -46,4 +46,4 @@ def run(con: duckdb.DuckDBPyConnection) -> pl.DataFrame:
     if result.is_empty():
         return empty_audit_df()
 
-    return result.with_columns(pl.col("ts_event").dt.replace_time_zone("UTC"))
+    return result.with_columns(pl.col("ts_event").dt.convert_time_zone("UTC"))
