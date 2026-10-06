@@ -60,6 +60,7 @@ import duckdb
 import numpy as np
 import polars as pl
 
+from btkit.db.contract_key import contract_id as _contract_id
 from btkit.db.input_db import INPUT_SCHEMA_SQL
 from btkit.pipeline.greeks import GreeksCalculator
 from btkit.pipeline.indicators import IndicatorRunner
@@ -298,6 +299,46 @@ class DatabaseBuilder:
     # Step 2: OHLCV
     # ------------------------------------------------------------------
 
+    def _write_contracts(self, segments: pl.DataFrame) -> None:
+        """Upsert the contract dimension from the routing segments.
+
+        One row per real contract, keyed by the stable synthetic contract_id. Written
+        before the bars so option_bars.contract_id always resolves. Existing rows are
+        left alone: contract_id is a pure function of (symbol, expiration), so a row
+        already present is already correct, and this keeps --append idempotent.
+
+        Covers futures as well as options — futures symbols recycle on the same
+        10-year CME cycle (ESH4 expires both 2014-03-21 and 2024-03-15) — so the
+        dimension is complete even though underlying_bars does not yet carry the key.
+        """
+        if segments.is_empty():
+            return
+        contracts = segments.select(
+            [
+                "contract_id",
+                "symbol",
+                pl.col("seg_expiration").alias("expiration"),
+                "underlying_id",
+                "strike_price",
+                "right",
+                "multiplier",
+                "instrument_class",
+            ]
+        ).unique(subset=["contract_id"], keep="first")
+
+        self._con.register("_contract_tmp", contracts)
+        self._con.execute(
+            """
+            INSERT INTO contract
+            SELECT t.* FROM _contract_tmp t
+            WHERE NOT EXISTS (
+                SELECT 1 FROM contract c WHERE c.contract_id = t.contract_id
+            )
+            """
+        )
+        self._con.unregister("_contract_tmp")
+        print(f"[ingest] contract dimension: {len(contracts):,} distinct contracts")
+
     def _ingest_ohlcv(self) -> None:
         """
         Read all *.ohlcv-*.dbn.zst files in parallel batches of _OHLCV_BATCH_SIZE,
@@ -318,6 +359,7 @@ class DatabaseBuilder:
         # otherwise-valid bar; the real (possibly null) expiration is carried
         # separately (seg_expiration) for the output row.
         segments = _build_segments_frame(self._instrument_map)
+        self._write_contracts(segments)
 
         zip_files = sorted(self.raw_data_path.glob("*.zip"))
         if not zip_files:
@@ -409,6 +451,7 @@ class DatabaseBuilder:
                     [
                         "ts_event",
                         "instrument_id",
+                        "contract_id",
                         "underlying_id",
                         "symbol",
                         pl.col("seg_expiration").alias("expiration"),
@@ -627,6 +670,7 @@ def _ns_to_datetime(ns: int) -> datetime | None:
 
 _SEGMENTS_SCHEMA = {
     "instrument_id": pl.Int64,
+    "contract_id": pl.Int64,
     "instrument_class": pl.Utf8,
     "symbol": pl.Utf8,
     "seg_expiration": pl.Date,
@@ -674,6 +718,9 @@ def _build_segments_frame(instrument_map: dict[int, list[_InstrumentInfo]]) -> p
             rows.append(
                 {
                     "instrument_id": iid,
+                    # Stable surrogate key, computed once per contract here rather
+                    # than per bar: ~665k contracts vs 74.5M option bars.
+                    "contract_id": _contract_id(seg.raw_symbol, seg.expiration),
                     "instrument_class": seg.instrument_class,
                     "symbol": seg.raw_symbol,
                     "seg_expiration": seg.expiration,

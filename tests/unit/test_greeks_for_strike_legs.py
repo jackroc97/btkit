@@ -30,6 +30,7 @@ import duckdb
 import polars as pl
 
 from btkit.db.input_db import INPUT_SCHEMA_SQL, InputDatabase
+from tests.sql_helpers import OPTION_BARS_INSERT, OPTION_GREEKS_INSERT_WITH_LAG
 
 _EXPIRY = date(2026, 5, 8)
 
@@ -38,9 +39,9 @@ def _seed_db(db_path: str, option_bars: list[tuple], option_greeks: list[tuple])
     con = duckdb.connect(db_path)
     con.execute(INPUT_SCHEMA_SQL)
     for row in option_bars:
-        con.execute("INSERT INTO option_bars VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", row)
+        con.execute(OPTION_BARS_INSERT, row)
     for row in option_greeks:
-        con.execute("INSERT INTO option_greeks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", row)
+        con.execute(OPTION_GREEKS_INSERT_WITH_LAG, row)
     con.close()
 
 

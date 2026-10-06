@@ -269,6 +269,7 @@ class GreeksCalculator:
             SELECT
                 ob.ts_event,
                 ob.instrument_id,
+                ob.contract_id,
                 ob.underlying_id,
                 ob.expiration,
                 ob.strike_price,
@@ -376,11 +377,11 @@ class GreeksCalculator:
     def _compute_batch(self, df: pl.DataFrame) -> pl.DataFrame:
         """
         Receive a batch DataFrame with columns:
-            ts_event, instrument_id, underlying_id, expiration, strike_price,
-            right, option_close, underlying_close, underlying_ts_event
+            ts_event, instrument_id, contract_id, underlying_id, expiration,
+            strike_price, right, option_close, underlying_close, underlying_ts_event
 
         Returns a DataFrame matching the option_greeks schema:
-            ts_event, instrument_id, underlying_id, dte, T,
+            ts_event, instrument_id, contract_id, underlying_id, dte, T,
             iv, delta, gamma, theta, vega, underlying_lag_s
         """
         today = df["ts_event"].dt.date()
@@ -423,6 +424,7 @@ class GreeksCalculator:
             {
                 "ts_event": df["ts_event"],
                 "instrument_id": df["instrument_id"],
+                "contract_id": df["contract_id"],
                 "underlying_id": df["underlying_id"],
                 "dte": dte,
                 "T": T,

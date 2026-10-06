@@ -19,6 +19,26 @@ from btkit.db._dte_calendar import business_dte, worst_case_slack
 
 # SQL that creates the input database schema. Called by DatabaseBuilder, not here.
 INPUT_SCHEMA_SQL = """
+-- Contract dimension: one row per real contract, keyed by a stable synthetic id
+-- derived from (symbol, expiration). See btkit/db/contract_key.py for why
+-- instrument_id cannot serve this purpose (the publisher recycles it) and
+-- docs/data_duplication_fix.md §7 for the validation.
+--
+-- contract_id is the PRIMARY KEY so a hash collision fails the insert instead of
+-- silently merging two contracts; (symbol, expiration) is UNIQUE so the natural key
+-- stays authoritative and auditable.
+CREATE TABLE IF NOT EXISTS contract (
+    contract_id     BIGINT          NOT NULL PRIMARY KEY,
+    symbol          VARCHAR         NOT NULL,
+    expiration      DATE,
+    underlying_id   INTEGER,
+    strike_price    DOUBLE,
+    "right"         VARCHAR(1),
+    multiplier      INTEGER,
+    instrument_class VARCHAR(1),
+    UNIQUE (symbol, expiration)
+);
+
 CREATE TABLE IF NOT EXISTS underlying_bars (
     ts_event        TIMESTAMPTZ     NOT NULL,
     instrument_id   INTEGER         NOT NULL,
@@ -38,6 +58,7 @@ CREATE INDEX IF NOT EXISTS idx_underlying_bars_expiry
 CREATE TABLE IF NOT EXISTS option_bars (
     ts_event        TIMESTAMPTZ     NOT NULL,
     instrument_id   INTEGER         NOT NULL,
+    contract_id     BIGINT,
     underlying_id   INTEGER         NOT NULL,
     symbol          VARCHAR         NOT NULL,
     expiration      DATE            NOT NULL,
@@ -54,10 +75,13 @@ CREATE INDEX IF NOT EXISTS idx_option_bars_lookup
     ON option_bars (underlying_id, "right", expiration, strike_price, ts_event);
 CREATE INDEX IF NOT EXISTS idx_option_bars_instrument
     ON option_bars (instrument_id, ts_event);
+CREATE INDEX IF NOT EXISTS idx_option_bars_contract
+    ON option_bars (contract_id, ts_event);
 
 CREATE TABLE IF NOT EXISTS option_greeks (
     ts_event        TIMESTAMPTZ     NOT NULL,
     instrument_id   INTEGER         NOT NULL,
+    contract_id     BIGINT,
     underlying_id   INTEGER         NOT NULL,
     dte             INTEGER         NOT NULL,
     T               DOUBLE          NOT NULL,
@@ -70,6 +94,8 @@ CREATE TABLE IF NOT EXISTS option_greeks (
 );
 CREATE INDEX IF NOT EXISTS idx_option_greeks_lookup
     ON option_greeks (underlying_id, dte, ts_event);
+CREATE INDEX IF NOT EXISTS idx_option_greeks_contract
+    ON option_greeks (contract_id, ts_event);
 
 CREATE TABLE IF NOT EXISTS indicator_definition (
     id                  INTEGER PRIMARY KEY,
@@ -89,6 +115,57 @@ CREATE TABLE IF NOT EXISTS indicator_bars (
 );
 CREATE INDEX IF NOT EXISTS idx_indicator_bars
     ON indicator_bars (indicator_id, ts_event);
+"""
+
+
+# Query used by InputDatabase._greeks_for_strike_legs_tolerant. {expirations_sql}
+# is filled in per (underlying_id, calendar date) partition at call time — see
+# that method's docstring for the full design rationale (time-bucket equality
+# instead of a BETWEEN range, why 3 buckets are sufficient, and why the
+# right/strike/expiration filters are pushed into `combined`).
+_TOLERANT_BUCKET_QUERY_TEMPLATE = """
+WITH combined AS (
+    SELECT og.ts_event, og.instrument_id, og.underlying_id, og.dte, og.iv, og.delta,
+           og.gamma, og.theta, og.vega, ob.strike_price, ob.expiration, ob."right",
+           ob.multiplier, ob.symbol, ob.close,
+           CAST(floor(epoch(og.ts_event) / ?) AS BIGINT) AS bucket
+    FROM option_greeks og
+    JOIN option_bars ob ON og.instrument_id = ob.instrument_id AND og.ts_event = ob.ts_event
+    WHERE ob.close IS NOT NULL
+      AND og.underlying_id = ?
+      AND og.ts_event BETWEEN ? AND ?
+      AND ob."right" = ?
+      AND ob.strike_price BETWEEN ? AND ?
+      AND ob.expiration IN ({expirations_sql})
+),
+anchor_buckets AS (
+    SELECT st.ts_event, st.leg_name, st.anchor_ts_event, st.underlying_id, st."right",
+           st.target_strike, st.reference_expiration,
+           CAST(floor(epoch(st.anchor_ts_event) / ?) AS BIGINT) + off.bucket_offset AS bucket
+    FROM _group_targets st
+    CROSS JOIN (VALUES (-1),(0),(1)) AS off(bucket_offset)
+),
+matched AS (
+    SELECT st.ts_event AS row_id, st.leg_name, c.ts_event AS _match_ts_event,
+           c.instrument_id, c.underlying_id, c.dte, c.iv, c.delta, c.gamma, c.theta,
+           c.vega, c.strike_price, c.expiration, c."right", c.multiplier, c.symbol,
+           c.close,
+           abs(epoch(c.ts_event) - epoch(st.anchor_ts_event)) AS time_diff,
+           abs(c.strike_price - st.target_strike) AS strike_diff
+    FROM anchor_buckets st
+    JOIN combined c
+      ON c.bucket = st.bucket
+     AND c.underlying_id = st.underlying_id
+     AND c."right" = st."right"
+     AND c.expiration = st.reference_expiration
+     AND abs(c.strike_price - st.target_strike) <= ?
+)
+SELECT leg_name, row_id AS ts_event, _match_ts_event, instrument_id, underlying_id,
+       dte, iv, delta, gamma, theta, vega, strike_price, expiration, "right",
+       multiplier, symbol, close
+FROM matched
+WHERE time_diff <= ?
+QUALIFY ROW_NUMBER() OVER (PARTITION BY row_id ORDER BY time_diff, strike_diff) = 1
 """
 
 
@@ -577,22 +654,36 @@ class InputDatabase:
         original single-query exact-equality join (unchanged, still fast — a
         real hash join with strike_targets as the build side).
 
-        time_tolerance>0 cannot use that plan: DuckDB has no efficient hash-join
-        strategy for a BETWEEN predicate, and a range join against the full
-        strike_targets frame scales far worse than linearly with the backtest's
-        time span (confirmed: >48x slower going from a 9-month to a 21-month
-        window on real data, eventually exhausting memory on a multi-year
-        universe). Instead: partition strike_targets by (underlying_id, calendar
-        date of anchor_ts_event) and let DuckDB pick the best match per anchor
-        row itself via QUALIFY, so only one row per anchor ever leaves the
-        database. underlying_id alone (one quarterly futures contract's
-        lifetime — the granularity greeks_for_all_legs() already uses) still
-        leaves a range join scoped to months of data for a densely-entering
-        strategy (e.g. 0DTE re-entering many times a day can have tens of
-        thousands of anchors within one contract's life); the join's cost
-        scales with anchor density within a partition, not just its calendar
-        span, so day-level sub-partitioning bounds each query to at most one
-        trading day's anchors regardless of entry frequency.
+        time_tolerance>0 cannot use that plan directly: exact equality no
+        longer holds, and a naive range condition against the full
+        strike_targets frame scales far worse than linearly with the
+        backtest's time span (confirmed: >48x slower going from a 9-month to
+        a 21-month window on real data, eventually exhausting memory on a
+        multi-year universe). Two structural fixes make it tractable:
+
+        1. Partition strike_targets by (underlying_id, calendar date of
+           anchor_ts_event) and issue one bounded query per partition rather
+           than one query across the whole backtest. underlying_id alone (one
+           quarterly futures contract's lifetime) still leaves a range scoped
+           to months of data for a densely-entering strategy (e.g. 0DTE
+           re-entering many times a day can have tens of thousands of anchors
+           within one contract's life); day-level sub-partitioning bounds
+           each query to at most one trading day's anchors regardless of
+           entry frequency. Do not collapse this back into one query across
+           partitions without re-verifying at real multi-year scale first —
+           see _greeks_for_strike_legs_tolerant's docstring for why.
+        2. Within each partition, match on time-bucket equality (both sides'
+           timestamps floored to time_tolerance-wide buckets) instead of a
+           BETWEEN range, so DuckDB can hash-join instead of nested-loop-join
+           the match itself — confirmed via EXPLAIN ANALYZE on real 4-year
+           data to be ~2.3x faster in aggregate and faster on every partition
+           tested (up to ~5.7x on the largest), with zero memory growth. See
+           _greeks_for_strike_legs_tolerant's docstring for the correctness
+           argument (why 3 buckets are enough) and scripts/compare_bucket_
+           strike_legs.py in git history for the full validation trail.
+
+        DuckDB picks the best match per anchor row itself via QUALIFY, so
+        only one row per anchor ever leaves the database either way.
 
         Returns the same column set as greeks_for_all_legs(), plus
         _match_ts_event (the option's own real bar timestamp).
@@ -656,38 +747,87 @@ class InputDatabase:
         time_tolerance: int,
         audit_filter_codes: frozenset[str] | None,
     ) -> pl.DataFrame:
-        # REVERTED (see git history) from a single-query design that expressed
-        # (underlying_id, calendar date) partitioning as join equality keys,
-        # trusting DuckDB to hash-join and internally bound memory the way this
-        # Python loop bounds it explicitly. That was faster in synthetic
-        # benchmarking (~5x at 250 synthetic partitions) but caused a faster and
-        # more severe real-scale memory blowup than the version it replaced —
-        # confirmed live (free+inactive memory to 1.1GB, swap to 7.8GB, within
-        # ~9s of starting a real multi-year study run) — while THIS loop version
-        # ran stably to 108/162 real combinations before being killed for an
-        # unrelated reason. The working hypothesis is that folding everything
-        # into one query lets DuckDB plan/build one large join structure sized
-        # to the whole multi-year strike_targets frame, rather than many small,
-        # sequentially-released ones — but this has not been confirmed via
-        # EXPLAIN ANALYZE. Do not re-attempt the single-query collapse without
-        # verifying the query plan and testing against real multi-year,
-        # multi-combination scale first — the previous synthetic verification
-        # (250 partitions, one query) did not surface this regression at all.
+        # Partition by (underlying_id, calendar date of anchor_ts_event) and
+        # issue one bounded query per partition — do NOT collapse this back
+        # into a single query across partitions. A single-query design that
+        # expressed this same partitioning as join equality keys (trusting
+        # DuckDB to hash-join and internally bound memory the way this Python
+        # loop bounds it explicitly) benchmarked ~5x faster synthetically but
+        # caused a faster, more severe memory blowup at real multi-year scale
+        # than the loop it replaced (confirmed live: free+inactive memory to
+        # 1.1GB, swap to 7.8GB, within ~9s of starting a real study run) —
+        # while a loop version ran stably to 108/162 real combinations before
+        # being killed for an unrelated reason. Synthetic partition-count
+        # benchmarking did not surface that regression; only real multi-year
+        # scale did. Re-verify at that same scale before ever revisiting this.
         #
-        # Partition by (underlying_id, calendar date of anchor_ts_event).
-        # Partitioning by underlying_id alone (one quarterly futures contract's
-        # lifetime) still leaves a range join scoped to months of data — fine
-        # for a sparsely-entering strategy, but a densely-entering one (e.g. a
-        # 0DTE strategy re-entering many times a day) can have tens of
-        # thousands of anchors within a single contract's life, and the join's
-        # cost scales with anchor density within a partition, not just the
-        # partition's calendar span. Sub-partitioning by day bounds each query
-        # to at most a single trading day's anchors/candidates regardless of
-        # density. Date is computed in Python (UTC-basis, matching
-        # option_greeks.dte's own basis and _attach_delta_leg's Polars
-        # .dt.date() grouping); __init__ also pins this connection's session
-        # TimeZone to UTC so any incidental SQL-side date handling agrees.
+        # Partitioning by underlying_id alone (one quarterly futures
+        # contract's lifetime) still leaves a match scoped to months of data
+        # — fine for a sparsely-entering strategy, but a densely-entering one
+        # (e.g. 0DTE re-entering many times a day) can have tens of thousands
+        # of anchors within one contract's life, and the match cost scales
+        # with anchor density within a partition, not just its calendar span.
+        # Day-level sub-partitioning bounds each query to at most one trading
+        # day's anchors/candidates regardless of density. Date is computed in
+        # Python (UTC-basis, matching option_greeks.dte's own derivation and
+        # _attach_delta_leg's Polars .dt.date() grouping); __init__ also pins
+        # this connection's session TimeZone to UTC so any incidental SQL-side
+        # date handling agrees.
+        #
+        # Within each partition, matching is done via TIME-BUCKET EQUALITY,
+        # not a BETWEEN range: both the anchor and every candidate timestamp
+        # are floored to time_tolerance-wide buckets, and the join key is
+        # bucket equality — this is what lets DuckDB hash-join the match
+        # instead of nested-loop-joining it (confirmed via EXPLAIN ANALYZE: a
+        # BETWEEN-based range join here is an O(anchors x candidates)
+        # NESTED_LOOP_JOIN — over 1.1M row-pairs on the densest real
+        # partition seen). A DuckDB ASOF JOIN was also prototyped as an
+        # alternative and rejected: EXPLAIN ANALYZE showed it still compiles
+        # to NESTED_LOOP_JOIN internally in this DuckDB version, and needing
+        # both a backward and forward pass for true nearest-either-direction
+        # matching made it ~1.4x SLOWER than the original BETWEEN query, not
+        # faster, on the same real partitions.
+        #
+        # Bucket-boundary correctness: a candidate can be genuinely close in
+        # time to an anchor yet fall in a different bucket if the anchor sits
+        # near its own bucket's edge. Fix: with bucket_width == time_tolerance
+        # exactly, the true +/-time_tolerance window can span at most 3
+        # consecutive buckets (itself, one neighbor each side) — proof: for
+        # anchor at k*W+f (0<=f<W, W=time_tolerance), the window
+        # [t-W, t+W] = [(k-1)*W+f, (k+1)*W+f], whose endpoints fall in buckets
+        # k-1 and k+1 respectively, never further. So this code always
+        # queries the anchor's own bucket plus its immediate neighbor on each
+        # side (BUCKET_OFFSETS below) — no more, no fewer — and this is
+        # provably sufficient regardless of where an anchor lands within its
+        # bucket. Verified with dedicated synthetic tests placing timestamps
+        # at exact bucket edges (down to microsecond precision) before this
+        # replaced the BETWEEN-based query — see
+        # tests/unit/test_greeks_for_strike_legs.py's bucket-boundary cases.
+        # The final `WHERE time_diff <= ?` below is the actual correctness
+        # guarantee independent of bucket math (bucket matching only narrows
+        # candidates cheaply; it is not itself a substitute for the tolerance
+        # check — a candidate landing in a checked neighbor bucket can still
+        # be farther away than time_tolerance and must be filtered out here).
+        #
+        # `combined`'s WHERE clause also pushes down right=, a strike range,
+        # and an expiration allow-list (all safe, correctness-preserving
+        # supersets of the true match set, mirroring conditions the old
+        # BETWEEN query already applied early) — EXPLAIN ANALYZE showed this
+        # candidate-pool size, not the neighbor-bucket count, was the actual
+        # dominant cost; pushing these down cut it by roughly 20x on the
+        # densest real partition and was most of this rewrite's net win.
+        # Expirations are inlined as SQL literals rather than passed as an
+        # `= ANY(?)` bind parameter: DuckDB compiles `= ANY(?)` against a list
+        # parameter into an extra HASH_JOIN over an UNNEST of that list rather
+        # than a cheap inline filter, which measurably cost more than it saved.
+        #
+        # Full validation trail (structural bucket-boundary correctness proof,
+        # incremental EXPLAIN ANALYZE-driven optimization from an initial
+        # ~1.4x-slower ASOF prototype down to this ~2.3x-faster-in-aggregate,
+        # faster-on-every-real-partition-tested result) lives in the commit
+        # history for scripts/compare_bucket_strike_legs.py.
         _pad = timedelta(seconds=time_tolerance)
+        bucket_width = float(time_tolerance)
         frames: list[pl.DataFrame] = []
 
         grouped = strike_targets.with_columns(
@@ -699,49 +839,26 @@ class InputDatabase:
             strike_min = float(group["target_strike"].min()) - strike_tolerance
             strike_max = float(group["target_strike"].max()) + strike_tolerance
             right = group["right"][0]
+            expirations_sql = ",".join(
+                f"DATE '{d.isoformat()}'" for d in group["reference_expiration"].unique().to_list()
+            )
+            query = _TOLERANT_BUCKET_QUERY_TEMPLATE.format(expirations_sql=expirations_sql)
 
             self._con.register("_group_targets", group)
             try:
                 df = self._con.execute(
-                    """
-                    SELECT st.leg_name,
-                           st.ts_event,
-                           og.ts_event AS _match_ts_event,
-                           og.instrument_id,
-                           CAST(og.underlying_id AS BIGINT) AS underlying_id,
-                           og.dte, og.iv, og.delta, og.gamma, og.theta, og.vega,
-                           ob.strike_price, ob.expiration, ob."right", ob.multiplier,
-                           ob.symbol, ob.close
-                    FROM option_greeks og
-                    JOIN option_bars ob
-                      ON og.instrument_id = ob.instrument_id
-                     AND og.ts_event      = ob.ts_event
-                     AND ob."right"       = ?
-                     AND ob.strike_price BETWEEN ? AND ?
-                     AND ob.close IS NOT NULL
-                    JOIN _group_targets st
-                      ON og.ts_event BETWEEN st.anchor_ts_event - INTERVAL (?) SECOND
-                                          AND st.anchor_ts_event + INTERVAL (?) SECOND
-                     AND ob.expiration = st.reference_expiration
-                     AND abs(ob.strike_price - st.target_strike) <= ?
-                    WHERE og.underlying_id = ?
-                      AND og.ts_event BETWEEN ? AND ?
-                    QUALIFY ROW_NUMBER() OVER (
-                        PARTITION BY st.ts_event
-                        ORDER BY abs(epoch(og.ts_event) - epoch(st.anchor_ts_event)),
-                                 abs(ob.strike_price - st.target_strike)
-                    ) = 1
-                    """,
+                    query,
                     [
-                        right,
-                        strike_min,
-                        strike_max,
-                        time_tolerance,
-                        time_tolerance,
-                        strike_tolerance,
+                        bucket_width,
                         uid,
                         anchor_min,
                         anchor_max,
+                        right,
+                        strike_min,
+                        strike_max,
+                        bucket_width,
+                        strike_tolerance,
+                        time_tolerance,
                     ],
                 ).pl()
             finally:

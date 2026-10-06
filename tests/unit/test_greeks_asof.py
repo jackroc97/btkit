@@ -20,6 +20,7 @@ import pytest
 
 from btkit.db.input_db import INPUT_SCHEMA_SQL
 from btkit.pipeline.greeks import GreeksCalculator
+from tests.sql_helpers import OPTION_BARS_INSERT
 
 _UND_ID = 100
 _OPT_ID = 200
@@ -45,7 +46,7 @@ def _add_underlying(con, minutes_offsets: list[int], close: float = 4000.0) -> N
 def _add_option(con, minute_offset: int, close: float = 20.0) -> None:
     ts = _T0 + timedelta(minutes=minute_offset)
     con.execute(
-        "INSERT INTO option_bars VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        OPTION_BARS_INSERT,
         # ts, id, underlying_id, symbol, expiration, strike, right, mult, o, h, l, c, vol
         [
             ts,

@@ -16,6 +16,7 @@ import duckdb
 import pytest
 
 from btkit.pipeline.indicators import IndicatorContext, IndicatorRunner
+from tests.sql_helpers import OPTION_BARS_INSERT, OPTION_GREEKS_INSERT
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -103,7 +104,7 @@ def con():
         ("2024-01-02 14:31:00+00", 101, 1, 7, 0.019, 0.19, -0.21, 0.011, -0.05, 0.11),
         ("2024-01-02 14:31:00+00", 102, 1, 21, 0.058, 0.21, -0.31, 0.009, -0.03, 0.26),
     ]
-    c.executemany("INSERT INTO option_greeks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", greeks_rows)
+    c.executemany(OPTION_GREEKS_INSERT, greeks_rows)
 
     # Seed option_bars — calls and puts across two expirations
     bar_rows = [
@@ -168,9 +169,7 @@ def con():
             180,
         ),
     ]
-    c.executemany(
-        "INSERT INTO option_bars VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", bar_rows
-    )
+    c.executemany(OPTION_BARS_INSERT, bar_rows)
 
     yield c
     c.close()

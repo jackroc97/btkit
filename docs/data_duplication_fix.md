@@ -400,20 +400,45 @@ unstable, and both could be removed:
 | Fact-table width | **Real gain.** At 112 bars per contract, `symbol`/`expiration`/`strike_price`/`right`/`multiplier`/`underlying_id` are duplicated ~112×. Moving them to a dimension table cuts scan I/O on a 67 GB database. |
 | Strike/greeks search | **No gain.** `_greeks_for_strike_legs_tolerant` and per-cohort bar loading dominate runtime, and neither changes. |
 
-### Design
+### Design — implemented ✅
 
-- **Keep `instrument_id`** as provenance. Ingest needs it to join OHLCV to definitions,
-  and `position_leg` / the analysis UI reference it ([chart.py:247](../btkit/analysis/api/routes/chart.py#L247)).
-  Add `contract_id` alongside it rather than replacing it.
-- **Make the id deterministic** — a stable hash of `symbol|expiration`, computed in Python
-  with a fixed algorithm, **not** an auto-increment sequence. `btkit study merge`
-  ([study/merger.py](../btkit/study/merger.py)) merges separately-built databases; a
-  sequence would assign different ids to the same contract in each.
-- **Add a `contract` dimension table** holding the metadata with `UNIQUE (symbol,
-  expiration)`, so hash collisions are detectable rather than silent.
-- **Resolve attribution once, at ingest.** With snapshot-based routing (§6 Phase 5)
-  producing `contract_id` directly, the ambiguity is settled in one place instead of being
-  re-litigated by downstream filters.
+- **`btkit/db/contract_key.py`** — `contract_id(symbol, expiration)` returns a 63-bit
+  blake2b digest. Deterministic rather than a sequence, because `btkit study merge`
+  ([study/merger.py](../btkit/study/merger.py)) combines separately-built databases and a
+  sequence would give the same contract different ids in each. blake2b rather than the
+  built-in `hash()`, whose string hashing is randomised per process. A pinned regression
+  value in the tests makes an accidental hash change impossible to miss.
+- **`contract` dimension table** with `contract_id` as `PRIMARY KEY` and
+  `UNIQUE (symbol, expiration)`. The primary key means a hash collision fails the insert
+  rather than silently merging two contracts. Populated for futures as well as options,
+  since futures symbols recycle on the same 10-year cycle.
+- **`contract_id` added to `option_bars` and `option_greeks`**, each with a
+  `(contract_id, ts_event)` index. Computed once per segment in `_build_segments_frame`
+  (~665k contracts) rather than per bar (74.5M), and inherited by bars through the routing
+  join. `GreeksCalculator` carries it from `option_bars` into `option_greeks`.
+- **`instrument_id` is retained** as provenance: ingest needs it to join OHLCV to
+  definitions, and `position_leg` / the analysis UI reference it
+  ([chart.py:247](../btkit/analysis/api/routes/chart.py#L247)).
+- **Attribution is resolved once, at ingest**, by publication-time routing (§6 Phase 5).
+
+### Deliberately deferred
+
+- **The exit scanner still joins on `instrument_id`** and keeps its defensive filters.
+  Switching it is a behaviour change that cannot be validated against the current database
+  — the data is corrupt until the rebuild — so it should follow the rebuild and be A/B'd
+  against the pre-change results.
+- **The two defensive filters stay for now.** Recycling is no longer their justification,
+  but they still screen out genuine zombie bars (358,540 `ZOMBIE_BAR` flags: bars dated
+  after their own contract's expiration). Remove them only once ingest or the audit
+  excludes those at source. This means the scan-time saving from dropping the two
+  timezone-date conversions is not yet realised.
+- **Normalisation is not done.** `option_bars` still carries `symbol`, `expiration`,
+  `strike_price`, `right`, `multiplier` and `underlying_id` per row, duplicated ~112× per
+  contract. Moving them into the dimension would cut scan I/O but touches most queries in
+  `input_db.py`, so it is a separate change.
+- **`underlying_bars` has no `contract_id`.** The futures contracts are in the dimension,
+  but wiring the column through would also mean revisiting `indicator_definition`, which is
+  keyed on the underlying's `instrument_id`.
 
 ---
 

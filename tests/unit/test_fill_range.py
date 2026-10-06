@@ -12,6 +12,7 @@ existing timeline:
 
 Everything runs against an in-memory DuckDB — no DBN files needed.
 """
+
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
@@ -21,6 +22,7 @@ import duckdb
 from btkit.db.input_db import INPUT_SCHEMA_SQL
 from btkit.pipeline.greeks import GreeksCalculator
 from btkit.pipeline.indicators import IndicatorRunner
+from tests.sql_helpers import OPTION_BARS_INSERT
 
 
 def _con() -> duckdb.DuckDBPyConnection:
@@ -47,10 +49,21 @@ class TestScopedGreeks:
                 [_day(d), 100, "ESM0", date(2020, 3, 20), 4000.0, 4000.0, 4000.0, 4000.0, 1000],
             )
             con.execute(
-                "INSERT INTO option_bars VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                OPTION_BARS_INSERT,
                 [
-                    _day(d), 200, 100, "ESM0 C4000", date(2020, 3, 20), 4000.0, "C", 50,
-                    20.0, 20.0, 20.0, 20.0, 5,
+                    _day(d),
+                    200,
+                    100,
+                    "ESM0 C4000",
+                    date(2020, 3, 20),
+                    4000.0,
+                    "C",
+                    50,
+                    20.0,
+                    20.0,
+                    20.0,
+                    20.0,
+                    5,
                 ],
             )
 
@@ -89,6 +102,7 @@ class TestScopedGreeks:
 
 _SCRIPT = """
 import polars as pl
+from tests.sql_helpers import OPTION_BARS_INSERT
 
 def compute(df):
     return df.with_columns(pl.col("close").rolling_mean(window_size=3).alias("roll3"))
