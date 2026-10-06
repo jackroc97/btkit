@@ -18,7 +18,7 @@ import polars as pl
 from btkit.db._dte_calendar import business_dte, worst_case_slack
 
 # SQL that creates the input database schema. Called by DatabaseBuilder, not here.
-INPUT_SCHEMA_SQL = """
+INPUT_TABLES_SQL = """
 -- Contract dimension: one row per real contract, keyed by a stable synthetic id
 -- derived from (symbol, expiration). See btkit/db/contract_key.py for why
 -- instrument_id cannot serve this purpose (the publisher recycles it) and
@@ -80,10 +80,6 @@ CREATE TABLE IF NOT EXISTS option_bars (
     close           DOUBLE,
     volume          BIGINT
 );
-CREATE INDEX IF NOT EXISTS idx_option_bars_lookup
-    ON option_bars (underlying_id, "right", expiration, strike_price, ts_event);
-CREATE INDEX IF NOT EXISTS idx_option_bars_instrument
-    ON option_bars (instrument_id, ts_event);
 
 CREATE TABLE IF NOT EXISTS option_greeks (
     ts_event        TIMESTAMPTZ     NOT NULL,
@@ -99,8 +95,6 @@ CREATE TABLE IF NOT EXISTS option_greeks (
     vega            DOUBLE,
     underlying_lag_s INTEGER  -- seconds to the underlying bar used for F (0 = same-minute)
 );
-CREATE INDEX IF NOT EXISTS idx_option_greeks_lookup
-    ON option_greeks (underlying_id, dte, ts_event);
 
 CREATE TABLE IF NOT EXISTS indicator_definition (
     id                  INTEGER PRIMARY KEY,
@@ -118,9 +112,33 @@ CREATE TABLE IF NOT EXISTS indicator_bars (
     indicator_id    INTEGER         NOT NULL REFERENCES indicator_definition(id),
     value           DOUBLE
 );
+"""
+
+# Indexes on the three largest tables (~70M option bars, ~69M greeks rows and
+# ~713M indicator bars) are created AFTER the bulk load rather than with the
+# tables. DuckDB's ART indexes are memory-resident and cannot spill, so
+# maintaining them incrementally across a load that size is what exhausted memory
+# on the ES rebuild — "failed to pin" during both ingest and greeks, with
+# temp_directory at 0 bytes and 180 GiB of disk free. Building each once at the
+# end also skips per-insert maintenance.
+#
+# Indexes on underlying_bars and indicator_definition stay with the tables: they
+# are small (7.8M rows and a few thousand) and the build itself queries through
+# them — the greeks ASOF join and the per-underlying indicator passes.
+INPUT_DEFERRED_INDEXES_SQL = """
+CREATE INDEX IF NOT EXISTS idx_option_bars_lookup
+    ON option_bars (underlying_id, "right", expiration, strike_price, ts_event);
+CREATE INDEX IF NOT EXISTS idx_option_bars_instrument
+    ON option_bars (instrument_id, ts_event);
+CREATE INDEX IF NOT EXISTS idx_option_greeks_lookup
+    ON option_greeks (underlying_id, dte, ts_event);
 CREATE INDEX IF NOT EXISTS idx_indicator_bars
     ON indicator_bars (indicator_id, ts_event);
 """
+
+# Tables plus every index, for callers that need the finished shape of the
+# database rather than a bulk load (tests, InputDatabase self-heal).
+INPUT_SCHEMA_SQL = INPUT_TABLES_SQL + INPUT_DEFERRED_INDEXES_SQL
 
 
 # Query used by InputDatabase._greeks_for_strike_legs_tolerant. {expirations_sql}

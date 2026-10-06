@@ -61,7 +61,7 @@ import numpy as np
 import polars as pl
 
 from btkit.db.contract_key import contract_id as _contract_id
-from btkit.db.input_db import INPUT_SCHEMA_SQL
+from btkit.db.input_db import INPUT_DEFERRED_INDEXES_SQL, INPUT_TABLES_SQL
 from btkit.pipeline.greeks import GreeksCalculator
 from btkit.pipeline.indicators import IndicatorRunner
 
@@ -83,9 +83,11 @@ _OHLCV_BATCH_SIZE: int = _INGEST_WORKERS * 4
 # Where DuckDB spills intermediates that exceed memory_limit.
 _BUILD_TEMP_DIR = "/tmp/duckdb_build_tmp"
 
-# Conservative defaults for a build box: see DatabaseBuilder.build() for why the
-# limit must sit well under physical RAM rather than at DuckDB's default.
-_DEFAULT_MEMORY_LIMIT = "6GB"
+# Memory ceiling for build connections. Below physical RAM so DuckDB spills to
+# temp_directory rather than pushing the OS into swap, but high enough to hold the
+# deferred index builds — lowering it to 6GB made ingest fail EARLIER, because ART
+# indexes are unspillable and must fit under the limit whatever it is.
+_DEFAULT_MEMORY_LIMIT = "10GB"
 _DEFAULT_MAX_TEMP_SIZE = "150GB"
 
 
@@ -169,6 +171,20 @@ class DatabaseBuilder:
         self.max_temp_size = max_temp_size
         self._instrument_map: dict[int, list[_InstrumentInfo]] = {}
 
+    def _create_deferred_indexes(self) -> None:
+        """Create the large-table indexes once all data is loaded.
+
+        Deferred from the schema so the bulk load does not pay incremental ART index
+        maintenance, which is memory-resident and unspillable. Idempotent
+        (IF NOT EXISTS), so an --append build where they already exist is a no-op.
+        """
+        con = duckdb.connect(str(self.db_path))
+        self._apply_session_limits(con)
+        try:
+            con.execute(INPUT_DEFERRED_INDEXES_SQL)
+        finally:
+            con.close()
+
     def _apply_session_limits(self, con: duckdb.DuckDBPyConnection) -> None:
         """Apply the build's memory and spill settings to one connection.
 
@@ -197,7 +213,11 @@ class DatabaseBuilder:
         self._con = duckdb.connect(str(self.db_path))
         self._apply_session_limits(self._con)
         try:
-            self._con.execute(INPUT_SCHEMA_SQL)
+            # Tables only. The indexes on the three largest tables are created
+            # after every phase has loaded (see _create_deferred_indexes), because
+            # DuckDB's ART indexes cannot spill and maintaining them across a
+            # ~70M-row load exhausts memory on a 17 GB machine.
+            self._con.execute(INPUT_TABLES_SQL)
             # Self-heal databases built before underlying_lag_s existed so an
             # --append build against an older DB does not fail on INSERT.
             self._con.execute(
@@ -224,6 +244,10 @@ class DatabaseBuilder:
         t = time.perf_counter()
         self._run_indicators()
         print(f"[timing] indicators:   {_fmt_elapsed(time.perf_counter() - t)}")
+
+        t = time.perf_counter()
+        self._create_deferred_indexes()
+        print(f"[timing] indexes:      {_fmt_elapsed(time.perf_counter() - t)}")
 
         print(f"[timing] total:        {_fmt_elapsed(time.perf_counter() - t_total)}")
 
