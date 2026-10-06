@@ -26,7 +26,16 @@ INPUT_SCHEMA_SQL = """
 --
 -- contract_id is the PRIMARY KEY so a hash collision fails the insert instead of
 -- silently merging two contracts; (symbol, expiration) is UNIQUE so the natural key
--- stays authoritative and auditable.
+-- stays authoritative and auditable. Both are ART indexes, but over ~1.2M contracts
+-- rather than ~70M bars, so the memory cost is minor.
+--
+-- NOTE: option_bars and option_greeks deliberately carry NO index on contract_id.
+-- DuckDB's ART indexes are memory-resident and cannot spill, and adding a 70M-key
+-- index to each of those tables exhausted a 12.7 GiB limit during the greeks bulk
+-- load ("failed to pin"), on a machine where the original index set built fine.
+-- Nothing queries by contract_id yet — the exit scanner still joins on
+-- instrument_id — so the indexes were pure cost. Create them with CREATE INDEX on
+-- the loaded database when a query actually needs them, and measure first.
 CREATE TABLE IF NOT EXISTS contract (
     contract_id     BIGINT          NOT NULL PRIMARY KEY,
     symbol          VARCHAR         NOT NULL,
@@ -75,8 +84,6 @@ CREATE INDEX IF NOT EXISTS idx_option_bars_lookup
     ON option_bars (underlying_id, "right", expiration, strike_price, ts_event);
 CREATE INDEX IF NOT EXISTS idx_option_bars_instrument
     ON option_bars (instrument_id, ts_event);
-CREATE INDEX IF NOT EXISTS idx_option_bars_contract
-    ON option_bars (contract_id, ts_event);
 
 CREATE TABLE IF NOT EXISTS option_greeks (
     ts_event        TIMESTAMPTZ     NOT NULL,
@@ -94,8 +101,6 @@ CREATE TABLE IF NOT EXISTS option_greeks (
 );
 CREATE INDEX IF NOT EXISTS idx_option_greeks_lookup
     ON option_greeks (underlying_id, dte, ts_event);
-CREATE INDEX IF NOT EXISTS idx_option_greeks_contract
-    ON option_greeks (contract_id, ts_event);
 
 CREATE TABLE IF NOT EXISTS indicator_definition (
     id                  INTEGER PRIMARY KEY,
