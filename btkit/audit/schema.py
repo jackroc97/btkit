@@ -30,6 +30,7 @@ class FlagCode(StrEnum):
     DUPLICATE_BAR = "DUPLICATE_BAR"
     DUPLICATE_GREEKS = "DUPLICATE_GREEKS"
     ID_DAY_COLLISION = "ID_DAY_COLLISION"
+    EXPIRY_RESCHEDULED = "EXPIRY_RESCHEDULED"
 
 
 class FlagSeverity(StrEnum):
@@ -59,6 +60,7 @@ SOFT_FLAGS: frozenset[FlagCode] = frozenset(
         FlagCode.DELTA_INCONSISTENT,
         FlagCode.BARS_SPARSE,
         FlagCode.NO_EXPIRY_BARS,
+        FlagCode.EXPIRY_RESCHEDULED,
     }
 )
 

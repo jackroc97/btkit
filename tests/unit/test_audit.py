@@ -674,6 +674,40 @@ class TestPhase5Duplication:
 
     # -- ID_DAY_COLLISION ------------------------------------------------------
 
+    def test_expiry_reschedule_is_soft_not_a_collision(self):
+        """Same contract republished with a corrected expiration — an exchange
+        reschedule, not a misroute. CME moved 2018-12-05 expiries to 2018-12-04 for
+        the national day of mourning and republished mid-day, which produced all 66
+        of the rebuilt database's 2018 flags."""
+        con = _make_con()
+        _insert_option_bars(
+            con,
+            [
+                _base_bar(
+                    ts=TS,
+                    iid=1,
+                    symbol="E1CZ8 C2820",
+                    expiration=date(2018, 12, 5),
+                    strike=2820.0,
+                    right="C",
+                ),
+                _base_bar(
+                    ts=TS.replace(hour=18),
+                    iid=1,
+                    symbol="E1CZ8 C2820",
+                    expiration=date(2018, 12, 4),
+                    strike=2820.0,
+                    right="C",
+                ),
+            ],
+        )
+        out = phase5_duplication.run(con)
+        assert "ID_DAY_COLLISION" not in self._codes(out)
+        resched = out.filter(pl.col("flag_code") == "EXPIRY_RESCHEDULED")
+        assert len(resched) == 1
+        assert resched["flag_severity"][0] == "soft"
+        assert resched["flag_value"][0] == 2.0
+
     def test_id_day_collision_flagged(self):
         con = _make_con()
         # One instrument_id, one UTC day, two different contracts.

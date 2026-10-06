@@ -120,6 +120,10 @@ def verify(new_path: str, old_path: str | None) -> int:
     )
     for code in ("DUPLICATE_BAR", "DUPLICATE_GREEKS", "ID_DAY_COLLISION"):
         _check(code, counts.get(code, 0), 0, failures)
+    # Soft: an exchange moved an expiration and the vendor republished the contract,
+    # so bars either side of the announcement carry different expirations. Reported
+    # because the superseded date gives a wrong DTE, but it is not a misroute.
+    print(f"  [INFO] EXPIRY_RESCHEDULED: {counts.get('EXPIRY_RESCHEDULED', 0):,}")
 
     # ── Invariant 2: contract_id is populated and resolves ───────────────────
     print("\n=== contract_id integrity ===")
@@ -158,13 +162,16 @@ def verify(new_path: str, old_path: str | None) -> int:
 
     # ── Invariant 3: one contract per instrument-day ─────────────────────────
     print("\n=== Routing ===")
+    # Only genuinely different instruments count as a routing failure; the same
+    # contract under a rescheduled expiration is counted separately above.
     _check(
-        "(instrument_id, UTC day) resolving to >1 contract",
+        "(instrument_id, UTC day) resolving to >1 DIFFERENT contract",
         _scalar(
             con,
             "SELECT count(*) FROM (SELECT instrument_id, "
             "CAST(ts_event AT TIME ZONE 'UTC' AS DATE) FROM option_bars "
-            "GROUP BY 1, 2 HAVING count(DISTINCT contract_id) > 1)",
+            "GROUP BY 1, 2 HAVING count(DISTINCT symbol) > 1 "
+            'OR count(DISTINCT strike_price) > 1 OR count(DISTINCT "right") > 1)',
         ),
         0,
         failures,
