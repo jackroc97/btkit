@@ -45,9 +45,9 @@ SWEEP_KEYS = ("matrix", "combinations")
 HIGH_DRIFT_INDICATORS = ("ves1d",)
 
 # How many of the low-drift gated backtests to spot-check. Their gating indicators
-# moved <=0.07%, so exhaustive coverage buys little, and they are the slowest
-# backtests in the population.
-LOW_DRIFT_SAMPLE = 12
+# moved <=0.07%, so exhaustive coverage buys little, and at a measured ~600s each
+# for both sides they are by far the most expensive backtests in the population.
+LOW_DRIFT_SAMPLE = 4
 
 
 def _is_high_drift(bt: dict) -> bool:
@@ -145,9 +145,10 @@ def build_sample(backtests: list[dict], seed: int = 20261006) -> list[dict]:
     sample.extend(rng.sample(low_drift, min(LOW_DRIFT_SAMPLE, len(low_drift))))
     for sid in sorted(by_study):
         group = sorted(by_study[sid], key=lambda b: b["id"])
-        # Roughly 5% of a large sweep, but never fewer than 2 and never more than 8:
-        # combinations within one sweep are near-duplicates, so extra draws buy little.
-        take = max(2, min(8, round(len(group) * 0.05)))
+        # Roughly 2% of a large sweep, floor 2 and ceiling 3. Combinations within one
+        # sweep are near-duplicates, and measured cost is ~140s per backtest for both
+        # sides, so extra draws cost real time and add little coverage.
+        take = max(2, min(3, round(len(group) * 0.02)))
         sample.extend(rng.sample(group, min(take, len(group))))
 
     for b in sample:
