@@ -426,7 +426,7 @@ class TestGreeksCompleteness:
         """Forces multiple chunks and multiple flushes, the configuration that
         triggered the truncation."""
         monkeypatch.setattr(greeks_mod, "_GREEKS_CHUNK_ROWS", 10)
-        monkeypatch.setattr(greeks_mod, "_BATCH_DAYS", 2)
+        monkeypatch.setattr(greeks_mod, "_GREEKS_FLUSH_ROWS", 20)
         con = _con()
         self._seed(con, 250)
         GreeksCalculator(con).run(skip_existing=True)
@@ -467,3 +467,39 @@ class TestGreeksCompleteness:
         monkeypatch.setattr(calc, "_compute_batch", _drop_after_two)
         with pytest.raises(RuntimeError, match="greeks incomplete"):
             calc.run(skip_existing=True)
+
+    def test_insert_size_is_bounded_by_rows_not_chunks(self, monkeypatch):
+        """The flush threshold must be in rows, so a larger chunk size cannot
+        enlarge the INSERT. Chunk-count batching turned a 250k chunk size into
+        5,000,000-row INSERTs and exhausted DuckDB's memory limit."""
+        monkeypatch.setattr(greeks_mod, "_GREEKS_CHUNK_ROWS", 50)
+        monkeypatch.setattr(greeks_mod, "_GREEKS_FLUSH_ROWS", 60)
+        con = _con()
+        self._seed(con, 300)
+
+        insert_sizes: list[int] = []
+
+        class _Spy:
+            """Delegating proxy: DuckDBPyConnection.execute is read-only, so the
+            size of each bulk INSERT is observed through a wrapper instead."""
+
+            def __init__(self, inner):
+                self._inner = inner
+
+            def execute(self, sql, *a, **kw):
+                if "INSERT INTO option_greeks" in sql:
+                    insert_sizes.append(
+                        self._inner.execute("SELECT count(*) FROM _greeks_batch").fetchone()[0]
+                    )
+                return self._inner.execute(sql, *a, **kw)
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        GreeksCalculator(_Spy(con)).run(skip_existing=True)
+
+        assert insert_sizes, "expected at least one bulk INSERT"
+        # Each flush fires as soon as the row threshold is met, so an INSERT can
+        # overshoot by at most one chunk.
+        assert max(insert_sizes) <= 60 + 50
+        assert con.execute("SELECT count(*) FROM option_greeks").fetchone()[0] == 300

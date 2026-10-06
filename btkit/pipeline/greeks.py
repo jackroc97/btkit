@@ -44,10 +44,17 @@ from numba import njit
 # numba JIT releases the GIL, so threads scale well up to the physical core count.
 _GREEKS_WORKERS = min(os.cpu_count() or 4, 8)
 
-# Chunks accumulated before a single bulk INSERT into option_greeks.
-# Each INSERT carries ~0.75 s of fixed DuckDB overhead regardless of size, so
-# batching keeps variable cost dominant.
-_BATCH_DAYS = 20
+# Rows accumulated before a single bulk INSERT into option_greeks. Each INSERT
+# carries ~0.75 s of fixed DuckDB overhead regardless of size, so batching keeps
+# variable cost dominant — but the threshold must be in ROWS, not chunks.
+#
+# It was previously a count of per-trading-day batches (20). Those held ~700 rows
+# each in early years, so an INSERT was tiny; after chunking switched to fixed
+# 250k-row chunks, "20 batches" silently became 5,000,000 rows per INSERT and
+# exhausted a 12.7 GiB limit during index maintenance on option_greeks, which now
+# carries two ART indexes. Keeping the bound in rows makes the INSERT size
+# independent of the chunk size.
+_GREEKS_FLUSH_ROWS = 500_000
 
 # Rows per streamed chunk out of _greek_pending. Bounds peak memory to roughly
 # _GREEKS_CHUNK_ROWS × _GREEKS_WORKERS × 2 rows in flight (~250k rows at the
@@ -319,8 +326,8 @@ class GreeksCalculator:
         written = 0
         completed = 0
 
-        # Results accumulate here until _BATCH_DAYS chunks are ready, then flushed
-        # with a single bulk INSERT to amortise DuckDB's per-statement fixed overhead.
+        # Results accumulate here until _GREEKS_FLUSH_ROWS rows are ready, then
+        # flushed with one bulk INSERT to amortise DuckDB's per-statement overhead.
         accumulated: list[pl.DataFrame] = []
         accumulated_rows = 0
 
@@ -338,8 +345,8 @@ class GreeksCalculator:
 
         # Pipelined parallel execution: the main thread pulls fixed-size chunks from
         # DuckDB (sequential — not thread-safe) and immediately submits the numba
-        # computation to the pool. Completed results are buffered; every _BATCH_DAYS
-        # chunks the buffer is flushed with one bulk INSERT, amortising fixed overhead.
+        # computation to the pool. Completed results are buffered and flushed with one
+        # bulk INSERT each time _GREEKS_FLUSH_ROWS rows are ready.
         #
         # numba @njit(nogil=True) releases the GIL so thread parallelism provides
         # near-linear speedup up to the physical core count.
@@ -367,7 +374,7 @@ class GreeksCalculator:
                 end="",
                 flush=True,
             )
-            if len(accumulated) >= _BATCH_DAYS:
+            if accumulated_rows >= _GREEKS_FLUSH_ROWS:
                 _flush()
 
         # Chunks are addressed by rowid range. A streaming reader
