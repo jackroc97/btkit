@@ -1,0 +1,259 @@
+"""
+Regression tests for duplicate-row insertion during OHLCV ingest.
+
+The defect these cover put 4.84M duplicate option bars and 192k duplicate
+underlying bars into the ES input database (docs/data_duplication_fix.md §2):
+
+  * `_write_df`'s fast path skips the NOT EXISTS existence check for rows newer
+    than `cutoff_ts`. The cutoff was computed once before the ingest loop, so when
+    a later batch re-supplied bars from an overlapping source file those rows still
+    compared as "newer" and were inserted a second time. `_advance_cutoff` keeps the
+    cutoff in step with what has actually been written.
+
+  * A plain INSERT (the old full-build path) has no check at all, so overlapping
+    source files duplicated rows on a full build too. Both paths now dedup.
+
+  * NOT EXISTS cannot deduplicate within the frame being inserted — its subquery
+    sees only the pre-insert table — which is why the caller must hand over a frame
+    already unique on (ts_event, instrument_id).
+
+  * `_work_unit_sort_key` orders work units by the date range in the filename so
+    the cutoff advances monotonically and the fast path stays effective. Zip-name
+    order does not imply date order: a full-history re-download sorts after the
+    incremental zips whose dates it already covers, which is exactly the ES layout.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from pathlib import Path
+
+import duckdb
+import polars as pl
+
+from btkit.db.input_db import INPUT_SCHEMA_SQL
+from btkit.pipeline.builder import _advance_cutoff, _work_unit_sort_key, _write_df
+
+
+def _con() -> duckdb.DuckDBPyConnection:
+    con = duckdb.connect(":memory:")
+    con.execute(INPUT_SCHEMA_SQL)
+    return con
+
+
+def _ts(day: int, hour: int = 14) -> datetime:
+    return datetime(2026, 1, day, hour, 30, tzinfo=UTC)
+
+
+def _bars(timestamps: list[datetime], iid: int = 1) -> pl.DataFrame:
+    """Minimal underlying_bars frame matching the table's column order."""
+    return pl.DataFrame(
+        {
+            "ts_event": timestamps,
+            "instrument_id": [iid] * len(timestamps),
+            "symbol": ["ESH6"] * len(timestamps),
+            "expiration": [None] * len(timestamps),
+            "open": [100.0] * len(timestamps),
+            "high": [101.0] * len(timestamps),
+            "low": [99.0] * len(timestamps),
+            "close": [100.5] * len(timestamps),
+            "volume": [10] * len(timestamps),
+        },
+        schema={
+            "ts_event": pl.Datetime("us", "UTC"),
+            "instrument_id": pl.Int64,
+            "symbol": pl.Utf8,
+            "expiration": pl.Date,
+            "open": pl.Float64,
+            "high": pl.Float64,
+            "low": pl.Float64,
+            "close": pl.Float64,
+            "volume": pl.Int64,
+        },
+    )
+
+
+def _count(con, ts: datetime | None = None) -> int:
+    if ts is None:
+        return con.execute("SELECT count(*) FROM underlying_bars").fetchone()[0]
+    return con.execute("SELECT count(*) FROM underlying_bars WHERE ts_event = ?", [ts]).fetchone()[
+        0
+    ]
+
+
+# ---------------------------------------------------------------------------
+# The core defect: a stale cutoff duplicates re-supplied rows
+# ---------------------------------------------------------------------------
+
+
+class TestStaleCutoffDuplication:
+    def test_stale_cutoff_duplicates_resupplied_rows(self):
+        """Demonstrates the original defect: holding the cutoff at its pre-loop
+        value lets a second batch re-insert bars that are already present."""
+        con = _con()
+        stale = datetime.min.replace(tzinfo=UTC)
+
+        batch = _bars([_ts(5), _ts(6)])
+        _write_df(con, "underlying_bars", batch, skip_existing=True, cutoff_ts=stale)
+        # Same bars again, cutoff NOT advanced — the bug.
+        _write_df(con, "underlying_bars", batch, skip_existing=True, cutoff_ts=stale)
+
+        assert _count(con) == 4  # duplicated
+
+    def test_advanced_cutoff_skips_resupplied_rows(self):
+        """With the cutoff advanced after each write, the re-supplied batch is
+        checked against the table and skipped."""
+        con = _con()
+        cutoff = datetime.min.replace(tzinfo=UTC)
+
+        batch = _bars([_ts(5), _ts(6)])
+        _write_df(con, "underlying_bars", batch, skip_existing=True, cutoff_ts=cutoff)
+        cutoff = _advance_cutoff(cutoff, batch)
+        _write_df(con, "underlying_bars", batch, skip_existing=True, cutoff_ts=cutoff)
+
+        assert _count(con) == 2
+        assert _count(con, _ts(5)) == 1
+        assert _count(con, _ts(6)) == 1
+
+    def test_overlapping_sources_out_of_order(self):
+        """The ES layout: an incremental file, then a history file that re-covers
+        the same dates and extends further. Only the new dates should be added."""
+        con = _con()
+        cutoff = datetime.min.replace(tzinfo=UTC)
+
+        incremental = _bars([_ts(10), _ts(11)])
+        _write_df(con, "underlying_bars", incremental, skip_existing=True, cutoff_ts=cutoff)
+        cutoff = _advance_cutoff(cutoff, incremental)
+
+        history = _bars([_ts(9), _ts(10), _ts(11), _ts(12)])
+        _write_df(con, "underlying_bars", history, skip_existing=True, cutoff_ts=cutoff)
+        cutoff = _advance_cutoff(cutoff, history)
+
+        assert _count(con) == 4
+        for day in (9, 10, 11, 12):
+            assert _count(con, _ts(day)) == 1
+
+    def test_genuinely_new_rows_still_inserted(self):
+        con = _con()
+        cutoff = datetime.min.replace(tzinfo=UTC)
+        first = _bars([_ts(5)])
+        _write_df(con, "underlying_bars", first, skip_existing=True, cutoff_ts=cutoff)
+        cutoff = _advance_cutoff(cutoff, first)
+
+        later = _bars([_ts(6), _ts(7)])
+        _write_df(con, "underlying_bars", later, skip_existing=True, cutoff_ts=cutoff)
+
+        assert _count(con) == 3
+
+    def test_same_timestamp_different_instruments_both_kept(self):
+        con = _con()
+        cutoff = datetime.min.replace(tzinfo=UTC)
+        both = pl.concat([_bars([_ts(5)], iid=1), _bars([_ts(5)], iid=2)])
+        _write_df(con, "underlying_bars", both, skip_existing=True, cutoff_ts=cutoff)
+        assert _count(con) == 2
+
+
+# ---------------------------------------------------------------------------
+# NOT EXISTS does not dedup within the inserted frame
+# ---------------------------------------------------------------------------
+
+
+class TestWithinFrameDuplicates:
+    def test_not_exists_does_not_dedup_within_frame(self):
+        """Documents why the caller must pre-deduplicate: the subquery is evaluated
+        against the pre-insert table, so both copies inside one frame pass."""
+        con = _con()
+        dup_frame = _bars([_ts(5), _ts(5)])
+        _write_df(con, "underlying_bars", dup_frame, skip_existing=True, cutoff_ts=None)
+        assert _count(con, _ts(5)) == 2
+
+    def test_caller_side_unique_prevents_it(self):
+        con = _con()
+        dup_frame = _bars([_ts(5), _ts(5)]).unique(
+            subset=["ts_event", "instrument_id"], keep="first"
+        )
+        _write_df(con, "underlying_bars", dup_frame, skip_existing=True, cutoff_ts=None)
+        assert _count(con, _ts(5)) == 1
+
+
+# ---------------------------------------------------------------------------
+# _advance_cutoff
+# ---------------------------------------------------------------------------
+
+
+class TestAdvanceCutoff:
+    def test_advances_to_frame_max(self):
+        start = datetime.min.replace(tzinfo=UTC)
+        assert _advance_cutoff(start, _bars([_ts(5), _ts(9)])) == _ts(9)
+
+    def test_never_moves_backwards(self):
+        assert _advance_cutoff(_ts(20), _bars([_ts(5)])) == _ts(20)
+
+    def test_none_cutoff_stays_none(self):
+        """None means 'no fast path'; an append that never had a cutoff must keep
+        checking every row."""
+        assert _advance_cutoff(None, _bars([_ts(5)])) is None
+
+    def test_empty_frame_leaves_cutoff_unchanged(self):
+        assert _advance_cutoff(_ts(5), _bars([])) == _ts(5)
+
+
+# ---------------------------------------------------------------------------
+# Chronological work-unit ordering
+# ---------------------------------------------------------------------------
+
+
+class TestWorkUnitSortKey:
+    @staticmethod
+    def _unit(name: str, zip_name: str = "GLBX-20260603-ZZZ.zip"):
+        return (Path(zip_name), name)
+
+    def test_history_file_sorts_before_later_incrementals(self):
+        """The ES case: the history zip name sorts last but its data comes first."""
+        history = self._unit(
+            "glbx-mdp3-20260101-20260131.ohlcv-1m.dbn.zst", "GLBX-20260603-HIST.zip"
+        )
+        incremental = self._unit(
+            "glbx-mdp3-20260422-20260521.ohlcv-1m.dbn.zst", "GLBX-20260522-INC.zip"
+        )
+        assert sorted([incremental, history], key=_work_unit_sort_key) == [history, incremental]
+
+    def test_single_date_filename_parsed(self):
+        unit = self._unit("glbx-mdp3-20260422.ohlcv-1m.dbn.zst")
+        assert _work_unit_sort_key(unit)[:2] == ("20260422", "20260422")
+
+    def test_date_range_filename_parsed(self):
+        unit = self._unit("glbx-mdp3-20260101-20260131.ohlcv-1m.dbn.zst")
+        assert _work_unit_sort_key(unit)[:2] == ("20260101", "20260131")
+
+    def test_full_ordering_is_chronological(self):
+        names = [
+            "glbx-mdp3-20260615-20260930.ohlcv-1m.dbn.zst",
+            "glbx-mdp3-20100606-20100630.ohlcv-1m.dbn.zst",
+            "glbx-mdp3-20260422-20260521.ohlcv-1m.dbn.zst",
+            "glbx-mdp3-20260101-20260421.ohlcv-1m.dbn.zst",
+        ]
+        ordered = sorted((self._unit(n) for n in names), key=_work_unit_sort_key)
+        assert [_work_unit_sort_key(u)[0] for u in ordered] == [
+            "20100606",
+            "20260101",
+            "20260422",
+            "20260615",
+        ]
+
+    def test_unparseable_name_sorts_last_without_raising(self):
+        dated = self._unit("glbx-mdp3-20260101.ohlcv-1m.dbn.zst")
+        odd = self._unit("mystery.ohlcv-1m.dbn.zst")
+        assert sorted([odd, dated], key=_work_unit_sort_key) == [dated, odd]
+
+    def test_zip_date_is_not_used(self):
+        """Only the payload's own date range matters; the zip's download date in the
+        archive name must not influence ordering."""
+        early_data_late_zip = self._unit(
+            "glbx-mdp3-20200101.ohlcv-1m.dbn.zst", "GLBX-20261002-A.zip"
+        )
+        late_data_early_zip = self._unit(
+            "glbx-mdp3-20250101.ohlcv-1m.dbn.zst", "GLBX-20260101-B.zip"
+        )
+        ordered = sorted([late_data_early_zip, early_data_late_zip], key=_work_unit_sort_key)
+        assert ordered == [early_data_late_zip, late_data_early_zip]

@@ -254,6 +254,13 @@ class GreeksCalculator:
         # underlying bar may be (0 minutes ⇒ exact same-minute match, the legacy
         # behaviour); a small window keeps the match within the same session
         # because the only intraday gaps larger than it are hours-long.
+        #
+        # The QUALIFY keeps one pending row per (instrument_id, ts_event). Greeks are
+        # per-bar, so a duplicated option bar would otherwise compute and insert the
+        # same greeks twice: NOT EXISTS only excludes rows already in option_greeks,
+        # and neither copy is there yet. Defence in depth — ingest no longer admits
+        # duplicate bars (docs/data_duplication_fix.md §2) — but it also keeps
+        # option_greeks clean when run against a database that already has them.
         stale_minutes = self.underlying_max_staleness_minutes
         self.con.execute("DROP TABLE IF EXISTS _greek_pending")
         self.con.execute(
@@ -276,6 +283,9 @@ class GreeksCalculator:
             WHERE ob.close IS NOT NULL
               AND ob.ts_event - ub.ts_event <= INTERVAL '{stale_minutes} minutes'{scope_filter}
             {new_only_filter}
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY ob.instrument_id, ob.ts_event ORDER BY ub.ts_event DESC
+            ) = 1
             ORDER BY ob.ts_event, ob.instrument_id
             """,
             scope_params,

@@ -343,16 +343,30 @@ both 2015-03-13 and 2025-03-14). Adding `expiration` resolves these.
 > `(symbol, expiration)` key would split each into two contracts. Isolated, pre-2016, and
 > outside any current backtest window, but worth normalising or flagging.
 
-### This corrects the Phase 4 recommendation
+### `(instrument_id, ts_event)` *is* the right uniqueness key
 
-§6 Phase 4 proposed `PRIMARY KEY (instrument_id, ts_event)`. **That constraint is wrong.**
-For the 2,474 rows where one id carries two different contracts at the same timestamp,
-those rows are *legitimately distinct* — a unique constraint on `(instrument_id, ts_event)`
-would silently drop one, possibly the correct one.
+An earlier draft of this section argued that the 2,474 same-id/same-timestamp rows were
+legitimately distinct contracts, so a unique constraint on `(instrument_id, ts_event)`
+would wrongly drop one. **That was wrong.** All 2,474 carry **identical OHLCV**:
 
-The correct constraint is **`(contract_id, ts_event)`**, and the Phase 2 dedup must be
-keyed the same way. Deduping on `(instrument_id, ts_event)` would conflate genuinely
-different contracts.
+```
+def_conflicts = 2474   def_conflict_same_ohlcv = 2474   def_conflict_diff_ohlcv = 0
+```
+
+Databento's OHLCV feed emits exactly one bar per `(instrument_id, minute)`, so two
+contracts cannot share an id within one bar. These rows are **one source bar ingested
+twice and routed to a different definition each time** — a compound of defect 1 and
+defect 2, not two real bars.
+
+Consequences:
+
+- `UNIQUE (instrument_id, ts_event)` is a correct and sufficient constraint for
+  `option_bars`, so the §6 Phase 4 recommendation stands.
+- But **deduping these 2,474 keys by picking an arbitrary copy would preserve an arbitrary
+  attribution.** Routing (Phase 5) must be fixed *before or during* the rebuild, so each
+  source bar has one correct definition. Dedup alone is not enough for them.
+- `contract_id` is therefore justified by the reasons below — downstream simplification,
+  table width, cross-database stability — and **not** as the uniqueness key.
 
 ### What it buys
 

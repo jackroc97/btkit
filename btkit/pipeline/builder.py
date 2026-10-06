@@ -48,6 +48,7 @@ Called from cli.build() and cli.pipeline().
 from __future__ import annotations
 
 import os
+import re
 import time
 import zipfile
 from collections.abc import Iterator
@@ -256,8 +257,7 @@ class DatabaseBuilder:
                     seg_maps.setdefault(iid, {}).update(segs)
 
         self._instrument_map = {
-            iid: sorted(segs.values(), key=_segment_sort_key)
-            for iid, segs in seg_maps.items()
+            iid: sorted(segs.values(), key=_segment_sort_key) for iid, segs in seg_maps.items()
         }
 
         n_segments = sum(len(v) for v in self._instrument_map.values())
@@ -339,7 +339,7 @@ class DatabaseBuilder:
         if not zip_files:
             raise FileNotFoundError(f"No zip files found in {self.raw_data_path}")
 
-        # Pre-scan → flat (zip_path, filename) work units, sorted chronologically.
+        # Pre-scan → flat (zip_path, filename) work units.
         work_units: list[tuple[Path, str]] = []
         for zp in zip_files:
             work_units.extend(_list_zip_ohlcv_files(zp))
@@ -348,21 +348,34 @@ class DatabaseBuilder:
             print("[ingest] No OHLCV files found — nothing to write")
             return
 
-        # Pre-compute the max timestamp already in each table (once, before the loop).
-        if self.append:
-            ub_cutoff = self._con.execute("SELECT MAX(ts_event) FROM underlying_bars").fetchone()[0]
-            ob_cutoff = self._con.execute("SELECT MAX(ts_event) FROM option_bars").fetchone()[0]
-            if ub_cutoff is not None:
-                ub_cutoff = ub_cutoff.astimezone(UTC)
-            if ob_cutoff is not None:
-                ob_cutoff = ob_cutoff.astimezone(UTC)
-            if ub_cutoff:
-                print(
-                    f"[ingest] existing coverage up to {ub_cutoff.date()} — "
-                    f"skipping NOT EXISTS for newer rows"
-                )
-        else:
-            ub_cutoff = ob_cutoff = None
+        # Process chronologically by the date range encoded in each filename, so the
+        # running cutoff below advances monotonically and the NOT EXISTS fast path
+        # applies to all but genuinely overlapping source files. Zip-name order does
+        # not imply date order: a full-history re-download sorts after the
+        # incremental zips whose dates it already covers.
+        work_units.sort(key=_work_unit_sort_key)
+
+        # The cutoff is the maximum ts_event currently in each table; rows newer than
+        # it cannot collide with an existing row, so they skip the NOT EXISTS check.
+        # It is advanced after every batch (see _advance_cutoff).
+        #
+        # A fresh build starts at datetime.min rather than None so it uses the same
+        # mechanism: overlapping source files duplicate rows on a full build exactly
+        # as they do on an append, because a plain INSERT has no check at all. That is
+        # how 4.84M duplicate option bars entered the ES database.
+        ub_cutoff = self._con.execute("SELECT MAX(ts_event) FROM underlying_bars").fetchone()[0]
+        ob_cutoff = self._con.execute("SELECT MAX(ts_event) FROM option_bars").fetchone()[0]
+        ub_cutoff = (
+            ub_cutoff.astimezone(UTC) if ub_cutoff is not None else datetime.min.replace(tzinfo=UTC)
+        )
+        ob_cutoff = (
+            ob_cutoff.astimezone(UTC) if ob_cutoff is not None else datetime.min.replace(tzinfo=UTC)
+        )
+        if self.append and ub_cutoff > datetime.min.replace(tzinfo=UTC):
+            print(
+                f"[ingest] existing coverage up to {ub_cutoff.date()} — "
+                f"skipping NOT EXISTS for newer rows"
+            )
 
         total_ub = total_ob = 0
         total_gap = total_overlap = 0
@@ -427,12 +440,18 @@ class DatabaseBuilder:
                 )
                 del resolved
 
-                _write_df(
-                    self._con, "underlying_bars", ub, skip_existing=self.append, cutoff_ts=ub_cutoff
-                )
-                _write_df(
-                    self._con, "option_bars", ob, skip_existing=self.append, cutoff_ts=ob_cutoff
-                )
+                _write_df(self._con, "underlying_bars", ub, skip_existing=True, cutoff_ts=ub_cutoff)
+                _write_df(self._con, "option_bars", ob, skip_existing=True, cutoff_ts=ob_cutoff)
+                # Advance each cutoff past what this batch just inserted. The fast
+                # path in _write_df skips the NOT EXISTS check for rows newer than
+                # the cutoff, which is only sound while the cutoff tracks the table's
+                # current maximum. Left at its pre-loop value, a later batch that
+                # re-supplies the same bars from an overlapping source file would
+                # bypass the check and insert a second copy. Tracked in Python rather
+                # than re-querying MAX(ts_event): the index is on (instrument_id,
+                # ts_event), so the aggregate would be a full scan per batch.
+                ub_cutoff = _advance_cutoff(ub_cutoff, ub)
+                ob_cutoff = _advance_cutoff(ob_cutoff, ob)
                 total_ub += len(ub)
                 total_ob += len(ob)
                 del ub, ob
@@ -707,9 +726,9 @@ def _route_bars_to_segments(
                   boolean `_contained` (False ⇒ a gap fallback was used).
       n_overlap — number of bars that matched more than one containing segment.
     """
-    cand = ohlcv.with_columns(
-        pl.col("ts_event").dt.date().alias("_bar_date")
-    ).join(segments, on="instrument_id", how="inner")
+    cand = ohlcv.with_columns(pl.col("ts_event").dt.date().alias("_bar_date")).join(
+        segments, on="instrument_id", how="inner"
+    )
 
     cand = cand.with_columns(
         (
@@ -780,6 +799,46 @@ def _fmt_elapsed(seconds: float) -> str:
     return f"{seconds:.1f}s"
 
 
+_WORK_UNIT_DATE_RE = re.compile(r"(\d{8})(?:-(\d{8}))?")
+
+
+def _work_unit_sort_key(work: tuple[Path, str]) -> tuple[str, str, str]:
+    """Chronological sort key for an OHLCV work unit, from the date range in its name.
+
+    Databento names payloads `glbx-mdp3-YYYYMMDD.ohlcv-1m.dbn.zst` or
+    `glbx-mdp3-YYYYMMDD-YYYYMMDD.ohlcv-1m.dbn.zst`, so the first 8-digit run is the
+    start date and the optional second is the end date. Sorting on (start, end) makes
+    the ingest loop advance through time, which keeps the _write_df cutoff fast path
+    effective; without it the loop follows zip-name order, where a full-history
+    re-download trails the incremental zips it overlaps.
+
+    Names without a parseable date sort last but keep a stable relative order, so an
+    unexpected naming scheme degrades to "always check" rather than failing.
+    """
+    _, filename = work
+    match = _WORK_UNIT_DATE_RE.search(Path(filename).name)
+    if match is None:
+        return ("99999999", "99999999", filename)
+    start = match.group(1)
+    return (start, match.group(2) or start, filename)
+
+
+def _advance_cutoff(cutoff, df: pl.DataFrame):
+    """Return the later of `cutoff` and the maximum ts_event in `df`.
+
+    Keeps the _write_df fast-path cutoff in step with what has actually been
+    inserted, so rows re-supplied by a later batch are still checked for existence.
+    A None cutoff means "no fast path" and stays None: appends that never had a
+    cutoff must keep checking every row.
+    """
+    if cutoff is None or df.is_empty():
+        return cutoff
+    batch_max = df["ts_event"].max()
+    if batch_max is None:
+        return cutoff
+    return max(cutoff, batch_max)
+
+
 def _write_df(
     con: duckdb.DuckDBPyConnection,
     table: str,
@@ -795,6 +854,18 @@ def _write_df(
     When cutoff_ts is provided, rows strictly after that timestamp are
     unambiguously new and bypass the NOT EXISTS check entirely. Only rows at or
     before the cutoff (the potential overlap window) go through NOT EXISTS.
+
+    cutoff_ts MUST be the maximum ts_event present in the table *right now*, not
+    merely the maximum from before the ingest loop started. The fast path's premise
+    is "no existing row has a timestamp this late", which only holds against the
+    table's current contents. Callers therefore advance the cutoff after every write
+    (see _ingest_ohlcv). A stale cutoff silently duplicates every row that a later
+    batch re-supplies from an overlapping source file — the defect that put 4.84M
+    duplicate option bars into the ES database. See docs/data_duplication_fix.md §2.
+
+    Note also that NOT EXISTS cannot deduplicate *within* df: the subquery is
+    evaluated against the pre-insert table, so two copies of a key inside df both
+    pass. Callers must hand over a frame already unique on (ts_event, instrument_id).
     """
     if df.is_empty():
         return
