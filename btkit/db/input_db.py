@@ -10,6 +10,7 @@ the file read-only — it cannot modify the database.
 
 from __future__ import annotations
 
+import os
 from datetime import date, datetime, timedelta
 
 import duckdb
@@ -198,8 +199,15 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY row_id ORDER BY time_diff, strike_diff) 
 """
 
 
+# Default DuckDB buffer-pool ceiling for read-only query connections. Override per
+# instance or with BTKIT_MEMORY_LIMIT. Chosen to leave headroom on a 16-17 GB host
+# while being ample for the engine's largest pre-load (a few hundred MB of leg bars).
+_DEFAULT_QUERY_MEMORY_LIMIT = "4GB"
+_QUERY_TEMP_DIR = "/tmp/duckdb_query_tmp"
+
+
 class InputDatabase:
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, memory_limit: str | None = None) -> None:
         self._con = duckdb.connect(db_path, read_only=True)
         # Every timestamp in this codebase (Polars Datetime("us","UTC") columns,
         # option_greeks.dte's own derivation, etc.) is computed on a UTC basis.
@@ -207,6 +215,18 @@ class InputDatabase:
         # session TimeZone, which defaults to the host's local zone — pin it to
         # UTC so any date-bucketing done in SQL agrees with Python-side bucketing.
         self._con.execute("SET TimeZone='UTC'")
+
+        # Cap DuckDB's buffer pool. Left at the default (~80% of physical RAM) a
+        # single backtest can drive the host into swap: on a 17 GB machine, replaying
+        # stored backtests pushed swap to 5.3 GB of 6.1 GB and one backtest consumed
+        # 21 of 31 elapsed minutes, almost all of it thrashing rather than computing.
+        # Spilling to disk is far cheaper than paging.
+        #
+        # Query *results* are unaffected — the limit only changes whether DuckDB
+        # spills — so this cannot alter backtest output, only its memory profile.
+        limit = memory_limit or os.environ.get("BTKIT_MEMORY_LIMIT", _DEFAULT_QUERY_MEMORY_LIMIT)
+        self._con.execute(f"SET memory_limit='{limit}'")
+        self._con.execute(f"SET temp_directory='{_QUERY_TEMP_DIR}'")
 
     # ------------------------------------------------------------------
     # Underlying bars
