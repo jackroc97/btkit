@@ -195,20 +195,29 @@ instrument.
 ### The authoritative resolution signal
 
 `activation`/`expiration` describe the **contract's** lifetime, not the period during which
-the id referred to it, which is why they overlap and tie. The reliable signal is **which
-definition snapshot reported the mapping**: Databento publishes definition snapshots per
-day or period, and the mapping valid on day D is the one in the snapshot covering D.
+the id referred to it, which is why they overlap and tie. The reliable signal is each
+definition record's own **`ts_event`** — when the exchange published that id → contract
+mapping. The mapping in force for a bar is the latest one published at or before it.
 
-Both sample cases resolve cleanly under that rule:
+This is better than parsing the snapshot filename: it needs no filename convention and
+handles a reassignment that happens part-way through a range file.
 
-| id | Bar date | Snapshot covering the date reports | Competing contract appears only in |
-|---|---|---|---|
-| 116864 | 2022-09-01 | `E1CU2 P4060` ✅ | October 2022 snapshot |
-| 120342 | 2023-03-10 | `E5DH3 C3990` ✅ | April 2023 snapshot |
+Publication windows turn out to be **disjoint per id**, so there is no tie left to break:
 
-The snapshot period is available from the filename
-(`glbx-mdp3-20220901-20220930.definition.dbn.zst`, or a single date for daily files) and
-from the DBN metadata's start/end.
+```
+instrument_id 116864
+  rank 0  E1CU2 P4060   pub [begin        -> 2022-10-02 16:01:37)   act=2022-08-03 exp=2022-09-07
+  rank 1  E1AV2 P2880   pub [2022-10-02   -> 2023-02-09 23:55:54)   act=2022-08-29 exp=2022-10-03
+  rank 2  E4AH3 C4375   pub [2023-02-09   -> end               )   act=2023-02-07 exp=2023-03-27
+```
+
+The activation windows overlap (2022-08-29 → 09-07) and are both 35 days, which is what
+made the old tie-break a coin flip. The publication windows do not overlap at all.
+`E1AV2 P2880` was first published 2022-10-02 — a month *after* the 2022-09-01 bar — even
+though its activation precedes it.
+
+Implemented and verified against real vendor definition files: all six probe cases route
+correctly, including bars inside the later contract's window, with `n_overlap = 0`.
 
 ### Impact
 
@@ -287,28 +296,33 @@ Two changes, both needed:
   constraint in place, the fast path's premise ("newer than the pre-run max is
   unambiguously new") is false whenever one run ingests overlapping sources.
 
-### Phase 5 — Fix definition routing
+### Phase 5 — Fix definition routing ✅ DONE
 
-Cause is confirmed (§5): systematic `(_dist, _win)` ties resolved by an unstable sort.
+Cause confirmed (§5): systematic `(_dist, _win)` ties resolved by an unstable sort.
 
-1. **Route by definition-snapshot coverage, not by `activation`/`expiration`.** Record each
-   definition record's snapshot period in `_scan_definition_file` (parse it from the
-   filename, or read the DBN metadata start/end), key segments by
-   `(snapshot_period, activation, expiration)`, and in `_route_bars_to_segments` match the
-   bar's date against the snapshot period. This is authoritative and removes the tie
-   entirely rather than breaking it arbitrarily.
-2. **Make the tie-break deterministic as a safety net** — append explicit trailing sort
-   keys (`seg_expiration`, `strike_price`, `right`) and pass `maintain_order=True`, so any
-   residual ambiguity resolves the same way every run instead of varying.
-3. **Route per `(instrument_id, bar_date)`, not per `(instrument_id, ts_event)`,** so one
-   definition per id-day holds by construction.
-4. **Day boundary:** definition snapshots are per UTC date and Databento states the
-   guarantee per day, so route on the UTC date. (The CME session date is the better fit for
-   *session* semantics but would not match the snapshot boundaries.)
-5. **Add an ingest-time assertion** that no `(instrument_id, bar_date)` resolves to more
-   than one definition, so a regression fails loudly instead of silently.
-6. Re-ingest or re-route the affected bars; 403 violating id-days fall in 2026 and reach
-   the live-comparison window.
+Implemented:
+
+1. `_scan_definition_file` records each definition's `pub_from` (earliest `ts_event` at
+   which it was published) and keys segments on full contract identity
+   `(activation, expiration, raw_symbol)` rather than the validity window alone, which
+   could collapse two contracts sharing a window.
+2. `_order_segments` sorts an id's definitions by publication time; `_build_segments_frame`
+   derives back-to-back windows `[_pub_from, _pub_to)` where each contract owns the id
+   until the next mapping is published. The first segment opens at the beginning of time so
+   bars predating our definition coverage still classify; the last runs to the end of time.
+3. `_route_bars_to_segments` prefers the segment whose publication window contains the bar,
+   falling back to the old `[activation, expiration]` distance rule only for ids with no
+   publication timestamp, and using `_seg_rank` as a final tie-break so the outcome can
+   never depend on row order.
+
+Still outstanding:
+
+- **Re-ingest the affected bars.** The fix corrects routing for *new* ingests; the 3,875
+  existing violating id-days are repaired only by the rebuild (Phase 2/3).
+- **Greeks must be recomputed** for any bar whose attribution changes: strike, right and
+  expiration feed the Black-76 inputs, and delta drives leg selection, so entries can move.
+- Consider an ingest-time assertion that no `(instrument_id, bar_date)` resolves to two
+  definitions. The `ID_DAY_COLLISION` audit flag already detects it after the fact.
 
 ---
 

@@ -95,6 +95,7 @@ class _InstrumentInfo:
         "right",
         "multiplier",
         "underlying_id",
+        "pub_from",
     )
 
     def __init__(
@@ -107,6 +108,7 @@ class _InstrumentInfo:
         right: str | None,  # 'C', 'P', or None for futures
         multiplier: int,
         underlying_id: int,
+        pub_from=None,  # datetime (UTC) — earliest ts_event this definition was published
     ) -> None:
         self.instrument_class = instrument_class
         self.raw_symbol = raw_symbol
@@ -116,6 +118,7 @@ class _InstrumentInfo:
         self.right = right
         self.multiplier = multiplier
         self.underlying_id = underlying_id
+        self.pub_from = pub_from
 
 
 # ---------------------------------------------------------------------------
@@ -247,17 +250,27 @@ class DatabaseBuilder:
                 f"No definition files found in zip archives under {self.raw_data_path}"
             )
 
-        # instrument_id → {(activation, expiration): _InstrumentInfo}. Keying by the
-        # validity window de-duplicates the same definition reported across many
-        # daily snapshot files while preserving genuinely distinct (recycled) ones.
+        # instrument_id → {(activation, expiration, raw_symbol): _InstrumentInfo}.
+        # Keying by contract identity de-duplicates the same definition reported
+        # across many daily snapshot files while preserving genuinely distinct
+        # (recycled) ones. A definition republished in several files keeps its
+        # EARLIEST ts_event, which is when the id started referring to that contract.
         seg_maps: dict[int, dict[tuple, _InstrumentInfo]] = {}
         with ThreadPoolExecutor(max_workers=_INGEST_WORKERS) as pool:
             for partial_map in pool.map(_scan_definition_file, work_units):
                 for iid, segs in partial_map.items():
-                    seg_maps.setdefault(iid, {}).update(segs)
+                    target = seg_maps.setdefault(iid, {})
+                    for key, info in segs.items():
+                        existing = target.get(key)
+                        if existing is None:
+                            target[key] = info
+                        elif info.pub_from is not None and (
+                            existing.pub_from is None or info.pub_from < existing.pub_from
+                        ):
+                            existing.pub_from = info.pub_from
 
         self._instrument_map = {
-            iid: sorted(segs.values(), key=_segment_sort_key) for iid, segs in seg_maps.items()
+            iid: _order_segments(segs.values()) for iid, segs in seg_maps.items()
         }
 
         n_segments = sum(len(v) for v in self._instrument_map.values())
@@ -304,36 +317,7 @@ class DatabaseBuilder:
         # sentinel-filled so a missing activation/expiration never excludes an
         # otherwise-valid bar; the real (possibly null) expiration is carried
         # separately (seg_expiration) for the output row.
-        segments = pl.DataFrame(
-            [
-                {
-                    "instrument_id": iid,
-                    "instrument_class": seg.instrument_class,
-                    "symbol": seg.raw_symbol,
-                    "seg_expiration": seg.expiration,
-                    "underlying_id": seg.underlying_id,
-                    "strike_price": seg.strike_price,
-                    "right": seg.right,
-                    "multiplier": seg.multiplier,
-                    "_act": seg.activation or date(1970, 1, 1),
-                    "_exp_route": seg.expiration or date(9999, 12, 31),
-                }
-                for iid, segs in self._instrument_map.items()
-                for seg in segs
-            ],
-            schema={
-                "instrument_id": pl.Int64,
-                "instrument_class": pl.Utf8,
-                "symbol": pl.Utf8,
-                "seg_expiration": pl.Date,
-                "underlying_id": pl.Int64,
-                "strike_price": pl.Float64,
-                "right": pl.Utf8,
-                "multiplier": pl.Int64,
-                "_act": pl.Date,
-                "_exp_route": pl.Date,
-            },
-        )
+        segments = _build_segments_frame(self._instrument_map)
 
         zip_files = sorted(self.raw_data_path.glob("*.zip"))
         if not zip_files:
@@ -628,6 +612,105 @@ def _ns_to_date(ns: int) -> date | None:
     )
 
 
+def _ns_to_datetime(ns: int) -> datetime | None:
+    """Convert a Databento ns UNIX timestamp to a UTC datetime, or None if unset.
+
+    Same sentinel handling as _ns_to_date, but keeps the time of day — definition
+    publication times matter to the minute when an instrument_id is reassigned.
+    """
+    return (
+        datetime.fromtimestamp(ns / 1_000_000_000, tz=UTC)
+        if 0 < ns < 9_000_000_000_000_000_000
+        else None
+    )
+
+
+_SEGMENTS_SCHEMA = {
+    "instrument_id": pl.Int64,
+    "instrument_class": pl.Utf8,
+    "symbol": pl.Utf8,
+    "seg_expiration": pl.Date,
+    "underlying_id": pl.Int64,
+    "strike_price": pl.Float64,
+    "right": pl.Utf8,
+    "multiplier": pl.Int64,
+    "_act": pl.Date,
+    "_exp_route": pl.Date,
+    "_pub_from": pl.Datetime("us", "UTC"),
+    "_pub_to": pl.Datetime("us", "UTC"),
+    "_seg_rank": pl.Int64,
+}
+
+_PUB_MIN = datetime.min.replace(tzinfo=UTC)
+_PUB_MAX = datetime.max.replace(tzinfo=UTC, microsecond=0)
+
+
+def _build_segments_frame(instrument_map: dict[int, list[_InstrumentInfo]]) -> pl.DataFrame:
+    """Flatten the instrument map into the routing lookup table.
+
+    Each definition gets a publication validity window [_pub_from, _pub_to):
+
+      * `_pub_from` is when the exchange first published this id → contract mapping.
+        The FIRST segment for an id is widened to the beginning of time so bars that
+        precede our definition coverage are still classified rather than dropped.
+      * `_pub_to` is the next segment's `_pub_from`, so each contract owns the id
+        until the id is reassigned. The last segment runs to the end of time.
+
+    `_seg_rank` is the segment's position in publication order, used as a final
+    deterministic tie-break so routing can never depend on row order.
+
+    `_act` / `_exp_route` are retained as a fallback for ids whose definitions carry
+    no publication timestamp at all.
+    """
+    rows: list[dict] = []
+    for iid, segs in instrument_map.items():
+        for rank, seg in enumerate(segs):
+            # The next segment's publication time closes this one's window.
+            nxt = segs[rank + 1] if rank + 1 < len(segs) else None
+            pub_to = nxt.pub_from if nxt is not None and nxt.pub_from is not None else _PUB_MAX
+            pub_from = seg.pub_from if seg.pub_from is not None else _PUB_MIN
+            if rank == 0:
+                pub_from = _PUB_MIN
+            rows.append(
+                {
+                    "instrument_id": iid,
+                    "instrument_class": seg.instrument_class,
+                    "symbol": seg.raw_symbol,
+                    "seg_expiration": seg.expiration,
+                    "underlying_id": seg.underlying_id,
+                    "strike_price": seg.strike_price,
+                    "right": seg.right,
+                    "multiplier": seg.multiplier,
+                    "_act": seg.activation or date(1970, 1, 1),
+                    "_exp_route": seg.expiration or date(9999, 12, 31),
+                    "_pub_from": pub_from,
+                    "_pub_to": max(pub_to, pub_from),
+                    "_seg_rank": rank,
+                }
+            )
+    return pl.DataFrame(rows, schema=_SEGMENTS_SCHEMA)
+
+
+def _order_segments(segs) -> list[_InstrumentInfo]:
+    """Order one instrument_id's definitions by publication time.
+
+    Sorting by pub_from puts a recycled id's contracts in the order the exchange
+    actually assigned them, which is what _route_bars_to_segments needs to derive
+    each one's validity window. Definitions with no publication timestamp sort
+    first by (activation, expiration) so they are superseded by any dated
+    definition rather than shadowing one.
+    """
+    return sorted(
+        segs,
+        key=lambda s: (
+            s.pub_from is not None,
+            s.pub_from or datetime.min.replace(tzinfo=UTC),
+            _segment_sort_key(s),
+            s.raw_symbol,
+        ),
+    )
+
+
 def _segment_sort_key(seg: _InstrumentInfo) -> tuple[date, date]:
     """Sort validity segments chronologically (None sorts first)."""
     return (seg.activation or date.min, seg.expiration or date.min)
@@ -638,10 +721,15 @@ def _scan_definition_file(
 ) -> dict[int, dict[tuple, _InstrumentInfo]]:
     """
     Parse one *.definition.dbn.zst file and return, per instrument_id, the
-    distinct definitions it contains keyed by their (activation, expiration)
-    validity window.
+    distinct definitions it contains keyed by contract identity.
 
-    Returning per-window segments (not a single winner) is what lets the main
+    Each definition also carries `pub_from`: the earliest ts_event at which this
+    file published it. That publication timestamp — not activation/expiration — is
+    what resolves a recycled instrument_id, because activation describes when the
+    *contract* was listed, which can precede the period the id referred to it by
+    weeks. See _route_bars_to_segments and docs/data_duplication_fix.md §5.
+
+    Returning per-contract segments (not a single winner) is what lets the main
     thread reconstruct a recycled ID's full timeline: an ID that was a future in
     one window and an option in another yields two entries here, unioned across
     files by _ingest_definitions.
@@ -661,22 +749,32 @@ def _scan_definition_file(
         icls = row["instrument_class"].decode("ascii")
         act_date = _ns_to_date(int(row["activation"]))
         exp_date = _ns_to_date(int(row["expiration"]))
-        key = (act_date, exp_date)
+        raw_symbol = row["raw_symbol"].decode("ascii").rstrip("\x00")
+        # Key on full contract identity, not just the validity window: the same id
+        # can carry two contracts whose (activation, expiration) windows coincide,
+        # and collapsing them would silently discard one.
+        key = (act_date, exp_date, raw_symbol)
+        pub_ts = _ns_to_datetime(int(row["ts_event"]))
         segs = result.setdefault(iid, {})
-        if key in segs:
+        existing = segs.get(key)
+        if existing is not None:
+            # Same definition republished — keep the earliest publication time.
+            if pub_ts is not None and (existing.pub_from is None or pub_ts < existing.pub_from):
+                existing.pub_from = pub_ts
             continue
         right = icls if icls in ("C", "P") else None
         strike = float(row["strike_price"]) / 1e9 if icls in ("C", "P") else None
         uom = int(row["unit_of_measure_qty"])
         segs[key] = _InstrumentInfo(
             instrument_class=icls,
-            raw_symbol=row["raw_symbol"].decode("ascii").rstrip("\x00"),
+            raw_symbol=raw_symbol,
             activation=act_date,
             expiration=exp_date,
             strike_price=strike,
             right=right,
             multiplier=round(uom / 1e9) if uom > 0 else 50,
             underlying_id=int(row["underlying_id"]),
+            pub_from=pub_ts,
         )
     return result
 
@@ -706,31 +804,53 @@ def _route_bars_to_segments(
     segments: pl.DataFrame,
 ) -> tuple[pl.DataFrame, int]:
     """
-    Resolve each OHLCV bar to the instrument definition (segment) whose validity
-    window contains the bar's ts_event date.
+    Resolve each OHLCV bar to the instrument definition (segment) that the exchange
+    had published for its instrument_id at the time of the bar.
 
-    Because the data vendor recycles instrument_ids, a single ID may map to
-    several definitions over time (e.g. a future, then an option). Bars are
-    inner-joined to segments on instrument_id (bars whose ID has no definition are
-    dropped, matching the original routing) and, per bar, the best segment is
-    chosen:
-      * a segment that CONTAINS the bar beats one that does not;
-      * among containing segments (overlap — a rare data anomaly) the tightest
-        window wins;
-      * when NO segment contains the bar (a gap between windows — also rare) the
-        nearest segment by date distance wins, so the bar is reclassified rather
-        than dropped (row conservation).
+    Because the data vendor recycles instrument_ids, a single ID may map to several
+    definitions over time (e.g. a future, then an option). Bars are inner-joined to
+    segments on instrument_id (bars whose ID has no definition are dropped, matching
+    the original routing) and, per bar, the winning segment is the one whose
+    publication window [_pub_from, _pub_to) contains the bar's ts_event.
+
+    Why publication time and not [activation, expiration]
+    -----------------------------------------------------
+    Routing used to pick the segment whose [activation, expiration] window contained
+    the bar date, breaking ties on the tightest window. `activation` is when the
+    *contract* was listed, which can precede the period the id referred to it by
+    weeks, so a recycled id's windows overlap. Worse, CME lists options with fixed
+    tenors, so a recycled id's two contracts have IDENTICAL window lengths and the
+    tie-break was a coin flip resolved by `pl.DataFrame.sort()`, which is not stable.
+    A random sample of 24 affected id-days in the ES database found a tie in 24 of
+    24 cases. That is how 3,875 instrument-days ended up carrying two contracts.
+
+    A definition record's own ts_event is when the exchange announced the mapping, so
+    the mapping in force for a bar is simply the latest one published at or before
+    it. Those publication windows are disjoint per id by construction, so there is no
+    tie to break. Worked examples are in docs/data_duplication_fix.md §5.
+
+    Fallbacks, in order:
+      * the publication window containing the bar (the normal path);
+      * failing that — an id whose definitions carry no publication timestamp at all —
+        the [activation, expiration] containment rule, nearest window by date
+        distance, so the bar is reclassified rather than dropped (row conservation);
+      * `_seg_rank` last, so the outcome never depends on row order.
 
     Returns (resolved, n_overlap):
       resolved  — one row per input bar with the winning segment's columns and a
-                  boolean `_contained` (False ⇒ a gap fallback was used).
-      n_overlap — number of bars that matched more than one containing segment.
+                  boolean `_contained` (False ⇒ a date-distance fallback was used).
+      n_overlap — number of bars matching more than one publication window. Expected
+                  to be 0; a non-zero count means the source definitions disagree.
     """
     cand = ohlcv.with_columns(pl.col("ts_event").dt.date().alias("_bar_date")).join(
         segments, on="instrument_id", how="inner"
     )
 
     cand = cand.with_columns(
+        # Published window containing the bar — the authoritative match.
+        (
+            (pl.col("ts_event") >= pl.col("_pub_from")) & (pl.col("ts_event") < pl.col("_pub_to"))
+        ).alias("_in_pub"),
         (
             (pl.col("_bar_date") >= pl.col("_act")) & (pl.col("_bar_date") <= pl.col("_exp_route"))
         ).alias("_contained"),
@@ -742,20 +862,32 @@ def _route_bars_to_segments(
         ).alias("_dist"),
     )
 
+    # Bars matching more than one publication window. Publication windows are built
+    # back-to-back per instrument_id so this should be zero; it is reported rather
+    # than assumed so a vendor-side contradiction is visible in the ingest summary.
     n_overlap = (
-        cand.filter(pl.col("_contained"))
+        cand.filter(pl.col("_in_pub"))
         .group_by(["ts_event", "instrument_id"])
         .len()
         .filter(pl.col("len") > 1)
         .height
     )
 
-    # Winner per (ts_event, instrument_id): _dist asc puts a containing segment
-    # (dist 0) first — or the nearest gap segment otherwise — and _win asc breaks
-    # ties in favour of the tightest window.
-    resolved = cand.sort(["ts_event", "instrument_id", "_dist", "_win"]).unique(
-        subset=["ts_event", "instrument_id"], keep="first"
-    )
+    # Winner per (ts_event, instrument_id). Sort keys, in order:
+    #   _in_pub desc  — a published match beats any fallback
+    #   _dist asc     — fallback only: a containing window beats a distant one
+    #   _win asc      — fallback only: tightest window
+    #   _seg_rank asc — final deterministic tie-break, so an unstable sort cannot
+    #                   make the result depend on row order
+    resolved = cand.sort(
+        ["ts_event", "instrument_id", "_in_pub", "_dist", "_win", "_seg_rank"],
+        descending=[False, False, True, False, False, False],
+    ).unique(subset=["ts_event", "instrument_id"], keep="first")
+
+    # A bar matched by publication window is correctly classified even if it sits
+    # outside the contract's [activation, expiration] dates, so do not report it as
+    # a gap fallback.
+    resolved = resolved.with_columns((pl.col("_contained") | pl.col("_in_pub")).alias("_contained"))
     return resolved, n_overlap
 
 
