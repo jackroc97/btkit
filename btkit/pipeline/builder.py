@@ -595,12 +595,59 @@ class DatabaseBuilder:
                 underlyings = con.execute(
                     "SELECT DISTINCT instrument_id FROM underlying_bars"
                 ).fetchall()
-                for script_path in self.indicator_scripts:
+                usable = self._preflight_indicators(con, underlyings)
+                for script_path in usable:
                     runner = IndicatorRunner(con, script_path)
                     for (underlying_id,) in underlyings:
                         runner.run(underlying_id)
         finally:
             con.close()
+
+    def _preflight_indicators(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        underlyings: list[tuple],
+    ) -> list[str | Path]:
+        """Return the indicator scripts that actually run, warning about the rest.
+
+        Each script is exercised against one underlying before the real pass. A
+        script can fail for reasons that only appear when it is called — an
+        undeclared import (ves.py needs scipy, which is not a btkit dependency) or
+        a context method that does not exist (weekly_ema21.py calls
+        ctx.continuous_underlying_bars(), which its own docstring notes "is not a
+        real method in btkit today").
+
+        Previously either of those aborted the whole build *after* the definitions,
+        ingest and greeks phases had completed, throwing away the expensive work for
+        a broken auxiliary script. Now the failures are reported together, up front,
+        and the remaining scripts still run.
+        """
+        scripts = list(self.indicator_scripts or [])
+        if not scripts or not underlyings:
+            return scripts
+
+        probe_id = underlyings[0][0]
+        usable: list[str | Path] = []
+        failed: list[tuple[str, str]] = []
+        for script_path in scripts:
+            try:
+                IndicatorRunner(con, script_path).run(probe_id)
+            except Exception as exc:  # noqa: BLE001 - any failure disqualifies it
+                failed.append((str(script_path), f"{type(exc).__name__}: {exc}"))
+            else:
+                usable.append(script_path)
+
+        if failed:
+            print(f"[indicators] {len(failed)} script(s) failed and will be skipped:")
+            for name, err in failed:
+                print(f"[indicators]   {Path(name).name}: {err}")
+        if not usable:
+            raise RuntimeError(
+                "every indicator script failed its pre-flight; "
+                "see the messages above. Pass --indicators with working scripts, "
+                "or omit it to build without indicators."
+            )
+        return usable
 
     def _run_indicators_scoped(self, con: duckdb.DuckDBPyConnection) -> None:
         """
