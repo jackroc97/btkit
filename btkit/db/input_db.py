@@ -112,6 +112,14 @@ CREATE TABLE IF NOT EXISTS indicator_bars (
     indicator_id    INTEGER         NOT NULL REFERENCES indicator_definition(id),
     value           DOUBLE
 );
+-- Created upfront, unlike the option_bars/option_greeks indexes, because it CANNOT
+-- be built in bulk afterwards. A CREATE INDEX over indicator_bars' ~461M rows needs
+-- the whole ART structure resident at once and exhausts a 17 GB machine — it failed
+-- at 13GB with 8, 2 and 1 threads alike. Maintained incrementally as the indicator
+-- phase writes, pages can be evicted to disk as they go, which is how the original
+-- database acquired this index over even more rows.
+CREATE INDEX IF NOT EXISTS idx_indicator_bars
+    ON indicator_bars (indicator_id, ts_event);
 """
 
 # Indexes on the three largest tables (~70M option bars, ~69M greeks rows and
@@ -132,8 +140,6 @@ CREATE INDEX IF NOT EXISTS idx_option_bars_instrument
     ON option_bars (instrument_id, ts_event);
 CREATE INDEX IF NOT EXISTS idx_option_greeks_lookup
     ON option_greeks (underlying_id, dte, ts_event);
-CREATE INDEX IF NOT EXISTS idx_indicator_bars
-    ON indicator_bars (indicator_id, ts_event);
 """
 
 # Tables plus every index, for callers that need the finished shape of the

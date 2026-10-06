@@ -22,12 +22,11 @@ from btkit.db.input_db import (
     INPUT_TABLES_SQL,
 )
 
-# Indexes on the three largest tables, created only after the data is loaded.
+# Indexes created only after the data is loaded.
 DEFERRED = {
     "idx_option_bars_lookup",
     "idx_option_bars_instrument",
     "idx_option_greeks_lookup",
-    "idx_indicator_bars",
 }
 
 # Small indexes the build itself queries through: the greeks ASOF join against
@@ -36,6 +35,11 @@ UPFRONT = {
     "idx_underlying_bars",
     "idx_underlying_bars_expiry",
     "idx_indicator_def_unique",
+    # Upfront by necessity, not size: a bulk CREATE INDEX over indicator_bars'
+    # ~461M rows cannot complete on a 17 GB machine (it failed at a 13GB limit with
+    # 8, 2 and 1 threads), whereas incremental maintenance during the indicator
+    # phase lets pages spill to disk as they are written.
+    "idx_indicator_bars",
 }
 
 
