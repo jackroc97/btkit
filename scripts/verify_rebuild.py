@@ -38,6 +38,60 @@ def _check(label: str, actual, expected, failures: list[str]) -> None:
         failures.append(f"{label}: got {actual}, expected {expected}")
 
 
+def _report_lost_instruments(new_path: str, old_path: str) -> None:
+    """Report instrument_ids present in the old database but absent from the new one.
+
+    Routing inner-joins bars to definition records, so an id whose definition is no
+    longer in raw_data/ loses its bars. The original ES database was built
+    incrementally over months, and it holds bars for 7,638 ids more than today's
+    definition files can route — those bars cannot be reproduced without
+    re-downloading the definition ranges that covered them.
+
+    The per-month breakdown is the actionable part: it says which ranges to re-request
+    from Databento.
+    """
+    probe = duckdb.connect(":memory:")
+    probe.execute("SET threads TO 4")
+    probe.execute(f"ATTACH '{old_path}' AS o (READ_ONLY)")
+    probe.execute(f"ATTACH '{new_path}' AS n (READ_ONLY)")
+
+    lost = probe.execute(
+        """
+        WITH old_ids AS (SELECT DISTINCT instrument_id FROM o.option_bars),
+             new_ids AS (SELECT DISTINCT instrument_id FROM n.option_bars)
+        SELECT instrument_id FROM old_ids
+        WHERE instrument_id NOT IN (SELECT instrument_id FROM new_ids)
+        """
+    ).pl()
+
+    print("\n  Instruments present in the old database but not the new one:")
+    if lost.is_empty():
+        print("    none")
+        probe.close()
+        return
+
+    ids = lost["instrument_id"].to_list()
+    probe.register("_lost", lost)
+    detail = probe.execute(
+        """
+        SELECT strftime(ts_event, '%Y-%m') AS month,
+               count(*) AS bars,
+               count(DISTINCT instrument_id) AS instruments
+        FROM o.option_bars
+        WHERE instrument_id IN (SELECT instrument_id FROM _lost)
+        GROUP BY 1 ORDER BY 1
+        """
+    ).pl()
+    total_bars = int(detail["bars"].sum())
+    print(f"    {len(ids):,} instrument_ids, {total_bars:,} bars")
+    print("    These lack a definition record in the current raw_data/, so routing")
+    print("    drops them. Re-download the definition files for these months to recover:")
+    print(f"      {'month':>9} {'bars':>10} {'instruments':>12}")
+    for row in detail.iter_rows(named=True):
+        print(f"      {row['month']:>9} {row['bars']:>10,} {row['instruments']:>12,}")
+    probe.close()
+
+
 def verify(new_path: str, old_path: str | None) -> int:
     failures: list[str] = []
     con = duckdb.connect(new_path, read_only=True)
@@ -137,9 +191,7 @@ def verify(new_path: str, old_path: str | None) -> int:
         print("\n  option_bars by year:")
         print(f"    {'year':>6} {'old':>14} {'new':>14} {'delta':>12} {'unique_old':>14}")
         old_year = dict(
-            old.execute(
-                "SELECT year(ts_event), count(*) FROM option_bars GROUP BY 1"
-            ).fetchall()
+            old.execute("SELECT year(ts_event), count(*) FROM option_bars GROUP BY 1").fetchall()
         )
         old_year_uniq = dict(
             old.execute(
@@ -149,9 +201,7 @@ def verify(new_path: str, old_path: str | None) -> int:
             ).fetchall()
         )
         new_year = dict(
-            con.execute(
-                "SELECT year(ts_event), count(*) FROM option_bars GROUP BY 1"
-            ).fetchall()
+            con.execute("SELECT year(ts_event), count(*) FROM option_bars GROUP BY 1").fetchall()
         )
         for y in sorted(set(old_year) | set(new_year)):
             o, n, u = old_year.get(y, 0), new_year.get(y, 0), old_year_uniq.get(y, 0)
@@ -178,6 +228,7 @@ def verify(new_path: str, old_path: str | None) -> int:
             if "distinct" in label and n < o:
                 failures.append(f"{label} shrank: {o} -> {n}")
         old.close()
+        _report_lost_instruments(new_path, old_path)
 
     con.close()
 

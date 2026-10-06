@@ -44,11 +44,17 @@ from numba import njit
 # numba JIT releases the GIL, so threads scale well up to the physical core count.
 _GREEKS_WORKERS = min(os.cpu_count() or 4, 8)
 
-# Days accumulated before a single bulk INSERT into option_greeks.
-# Each INSERT carries ~0.75 s of fixed DuckDB overhead regardless of size.
-# N=20 makes variable cost (20 × 37k rows / 100k rows·s⁻¹ ≈ 7.4 s) dominate
-# fixed cost by 10×, capturing ~94% of the available throughput improvement.
+# Chunks accumulated before a single bulk INSERT into option_greeks.
+# Each INSERT carries ~0.75 s of fixed DuckDB overhead regardless of size, so
+# batching keeps variable cost dominant.
 _BATCH_DAYS = 20
+
+# Rows per streamed chunk out of _greek_pending. Bounds peak memory to roughly
+# _GREEKS_CHUNK_ROWS × _GREEKS_WORKERS × 2 rows in flight (~250k rows at the
+# default, a few tens of MB) while being large enough that per-chunk overhead and
+# the numba call are amortised. Replaces the previous per-trading-day batching,
+# which required one full scan of the pending table per day.
+_GREEKS_CHUNK_ROWS = 250_000
 
 # ---------------------------------------------------------------------------
 # numba-compiled Black-76 kernels
@@ -304,20 +310,16 @@ class GreeksCalculator:
             self.con.execute("DROP TABLE IF EXISTS _greek_pending")
             return
 
-        # Step 2: Distinct trading dates — drives per-day streaming.
-        dates = [
-            r[0]
-            for r in self.con.execute(
-                "SELECT DISTINCT DATE(ts_event) FROM _greek_pending ORDER BY 1"
-            ).fetchall()
-        ]
-
-        print(f"[greeks] Computing Greeks for {total:,} option bars across {len(dates)} days...")
+        n_chunks = max(1, -(-total // _GREEKS_CHUNK_ROWS))  # ceil
+        print(
+            f"[greeks] Computing Greeks for {total:,} option bars "
+            f"in {n_chunks} chunk(s) of up to {_GREEKS_CHUNK_ROWS:,}..."
+        )
 
         written = 0
         completed = 0
 
-        # Results accumulate here until _BATCH_DAYS days are ready, then flushed
+        # Results accumulate here until _BATCH_DAYS chunks are ready, then flushed
         # with a single bulk INSERT to amortise DuckDB's per-statement fixed overhead.
         accumulated: list[pl.DataFrame] = []
         accumulated_rows = 0
@@ -334,40 +336,52 @@ class GreeksCalculator:
             accumulated.clear()
             accumulated_rows = 0
 
-        # Pipelined parallel execution: the main thread reads each day's batch from
+        # Pipelined parallel execution: the main thread pulls fixed-size chunks from
         # DuckDB (sequential — not thread-safe) and immediately submits the numba
         # computation to the pool. Completed results are buffered; every _BATCH_DAYS
-        # days the buffer is flushed with one bulk INSERT, amortising fixed overhead.
+        # chunks the buffer is flushed with one bulk INSERT, amortising fixed overhead.
         #
         # numba @njit(nogil=True) releases the GIL so thread parallelism provides
         # near-linear speedup up to the physical core count.
+        #
+        # The chunks come from ONE streaming scan. This loop used to iterate distinct
+        # trading dates and re-query `WHERE DATE(ts_event) = ?` per date, which is a
+        # full scan of the pending table per day — DATE() wraps the column, so no
+        # index can apply. At 5,038 days over 69.8M pending rows that is ~3.5e11 row
+        # visits, and it dominated the runtime: measured at 16.5 days/min, roughly
+        # 5 hours for the full ES history. Greeks are computed per row with no
+        # cross-row dependency (see _compute_batch), so the day grouping was never
+        # needed — arbitrary chunks give the same results in a single pass.
         pending: list[tuple[object, Future]] = []
 
         def _drain_one() -> None:
             nonlocal completed, accumulated_rows
-            date_d, fut = pending.pop(0)
+            label, fut = pending.pop(0)
             result = fut.result()
             if not result.is_empty():
                 accumulated.append(result)
                 accumulated_rows += len(result)
             completed += 1
             print(
-                f"\r[greeks] {date_d}  {completed}/{len(dates)} days"
-                f"  rows={written + accumulated_rows:,}",
+                f"\r[greeks] chunk {completed}/{n_chunks}  rows={written + accumulated_rows:,}",
                 end="",
                 flush=True,
             )
             if len(accumulated) >= _BATCH_DAYS:
                 _flush()
 
+        # to_arrow_reader streams the result; memory stays bounded by the chunk size
+        # times the number of chunks in flight, not by the table size.
+        reader = self.con.execute("SELECT * FROM _greek_pending").to_arrow_reader(
+            _GREEKS_CHUNK_ROWS
+        )
+
         with ThreadPoolExecutor(max_workers=_GREEKS_WORKERS) as pool:
-            for date in dates:
-                batch_df = self.con.execute(
-                    "SELECT * FROM _greek_pending "
-                    "WHERE DATE(ts_event) = ? ORDER BY instrument_id, ts_event",
-                    [date],
-                ).pl()
-                pending.append((date, pool.submit(self._compute_batch, batch_df)))
+            for idx, arrow_batch in enumerate(reader):
+                batch_df = pl.from_arrow(arrow_batch)
+                if batch_df.is_empty():
+                    continue
+                pending.append((idx, pool.submit(self._compute_batch, batch_df)))
 
                 # Drain oldest result once the pipeline is full.
                 if len(pending) >= _GREEKS_WORKERS * 2:
@@ -377,7 +391,7 @@ class GreeksCalculator:
             while pending:
                 _drain_one()
 
-        _flush()  # write any days that didn't fill a complete batch
+        _flush()  # write any chunks that didn't fill a complete batch
         self.con.execute("DROP TABLE IF EXISTS _greek_pending")
         print(f"\n[greeks] Wrote {written:,} option_greeks rows")
 
