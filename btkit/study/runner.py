@@ -73,6 +73,7 @@ def _run_combination_worker(
     input_db_path: str,
     worker_db_path: str,
     initial_equity: float,
+    memory_limit: str | None = None,
 ) -> None:
     """
     Runs in a subprocess. Opens its own DuckDB connections (never shared).
@@ -85,7 +86,10 @@ def _run_combination_worker(
 
     defn = StrategyDefinition.model_validate(strategy_defn_dict)
 
-    with InputDatabase(input_db_path) as idb, OutputDatabase(worker_db_path) as odb:
+    with (
+        InputDatabase(input_db_path, memory_limit=memory_limit) as idb,
+        OutputDatabase(worker_db_path) as odb,
+    ):
         odb.create_schema()
         engine = BacktestEngine(
             input_db=idb,
@@ -123,7 +127,9 @@ class StudyRunner:
         max_combinations: int | None = None,
         initial_equity: float = 100_000.0,
         note: str | None = None,
+        memory_limit: str | None = None,
     ) -> None:
+        self._memory_limit = memory_limit
         self._study = study
         self._study_dir = study_dir
         self._study_yaml_text = study_yaml_text
@@ -177,6 +183,7 @@ class StudyRunner:
                         input_db_path=self._input_db_path,
                         worker_db_path=worker_db,
                         initial_equity=self._initial_equity,
+                        memory_limit=self._memory_limit,
                     )
                     futures_map[future] = combination_id
 

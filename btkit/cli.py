@@ -40,7 +40,11 @@ import typer
 
 from btkit.analysis.metrics import PostProcessor
 from btkit.backtest.engine import BacktestEngine
-from btkit.db.input_db import InputDatabase
+from btkit.db.input_db import (
+    InputDatabase,
+    describe_memory_limit,
+    resolve_memory_limit,
+)
 from btkit.db.output_db import OutputDatabase
 from btkit.pipeline.builder import DatabaseBuilder
 from btkit.pipeline.indicators import IndicatorRunner
@@ -296,6 +300,17 @@ def run(
         default=None,
         help="Free-text label stored with this run (shown in the dashboard index).",
     ),
+    memory_limit: str = typer.Option(
+        None,
+        "--memory-limit",
+        help=(
+            "DuckDB buffer-pool ceiling for query connections, e.g. '8GB'. "
+            "Falls back to BTKIT_MEMORY_LIMIT, then 4GB. Keep it well under physical "
+            "RAM: DuckDB's own default is ~80% of RAM, which lets one backtest push "
+            "the host into swap. The limit only affects whether DuckDB spills to "
+            "disk, never query results."
+        ),
+    ),
 ) -> None:
     """Run a backtest from a strategy YAML (single scalar run)."""
     typer.echo(f"Loading strategy: {strategy}")
@@ -309,7 +324,9 @@ def run(
         raise typer.Exit(code=1)
     _ensure_indicators(input_db, definition)
 
-    with InputDatabase(input_db) as idb, OutputDatabase(output_db) as odb:
+    limit, source = resolve_memory_limit(memory_limit)
+    typer.echo(describe_memory_limit(limit, source))
+    with InputDatabase(input_db, memory_limit=limit) as idb, OutputDatabase(output_db) as odb:
         odb.create_schema()
         engine = BacktestEngine(
             input_db=idb,
@@ -375,6 +392,14 @@ def pipeline(
             "spot price F when computing greeks. 0 requires an exact same-minute bar."
         ),
     ),
+    memory_limit: str = typer.Option(
+        None,
+        "--memory-limit",
+        help=(
+            "DuckDB buffer-pool ceiling for query connections, e.g. '8GB'. "
+            "Falls back to BTKIT_MEMORY_LIMIT, then 4GB."
+        ),
+    ),
 ) -> None:
     """Full pipeline: build (if needed) → run → analyze."""
     db_file = Path(db_path)
@@ -401,7 +426,9 @@ def pipeline(
         raise typer.Exit(code=1)
     _ensure_indicators(db_path, definition)
 
-    with InputDatabase(db_path) as idb, OutputDatabase(output_db) as odb:
+    limit, source = resolve_memory_limit(memory_limit)
+    typer.echo(describe_memory_limit(limit, source))
+    with InputDatabase(db_path, memory_limit=limit) as idb, OutputDatabase(output_db) as odb:
         odb.create_schema()
         engine = BacktestEngine(
             input_db=idb,
@@ -533,6 +560,17 @@ def study_run(
         default=None,
         help="Free-text label stored with this study (shown in the dashboard index).",
     ),
+    memory_limit: str = typer.Option(
+        None,
+        "--memory-limit",
+        help=(
+            "DuckDB buffer-pool ceiling for query connections, e.g. '8GB'. "
+            "Falls back to BTKIT_MEMORY_LIMIT, then 4GB. Keep it well under physical "
+            "RAM: DuckDB's own default is ~80% of RAM, which lets one backtest push "
+            "the host into swap. The limit only affects whether DuckDB spills to "
+            "disk, never query results."
+        ),
+    ),
 ) -> None:
     """
     Run a study: expand parameterized strategies and execute all combinations
@@ -547,11 +585,14 @@ def study_run(
 
     typer.echo(f"Starting study '{study_def.name}'")
 
+    limit, source = resolve_memory_limit(memory_limit)
+    typer.echo(describe_memory_limit(limit, source))
     runner = StudyRunner(
         study=study_def,
         study_dir=study_dir,
         study_yaml_text=study_yaml_text,
         input_db_path=input_db,
+        memory_limit=limit,
         output_db_path=output_db,
         max_workers=workers,
         max_combinations=max_combinations,

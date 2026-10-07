@@ -199,11 +199,46 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY row_id ORDER BY time_diff, strike_diff) 
 """
 
 
-# Default DuckDB buffer-pool ceiling for read-only query connections. Override per
-# instance or with BTKIT_MEMORY_LIMIT. Chosen to leave headroom on a 16-17 GB host
-# while being ample for the engine's largest pre-load (a few hundred MB of leg bars).
-_DEFAULT_QUERY_MEMORY_LIMIT = "4GB"
+# Fallback DuckDB buffer-pool ceiling for read-only query connections, used when the
+# caller names no limit and BTKIT_MEMORY_LIMIT is unset. Chosen to leave headroom on a
+# 16-17 GB host while being ample for the engine's largest pre-load (a few hundred MB
+# of leg bars).
+DEFAULT_QUERY_MEMORY_LIMIT = "4GB"
 _QUERY_TEMP_DIR = "/tmp/duckdb_query_tmp"
+
+# Where the active limit came from, for the message the CLI prints at run start.
+MEMORY_LIMIT_ARGUMENT = "argument"
+MEMORY_LIMIT_ENV = "BTKIT_MEMORY_LIMIT"
+MEMORY_LIMIT_DEFAULT = "default"
+
+
+def resolve_memory_limit(memory_limit: str | None = None) -> tuple[str, str]:
+    """Return (limit, source) for a query connection's buffer-pool ceiling.
+
+    Precedence: explicit argument, then the BTKIT_MEMORY_LIMIT environment variable,
+    then DEFAULT_QUERY_MEMORY_LIMIT. The source is returned so callers can say which
+    one applied — a silent fallback to the default is exactly the thing worth
+    surfacing, because a too-small ceiling shows up as a slow run rather than an error.
+    """
+    if memory_limit:
+        return memory_limit, MEMORY_LIMIT_ARGUMENT
+    from_env = os.environ.get(MEMORY_LIMIT_ENV)
+    if from_env:
+        return from_env, MEMORY_LIMIT_ENV
+    return DEFAULT_QUERY_MEMORY_LIMIT, MEMORY_LIMIT_DEFAULT
+
+
+def describe_memory_limit(limit: str, source: str) -> str:
+    """One-line, console-ready description of the active limit and its origin."""
+    if source == MEMORY_LIMIT_DEFAULT:
+        return (
+            f"[memory] DuckDB query memory limit: {limit} "
+            f"(DEFAULT — no --memory-limit given and {MEMORY_LIMIT_ENV} unset). "
+            f"Raise it for a large host, or lower it if the machine starts swapping."
+        )
+    if source == MEMORY_LIMIT_ENV:
+        return f"[memory] DuckDB query memory limit: {limit} (from {MEMORY_LIMIT_ENV})"
+    return f"[memory] DuckDB query memory limit: {limit} (from --memory-limit)"
 
 
 class InputDatabase:
@@ -216,7 +251,7 @@ class InputDatabase:
         # UTC so any date-bucketing done in SQL agrees with Python-side bucketing.
         self._con.execute("SET TimeZone='UTC'")
 
-        # Cap DuckDB's buffer pool. Left at the default (~80% of physical RAM) a
+        # Cap DuckDB's buffer pool. Left at its own default (~80% of physical RAM) a
         # single backtest can drive the host into swap: on a 17 GB machine, replaying
         # stored backtests pushed swap to 5.3 GB of 6.1 GB and one backtest consumed
         # 21 of 31 elapsed minutes, almost all of it thrashing rather than computing.
@@ -224,8 +259,8 @@ class InputDatabase:
         #
         # Query *results* are unaffected — the limit only changes whether DuckDB
         # spills — so this cannot alter backtest output, only its memory profile.
-        limit = memory_limit or os.environ.get("BTKIT_MEMORY_LIMIT", _DEFAULT_QUERY_MEMORY_LIMIT)
-        self._con.execute(f"SET memory_limit='{limit}'")
+        self.memory_limit, self.memory_limit_source = resolve_memory_limit(memory_limit)
+        self._con.execute(f"SET memory_limit='{self.memory_limit}'")
         self._con.execute(f"SET temp_directory='{_QUERY_TEMP_DIR}'")
 
     # ------------------------------------------------------------------
