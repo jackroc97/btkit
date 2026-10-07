@@ -183,6 +183,10 @@ class IndicatorRunner:
         self.script_source: str = self.script_path.read_text()
         self._module: ModuleType = self._load_module()
         self._wants_context: bool = self._detect_context_param()
+        # Columns that yielded no non-null values, accumulated across run() calls.
+        # The builder reports these after the indicator phase — see
+        # _write_indicator_bars for why an all-null column matters.
+        self.null_columns: list[str] = []
 
     def run(self, underlying_id: int) -> None:
         """
@@ -401,6 +405,14 @@ class IndicatorRunner:
         ).filter(pl.col("value").is_not_null())
 
         if tall.is_empty():
+            # An all-null column is how an unmet dependency presents itself. iv_rank.py
+            # reads the `ves` indicator out of indicator_bars rather than deriving it
+            # from the bars it is handed, and emits nulls rather than raising when ves
+            # is absent — so passing --indicators in `ls` order (iv_rank.py 4th, ves.py
+            # 8th) silently produced 1.1% of the expected iv_rank rows. Nothing failed;
+            # strategies gating on `iv_rank > 30` simply stopped finding entries.
+            # Say so, so the next build cannot hide it.
+            self.null_columns.append(col_name)
             return
 
         self.con.register("_indicator_batch", tall)

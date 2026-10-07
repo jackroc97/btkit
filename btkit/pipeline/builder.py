@@ -600,6 +600,19 @@ class DatabaseBuilder:
                     runner = IndicatorRunner(con, script_path)
                     for (underlying_id,) in underlyings:
                         runner.run(underlying_id)
+                    # A column that produced no non-null values anywhere is almost
+                    # always an unmet dependency between scripts: iv_rank.py reads the
+                    # `ves` indicator out of indicator_bars, so running it before
+                    # ves.py yields nulls without failing. Report it rather than
+                    # leaving a silently empty indicator behind.
+                    empty = sorted(set(runner.null_columns))
+                    if empty:
+                        print(
+                            f"[indicators] WARNING {Path(script_path).name}: "
+                            f"{len(empty)} column(s) produced no values: "
+                            f"{', '.join(empty)}. If the script depends on another "
+                            f"indicator, pass that one earlier in --indicators."
+                        )
         finally:
             con.close()
 
