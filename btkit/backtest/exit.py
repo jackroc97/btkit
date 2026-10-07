@@ -265,18 +265,23 @@ class ExitScanner:
             sign = 1.0 if leg.action == "sell_to_open" else -1.0
             signed_qty = sign * float(leg.quantity)
 
+            # Joined on contract_id, not instrument_id. The publisher recycles
+            # instrument_id — 23% of contracts share one with another contract — so an
+            # instrument_id join can pull a different contract's bars into a leg
+            # whenever a cohort's window spans a reassignment. contract_id is derived
+            # from (symbol, expiration) and is stable, which makes the join exact.
             leg_map = entries.select(
                 [
                     "entry_id",
                     "entry_time",
-                    pl.col(f"leg_{leg.name}_instrument_id").alias("instrument_id"),
+                    pl.col(f"leg_{leg.name}_contract_id").alias("contract_id"),
                 ]
             )
 
             # Build the per-leg select expression list
             bar_exprs: list[pl.Expr] = [
                 pl.col("ts_event"),
-                pl.col("instrument_id"),
+                pl.col("contract_id"),
                 (pl.col("close") * pl.lit(signed_qty)).alias(f"_leg_{leg.name}_mark_close"),
                 (pl.col("open") * pl.lit(signed_qty)).alias(f"_leg_{leg.name}_mark_open"),
             ]
@@ -288,7 +293,7 @@ class ExitScanner:
                     ((pl.col("high") - pl.col("low")) / 2.0).alias(f"_leg_{leg.name}_spread_half")
                 )
 
-            src_cols = ["ts_event", "instrument_id", "open", "close"]
+            src_cols = ["ts_event", "contract_id", "open", "close"]
             if need_volume:
                 src_cols.append("volume")
             if need_spread:
@@ -296,7 +301,7 @@ class ExitScanner:
 
             leg_bars = (
                 option_bars.select(src_cols)
-                .join(leg_map, on="instrument_id", how="inner")
+                .join(leg_map, on="contract_id", how="inner")
                 .filter(pl.col("ts_event") > pl.col("entry_time"))
                 .select(["entry_id"] + [e for e in bar_exprs if not isinstance(e, str)])
             )
@@ -554,18 +559,20 @@ class ExitScanner:
                     for leg in self.trade.legs:
                         sign = 1.0 if leg.action == "sell_to_open" else -1.0
                         signed_qty = sign * float(leg.quantity)
-                        col_name = f"leg_{leg.name}_instrument_id"
-                        if col_name not in entries.columns:
+                        # The DB query above is filtered by instrument_id (that is the
+                        # column option_greeks is indexed on), but the join back to
+                        # legs is on contract_id so a recycled id cannot attach
+                        # another contract's vega to this leg.
+                        contract_col = f"leg_{leg.name}_contract_id"
+                        if contract_col not in entries.columns:
                             continue
                         leg_instr_map = entries.select(
                             [
                                 "entry_id",
-                                pl.col(col_name).alias("instrument_id"),
+                                pl.col(contract_col).alias("contract_id"),
                             ]
                         )
-                        part = greeks_df.join(
-                            leg_instr_map, on="instrument_id", how="inner"
-                        ).select(
+                        part = greeks_df.join(leg_instr_map, on="contract_id", how="inner").select(
                             [
                                 "entry_id",
                                 "ts_event",
@@ -1086,7 +1093,7 @@ class ExitScanner:
             leg_map = entries.select(
                 [
                     "entry_id",
-                    pl.col(f"leg_{leg.name}_instrument_id").alias("instrument_id"),
+                    pl.col(f"leg_{leg.name}_contract_id").alias("contract_id"),
                     pl.col(f"leg_{leg.name}_expiration").alias("leg_expiration"),
                 ]
             )
@@ -1096,8 +1103,8 @@ class ExitScanner:
             # instrument IDs can be recycled for new contracts after expiry, and
             # without this guard those post-expiry bars corrupt the fill price.
             leg_bars = (
-                option_bars.select(["ts_event", "instrument_id", "close"])
-                .join(leg_map, on="instrument_id", how="inner")
+                option_bars.select(["ts_event", "contract_id", "close"])
+                .join(leg_map, on="contract_id", how="inner")
                 .join(entry_lookup, on="entry_id", how="inner")
                 .filter(
                     pl.col("ts_event").dt.convert_time_zone(tz_str).dt.date()
@@ -1204,6 +1211,7 @@ class ExitScanner:
         leg_ctx = entries.select(
             [
                 "entry_id",
+                pl.col(f"leg_{leg.name}_contract_id").alias("_contract_id"),
                 pl.col(f"leg_{leg.name}_instrument_id").alias("_instr_id"),
                 pl.col(f"leg_{leg.name}_expiration").alias("_leg_exp"),
                 pl.col(f"leg_{leg.name}_strike_price").alias("_strike"),
@@ -1217,13 +1225,13 @@ class ExitScanner:
             leg_ctx, on="entry_id", how="inner"
         )
 
-        instr_ids = sl_ctx["_instr_id"].unique().to_list()
+        contract_ids = sl_ctx["_contract_id"].unique().to_list()
 
         # Bars for the long leg, joined with SL context, filtered to continuation window
         cont_bars = (
-            option_bars.filter(pl.col("instrument_id").is_in(instr_ids))
-            .select(["ts_event", "instrument_id", "close"])
-            .join(sl_ctx.rename({"_instr_id": "instrument_id"}), on="instrument_id", how="inner")
+            option_bars.filter(pl.col("contract_id").is_in(contract_ids))
+            .select(["ts_event", "contract_id", "close"])
+            .join(sl_ctx.rename({"_contract_id": "contract_id"}), on="contract_id", how="inner")
             .filter(
                 (pl.col("ts_event") > pl.col("exit_time"))
                 & (pl.col("ts_event").dt.convert_time_zone(tz_str).dt.date() <= pl.col("_leg_exp"))

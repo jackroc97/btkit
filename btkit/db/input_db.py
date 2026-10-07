@@ -155,9 +155,9 @@ INPUT_SCHEMA_SQL = INPUT_TABLES_SQL + INPUT_DEFERRED_INDEXES_SQL
 # right/strike/expiration filters are pushed into `combined`).
 _TOLERANT_BUCKET_QUERY_TEMPLATE = """
 WITH combined AS (
-    SELECT og.ts_event, og.instrument_id, og.underlying_id, og.dte, og.iv, og.delta,
-           og.gamma, og.theta, og.vega, ob.strike_price, ob.expiration, ob."right",
-           ob.multiplier, ob.symbol, ob.close,
+    SELECT og.ts_event, og.instrument_id, ob.contract_id, og.underlying_id, og.dte,
+           og.iv, og.delta, og.gamma, og.theta, og.vega, ob.strike_price,
+           ob.expiration, ob."right", ob.multiplier, ob.symbol, ob.close,
            CAST(floor(epoch(og.ts_event) / ?) AS BIGINT) AS bucket
     FROM option_greeks og
     JOIN option_bars ob ON og.instrument_id = ob.instrument_id AND og.ts_event = ob.ts_event
@@ -177,7 +177,8 @@ anchor_buckets AS (
 ),
 matched AS (
     SELECT st.ts_event AS row_id, st.leg_name, c.ts_event AS _match_ts_event,
-           c.instrument_id, c.underlying_id, c.dte, c.iv, c.delta, c.gamma, c.theta,
+           c.instrument_id, c.contract_id, c.underlying_id, c.dte, c.iv, c.delta,
+           c.gamma, c.theta,
            c.vega, c.strike_price, c.expiration, c."right", c.multiplier, c.symbol,
            c.close,
            abs(epoch(c.ts_event) - epoch(st.anchor_ts_event)) AS time_diff,
@@ -190,7 +191,8 @@ matched AS (
      AND c.expiration = st.reference_expiration
      AND abs(c.strike_price - st.target_strike) <= ?
 )
-SELECT leg_name, row_id AS ts_event, _match_ts_event, instrument_id, underlying_id,
+SELECT leg_name, row_id AS ts_event, _match_ts_event, instrument_id, contract_id,
+       underlying_id,
        dte, iv, delta, gamma, theta, vega, strike_price, expiration, "right",
        multiplier, symbol, close
 FROM matched
@@ -324,7 +326,12 @@ class InputDatabase:
         """
         Batch-loads bars for a set of option instrument IDs over [start, end].
         Used by ExitScanner to load all open-position legs in a single query.
-        Returns columns: ts_event, instrument_id, open, high, low, close, volume.
+        Returns columns: ts_event, instrument_id, contract_id, open, high, low,
+        close, volume.
+
+        contract_id is carried so the exit scanner can join a leg to its bars on the
+        stable contract key rather than the publisher's recycled instrument_id — see
+        ExitScanner._compute_position_marks.
 
         Intentionally omits columns not consumed by _compute_position_marks /
         _adjust_leg_out_exits to reduce Arrow-transfer overhead. ORDER BY is
@@ -333,7 +340,7 @@ class InputDatabase:
         id_list = ", ".join(str(int(x)) for x in instrument_ids)
         return self._con.execute(
             f"""
-            SELECT ts_event, instrument_id, open, high, low, close, volume
+            SELECT ts_event, instrument_id, contract_id, open, high, low, close, volume
             FROM option_bars
             WHERE instrument_id IN ({id_list})
               AND ts_event >= ? AND ts_event <= ?
@@ -350,12 +357,12 @@ class InputDatabase:
         """
         Batch-loads greeks for a set of option instrument IDs over [start, end].
         Used by ExitScanner to compute spread net vega for vega_exit conditions.
-        Returns columns: ts_event, instrument_id, vega.
+        Returns columns: ts_event, instrument_id, contract_id, vega.
         """
         id_list = ", ".join(str(int(x)) for x in instrument_ids)
         return self._con.execute(
             f"""
-            SELECT ts_event, instrument_id, vega
+            SELECT ts_event, instrument_id, contract_id, vega
             FROM option_greeks
             WHERE instrument_id IN ({id_list})
               AND ts_event >= ? AND ts_event <= ?
@@ -638,7 +645,7 @@ class InputDatabase:
         try:
             combined = self._con.execute(
                 """
-                SELECT g.ts_event, g.instrument_id, g.underlying_id,
+                SELECT g.ts_event, g.instrument_id, ob.contract_id, g.underlying_id,
                        g.dte, g.iv, g.delta, g.gamma, g.theta, g.vega,
                        ob.strike_price, ob.expiration, ob."right", ob.multiplier,
                        ob.symbol, ob.close
@@ -696,6 +703,7 @@ class InputDatabase:
                 "leg_name",
                 "ts_event",
                 "instrument_id",
+                "contract_id",
                 "underlying_id",
                 "dte",
                 "iv",
@@ -800,6 +808,7 @@ class InputDatabase:
                        st.ts_event,
                        og.ts_event AS _match_ts_event,
                        og.instrument_id,
+                       ob.contract_id,
                        CAST(og.underlying_id AS BIGINT) AS underlying_id,
                        og.dte, og.iv, og.delta, og.gamma, og.theta, og.vega,
                        ob.strike_price, ob.expiration, ob."right", ob.multiplier,
@@ -975,6 +984,7 @@ class InputDatabase:
                 "ts_event",
                 "_match_ts_event",
                 "instrument_id",
+                "contract_id",
                 "underlying_id",
                 "dte",
                 "iv",

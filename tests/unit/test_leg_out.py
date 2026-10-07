@@ -80,6 +80,8 @@ class TestAdjustLegOutExits:
                 "entry_time": pl.Series([_ts(9, 45)], dtype=pl.Datetime("us", "UTC")),
                 "leg_short_put_instrument_id": pl.Series([101], dtype=pl.Int64),
                 "leg_long_put_instrument_id": pl.Series([102], dtype=pl.Int64),
+                "leg_short_put_contract_id": pl.Series([101], dtype=pl.Int64),
+                "leg_long_put_contract_id": pl.Series([102], dtype=pl.Int64),
                 "leg_short_put_expiration": pl.Series([date(2024, 1, 5)], dtype=pl.Date),
                 "leg_long_put_expiration": pl.Series([date(2024, 1, 5)], dtype=pl.Date),
             }
@@ -116,6 +118,7 @@ class TestAdjustLegOutExits:
             {
                 "ts_event": pl.Series(list(ts), dtype=pl.Datetime("us", "UTC")),
                 "instrument_id": pl.Series(list(instr), dtype=pl.Int64),
+                "contract_id": pl.Series(list(instr), dtype=pl.Int64),
                 "close": pl.Series(list(close), dtype=pl.Float64),
                 "open": pl.Series(list(close), dtype=pl.Float64),
                 "high": pl.Series(list(close), dtype=pl.Float64),
@@ -171,6 +174,8 @@ class TestAdjustLegOutExits:
                 "entry_time": pl.Series([_ts(9, 45), _ts(9, 46)], dtype=pl.Datetime("us", "UTC")),
                 "leg_short_put_instrument_id": pl.Series([101, 103], dtype=pl.Int64),
                 "leg_long_put_instrument_id": pl.Series([102, 104], dtype=pl.Int64),
+                "leg_short_put_contract_id": pl.Series([101, 103], dtype=pl.Int64),
+                "leg_long_put_contract_id": pl.Series([102, 104], dtype=pl.Int64),
                 "leg_short_put_expiration": pl.Series(
                     [date(2024, 1, 5), date(2024, 1, 5)], dtype=pl.Date
                 ),
@@ -195,6 +200,7 @@ class TestAdjustLegOutExits:
                     dtype=pl.Datetime("us", "UTC"),
                 ),
                 "instrument_id": pl.Series([102, 102], dtype=pl.Int64),
+                "contract_id": pl.Series([102, 102], dtype=pl.Int64),
                 "close": pl.Series([0.15, 0.05], dtype=pl.Float64),
                 "open": pl.Series([0.15, 0.05], dtype=pl.Float64),
                 "high": pl.Series([0.15, 0.05], dtype=pl.Float64),
@@ -245,6 +251,7 @@ class TestAdjustLegOutExits:
                 "entry_id": pl.Series([1], dtype=pl.UInt32),
                 "entry_time": pl.Series([_ts(9, 45)], dtype=pl.Datetime("us", "UTC")),
                 "leg_short_put_instrument_id": pl.Series([101], dtype=pl.Int64),
+                "leg_short_put_contract_id": pl.Series([101], dtype=pl.Int64),
                 "leg_short_put_expiration": pl.Series([date(2024, 1, 5)], dtype=pl.Date),
             }
         )
@@ -277,6 +284,7 @@ class TestAdjustLegOutExits:
                     dtype=pl.Datetime("us", "UTC"),
                 ),
                 "instrument_id": pl.Series([102, 102, 102], dtype=pl.Int64),
+                "contract_id": pl.Series([102, 102, 102], dtype=pl.Int64),
                 "close": pl.Series([0.99, 0.15, 0.05], dtype=pl.Float64),
                 "open": pl.Series([0.99, 0.15, 0.05], dtype=pl.Float64),
                 "high": pl.Series([0.99, 0.15, 0.05], dtype=pl.Float64),
@@ -342,6 +350,8 @@ def _entries_for_volume_test() -> pl.DataFrame:
             "entry_time": pl.Series([_ts(9, 45)], dtype=pl.Datetime("us", "UTC")),
             "leg_short_put_instrument_id": pl.Series([101], dtype=pl.Int64),
             "leg_long_put_instrument_id": pl.Series([102], dtype=pl.Int64),
+            "leg_short_put_contract_id": pl.Series([101], dtype=pl.Int64),
+            "leg_long_put_contract_id": pl.Series([102], dtype=pl.Int64),
             "leg_short_put_expiration": pl.Series([date(2024, 1, 5)], dtype=pl.Date),
             "leg_long_put_expiration": pl.Series([date(2024, 1, 5)], dtype=pl.Date),
         }
@@ -354,6 +364,7 @@ def _option_bars_with_volumes(short_volume: int, long_volume: int) -> pl.DataFra
         {
             "ts_event": pl.Series([_ts(10, 0), _ts(10, 0)], dtype=pl.Datetime("us", "UTC")),
             "instrument_id": pl.Series([101, 102], dtype=pl.Int64),
+            "contract_id": pl.Series([101, 102], dtype=pl.Int64),
             "open": pl.Series([0.25, 0.15], dtype=pl.Float64),
             "high": pl.Series([0.25, 0.15], dtype=pl.Float64),
             "low": pl.Series([0.25, 0.15], dtype=pl.Float64),
@@ -395,7 +406,8 @@ class TestVolumeGateLegOut:
         bars = pl.DataFrame(
             {
                 "ts_event": pl.Series([_ts(10, 0)], dtype=pl.Datetime("us", "UTC")),
-                "instrument_id": pl.Series([101], dtype=pl.Int64),  # short leg only
+                "instrument_id": pl.Series([101], dtype=pl.Int64),
+                "contract_id": pl.Series([101], dtype=pl.Int64),  # short leg only
                 "open": pl.Series([0.25], dtype=pl.Float64),
                 "high": pl.Series([0.25], dtype=pl.Float64),
                 "low": pl.Series([0.25], dtype=pl.Float64),
