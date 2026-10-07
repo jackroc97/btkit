@@ -92,6 +92,56 @@ def _report_lost_instruments(new_path: str, old_path: str) -> None:
     probe.close()
 
 
+def _check_indicator_completeness(old, new, failures: list[str]) -> None:
+    """Compare per-indicator row counts and fail on a large shortfall.
+
+    This check exists because its absence let a broken database pass. iv_rank.py
+    reads the `ves` indicator out of indicator_bars, so running it before ves.py
+    emits all-null columns without failing: the rebuild got 1.1% of its iv_rank rows
+    and 6.5% of iv_30d. Every integrity invariant still passed, the build printed
+    "Build complete", and the defect only surfaced when strategies gating on
+    `iv_rank > 30` stopped finding entries entirely.
+
+    The baseline is the old side's DISTINCT (indicator_id, ts_event) count, not its
+    raw row count. The old database duplicated indicator rows up to 32x — its
+    monthly_vwap holds 13.6M rows against only 8.2M underlying bars — so comparing
+    raw counts flags every deduplicated indicator as a 57% shortfall and buries the
+    one that is genuinely broken.
+
+    A shortfall below 90% of the old distinct count is treated as a failure;
+    indicators present only in the new database are reported but not failed, since
+    adding one is a legitimate change.
+    """
+    print("\n  Indicator completeness (new vs old row counts):")
+    distinct_sql = (
+        "SELECT d.name, count(DISTINCT (b.indicator_id, b.ts_event)) "
+        "FROM indicator_definition d "
+        "LEFT JOIN indicator_bars b ON b.indicator_id = d.id GROUP BY 1"
+    )
+    old_counts = dict(old.execute(distinct_sql).fetchall())
+    new_counts = dict(new.execute(distinct_sql).fetchall())
+    short = []
+    for name in sorted(old_counts):
+        o, n = old_counts[name], new_counts.get(name, 0)
+        pct = (100.0 * n / o) if o else 100.0
+        if pct < 90.0:
+            short.append((name, o, n, pct))
+    missing_names = sorted(set(old_counts) - set(new_counts))
+    added = sorted(set(new_counts) - set(old_counts))
+
+    if not short and not missing_names:
+        print(f"    [PASS] all {len(old_counts)} indicators within 10% of the old counts")
+    else:
+        for name, o, n, pct in short:
+            print(f"    [FAIL] {name:20} old={o:>12,} new={n:>12,}  ({pct:.1f}%)")
+            failures.append(f"indicator {name}: {pct:.1f}% of old row count")
+        for name in missing_names:
+            print(f"    [FAIL] {name:20} absent from the new database")
+            failures.append(f"indicator {name} missing")
+    if added:
+        print(f"    [INFO] only in new: {', '.join(added)}")
+
+
 def verify(new_path: str, old_path: str | None) -> int:
     failures: list[str] = []
     con = duckdb.connect(new_path, read_only=True)
@@ -234,6 +284,7 @@ def verify(new_path: str, old_path: str | None) -> int:
             print(f"  {label:28} old={o}  new={n}{flag}")
             if "distinct" in label and n < o:
                 failures.append(f"{label} shrank: {o} -> {n}")
+        _check_indicator_completeness(old, con, failures)
         old.close()
         _report_lost_instruments(new_path, old_path)
 

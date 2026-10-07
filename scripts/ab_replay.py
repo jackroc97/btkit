@@ -199,11 +199,18 @@ def cmd_run(args) -> int:
         sample = sample[: args.limit]
 
     manifest_path = out_dir / "manifest.json"
-    manifest: list[dict] = []
+    # Load any existing manifest rather than starting empty. The control group is a
+    # separate `run` against the same out-dir, and overwriting dropped the main
+    # sample's tier labels so `compare` printed every row as "?".
+    manifest: list[dict] = json.loads(manifest_path.read_text()) if manifest_path.exists() else []
+    already = {e["id"] for e in manifest}
     yaml_dir = out_dir / "strategies"
     yaml_dir.mkdir(exist_ok=True)
 
     for i, b in enumerate(sample, 1):
+        if b["id"] in already:
+            print(f"[{i}/{len(sample)}] bt{b['id']} already replayed, skipping")
+            continue
         strategy_file = yaml_dir / f"bt{b['id']}.yaml"
         strategy_file.write_text(_to_strategy_yaml(b["params"]))
         entry = {"id": b["id"], "tier": b["tier"], "name": b["name"], "sides": {}}
